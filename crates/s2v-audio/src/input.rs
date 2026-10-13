@@ -53,8 +53,19 @@ pub fn read_mono_48k(path: &Path) -> Result<Vec<f32>, InputError> {
     if rate == WORK_SAMPLE_RATE {
         return Ok(samples);
     }
-    resample_mono(&samples, rate, WORK_SAMPLE_RATE)
-        .map_err(|e| InputError::BadFormat(format!("リサンプルできません: {e}")))
+    let out = resample_mono(&samples, rate, WORK_SAMPLE_RATE)
+        .map_err(|e| InputError::BadFormat(format!("リサンプルできません: {e}")))?;
+    if out.is_empty() {
+        return Err(InputError::BadFormat(
+            "音声が短すぎます（48kHz に変換すると空になります）".to_string(),
+        ));
+    }
+    if out.iter().any(|s| !s.is_finite()) {
+        return Err(InputError::BadFormat(
+            "リサンプル結果に非有限の値(NaN/Inf)を含みます".to_string(),
+        ));
+    }
+    Ok(out)
 }
 
 fn read_wav(path: &Path) -> Result<(Vec<f32>, u32), InputError> {
@@ -308,5 +319,67 @@ mod tests {
         assert!(st.success());
         let got = read_mono_48k(&flac).unwrap();
         assert!((got.len() as i64 - 24_000).abs() <= 48);
+    }
+
+    #[test]
+    fn too_short_after_resampling_is_bad_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_int(tmp.path(), "one.wav", 16, 192_000, 1, &[0.5]);
+        match read_mono_48k(&p) {
+            Err(InputError::BadFormat(m)) => assert!(m.contains("短すぎ"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    /// STREAMINFO だけを持つ最小の FLAC バイト列を作る。
+    fn flac_streaminfo(rate: u32, channels: u32, bits: u32) -> Vec<u8> {
+        let mut v = b"fLaC".to_vec();
+        v.extend([0x80, 0, 0, 34]);
+        v.extend(4096u16.to_be_bytes());
+        v.extend(4096u16.to_be_bytes());
+        v.extend([0u8; 6]);
+        let packed: u64 = ((rate as u64 & 0xF_FFFF) << 44)
+            | (((channels as u64 - 1) & 0x7) << 41)
+            | (((bits as u64).wrapping_sub(1) & 0x1F) << 36);
+        v.extend(packed.to_be_bytes());
+        v.extend([0u8; 16]);
+        v
+    }
+
+    fn write_bytes(dir: &Path, name: &str, bytes: &[u8]) -> PathBuf {
+        let path = dir.join(name);
+        std::fs::write(&path, bytes).unwrap();
+        path
+    }
+
+    #[test]
+    fn truncated_flac_is_bad_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_bytes(tmp.path(), "garbage.flac", b"fLaC garbage");
+        assert!(matches!(read_mono_48k(&p), Err(InputError::BadFormat(_))));
+        let p = write_bytes(
+            tmp.path(),
+            "trunc.flac",
+            &flac_streaminfo(48_000, 1, 16)[..20],
+        );
+        assert!(matches!(read_mono_48k(&p), Err(InputError::BadFormat(_))));
+    }
+
+    #[test]
+    fn stereo_flac_is_bad_format() {
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_bytes(tmp.path(), "st.flac", &flac_streaminfo(48_000, 2, 16));
+        match read_mono_48k(&p) {
+            Err(InputError::BadFormat(m)) => assert!(m.contains("モノラル"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn flac_with_zero_sample_rate_is_bad_format() {
+        // claxon がヘッダ段階で拒否する。ビット深度は 5bit フィールドが 1..=32 しか表せないため到達不能。
+        let tmp = tempfile::tempdir().unwrap();
+        let p = write_bytes(tmp.path(), "r0.flac", &flac_streaminfo(0, 1, 16));
+        assert!(matches!(read_mono_48k(&p), Err(InputError::BadFormat(_))));
     }
 }
