@@ -101,16 +101,22 @@ pub struct GainDecision {
     pub clamped: bool,
 }
 
-/// `measured_lufs` は有限値であること。呼び出し側は `Unmeasurable` を先に弾くため、
-/// NaN/inf は渡されない(NaN に `clamp` を使うと NaN のままになる)。
-pub fn decide_gain(measured_lufs: f64, cfg: &NormalizeConfig) -> GainDecision {
+/// `Loudness::Lufs` から取り出した値を渡す。`measured_lufs` や設定の上限が非有限なら
+/// `None`(呼び出し側は「測定不能」として扱う)。`Some` の値は常に有限。
+pub fn decide_gain(measured_lufs: f64, cfg: &NormalizeConfig) -> Option<GainDecision> {
+    if !(measured_lufs.is_finite() && cfg.max_boost_db.is_finite() && cfg.max_cut_db.is_finite()) {
+        return None;
+    }
     let requested = cfg.target_lufs - measured_lufs;
     let applied = requested.clamp(-cfg.max_cut_db, cfg.max_boost_db);
-    GainDecision {
+    if !(requested.is_finite() && applied.is_finite()) {
+        return None;
+    }
+    Some(GainDecision {
         requested_db: requested,
         applied_db: applied,
         clamped: applied != requested,
-    }
+    })
 }
 
 /// 1つの固定ゲインを掛ける(圧縮や自動ゲイン制御はしない)。
@@ -209,7 +215,7 @@ mod tests {
         let cfg = s2v_core::NormalizeConfig::default();
         for amp in [0.01, 0.1] {
             let mut x = sine(997.0, amp, 96_000);
-            let g = decide_gain(lufs(measure_mono(&x)), &cfg);
+            let g = decide_gain(lufs(measure_mono(&x)), &cfg).unwrap();
             apply_gain_db(&mut x, g.applied_db);
             assert!((lufs(measure_mono(&x)) + 23.0).abs() < 0.05, "{amp}");
         }
@@ -231,7 +237,7 @@ mod tests {
     #[test]
     fn gain_is_clamped_and_recorded() {
         let cfg = s2v_core::NormalizeConfig::default();
-        let g = decide_gain(-31.0, &cfg);
+        let g = decide_gain(-31.0, &cfg).unwrap();
         assert_eq!(
             g,
             GainDecision {
@@ -240,7 +246,7 @@ mod tests {
                 clamped: false
             }
         );
-        let g = decide_gain(-55.0, &cfg);
+        let g = decide_gain(-55.0, &cfg).unwrap();
         assert_eq!(
             g,
             GainDecision {
@@ -249,7 +255,7 @@ mod tests {
                 clamped: true
             }
         );
-        let g = decide_gain(5.0, &cfg);
+        let g = decide_gain(5.0, &cfg).unwrap();
         assert_eq!(
             g,
             GainDecision {
@@ -308,5 +314,34 @@ mod tests {
         apply_edge_fades(&mut one);
         apply_gain_db(&mut one, 6.0);
         assert!(one[0].is_finite());
+    }
+
+    #[test]
+    fn non_finite_inputs_give_no_gain_decision() {
+        let cfg = s2v_core::NormalizeConfig::default();
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert_eq!(decide_gain(v, &cfg), None, "{v}");
+        }
+        let mut bad = cfg.clone();
+        bad.max_boost_db = f64::NAN;
+        assert_eq!(decide_gain(-31.0, &bad), None);
+        let mut bad = cfg.clone();
+        bad.max_cut_db = f64::INFINITY;
+        assert_eq!(decide_gain(-31.0, &bad), None);
+        let g = decide_gain(-31.0, &cfg).unwrap();
+        assert!(g.requested_db.is_finite() && g.applied_db.is_finite());
+    }
+
+    #[test]
+    fn tiny_fades_have_exact_values_and_no_double_fade() {
+        let mut a = [1.0f32; 2];
+        apply_edge_fades(&mut a);
+        assert_eq!(a, [0.0, 0.0]);
+        let mut b = [1.0f32; 3];
+        apply_edge_fades(&mut b);
+        assert_eq!(b, [0.0, 1.0, 0.0]);
+        let mut c = [1.0f32; 4];
+        apply_edge_fades(&mut c);
+        assert_eq!(c, [0.0, 0.5, 0.5, 0.0]);
     }
 }
