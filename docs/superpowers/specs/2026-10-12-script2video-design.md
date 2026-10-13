@@ -113,7 +113,7 @@ Cargo ワークスペース。
 - `cursor`: ここまでに置いた全台詞の終了時刻の最大値(後退しない)。
 
 - 通常の台詞は `cursor + 無音` で開始する。無音は、話者が同じなら `@pause sentence`、交替なら `@pause cast`、シーンの先頭なら `@pause paragraph` とする(Script2Voice と同じ)。
-- `overlap=N` の台詞は `last_line_end - N` で開始し、無音は入れない。`last_line_end - N < 0` ならエラーにして 0 に丸める。
+- `overlap=N` の台詞は `last_line_end - N` で開始し、無音は入れない。`last_line_end - N < 0` なら警告して 0 に丸める(終了コード 1)。
 - `at=台詞ID+N` の台詞は、参照した台詞の開始時刻+N で開始する。参照先が不足していた場合、仮の無音の長さを基準にする(§5.6)。
 - 台詞を置いたあと、`cursor` は `max(それまでの cursor, その台詞の終了時刻)` に更新する(後退しない)。
 - `#pause N` は `cursor` を N ms進める。

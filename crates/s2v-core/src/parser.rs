@@ -239,6 +239,15 @@ impl ScriptParser {
             self.warn_non_finite(line_no, &[key.to_string()]);
             return;
         }
+        if val < 0.0 {
+            self.warnings.push(ParseWarning {
+                line_no,
+                message: format!(
+                    "@pause の「{key}」に負の値は指定できません（この指定は無視されます）"
+                ),
+            });
+            return;
+        }
         match key {
             "sentence" | "sentens" => self.pause_config.sentence_ms = val,
             "cast" => self.pause_config.cast_ms = val,
@@ -1427,6 +1436,29 @@ A:開始は'13:00|じゅうさんじ'です
         let w = parser.warnings();
         assert_eq!(w.len(), 1, "{w:?}");
         assert_eq!(w[0].line_no, 2);
+    }
+
+    #[test]
+    fn negative_pause_value_is_ignored_with_warning() {
+        let src = "@pause
+sentence -100
+cast 300
+paragraph -1
+@scene s
+@cast
+A:A
+@script
+A:x
+";
+        let mut parser = ScriptParser::new();
+        let scenes = parser.parse_str(src).unwrap();
+        let d = PauseConfig::default();
+        assert_eq!(scenes[0].pause_config.sentence_ms, d.sentence_ms);
+        assert_eq!(scenes[0].pause_config.paragraph_ms, d.paragraph_ms);
+        assert_eq!(scenes[0].pause_config.cast_ms, 300.0);
+        let w = parser.warnings();
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert_eq!((w[0].line_no, w[1].line_no), (2, 4));
     }
 
     // ---- s2v-18b.4: @asset の bgm_dir / se_dir ----

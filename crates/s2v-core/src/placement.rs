@@ -227,6 +227,8 @@ pub fn place(
                         s.pause_total = s.pause_total.saturating_add(n);
                     }
                 }
+                // 続く n 個の台詞のうち最初の 1 つは通常の規則(自身の overlap/at を含む)で置く。
+                // 残りの n-1 個は最初の台詞と同じ開始時刻に置き、自身の overlap/at は無視する。
                 ScriptCommand::Parallel(n) => {
                     parallel_left = *n;
                     parallel_anchor = None;
@@ -236,6 +238,8 @@ pub fn place(
                     start: cursor,
                 }),
                 ScriptCommand::BgmStop => p.events.push(PlacedEvent::BgmStop { start: cursor }),
+                // 位置指定のない #se は cursor に置く。#se は「ここまでに置いた全台詞の終わり」
+                // (overlap で重ねた台詞も含む。§2.7 の現在位置)に鳴らすため、last_end ではない。
                 ScriptCommand::Se {
                     path,
                     anchor,
@@ -265,6 +269,11 @@ pub fn place(
                     first_in_scene = true;
                 }
                 let (len, missing) = match sources.get(&id) {
+                    Some(LineSource::Present { len }) if *len < 0 => {
+                        p.errors
+                            .push(format!("台詞 {} の音声の長さが負です", id.display()));
+                        (0, None)
+                    }
                     Some(LineSource::Present { len }) => (*len, None),
                     Some(LineSource::Missing(r)) => {
                         (placeholder_len(text, placeholder_ms_per_char), Some(*r))
@@ -274,6 +283,7 @@ pub fn place(
                         Some(MissingReason::NoFile),
                     ),
                 };
+                // 無音の長さは 0 以上に丸める(負だと時間が後退する)
                 let gap = if !any_line {
                     0
                 } else if first_in_scene {
@@ -282,7 +292,8 @@ pub fn place(
                     ms_to_samples(fi.pause.sentence_ms)
                 } else {
                     ms_to_samples(fi.pause.cast_ms)
-                };
+                }
+                .max(0);
                 let mut start = if let Some(n) = overlap_ms {
                     let s = last_end.saturating_sub(ms_to_samples(*n));
                     if s < 0 {
@@ -308,7 +319,11 @@ pub fn place(
                                 t
                             }
                         }
-                        None => cursor.saturating_add(gap),
+                        None => {
+                            p.errors
+                                .push(format!("at= の基準の台詞 L{:03} が見つかりません", r.line));
+                            cursor.saturating_add(gap)
+                        }
                     }
                 } else {
                     cursor.saturating_add(gap)
@@ -582,14 +597,16 @@ mod tests {
         assert_eq!(p.end_sample(), ms_to_samples(1000.0));
     }
 
+    fn assert_invariants(p: &Placement) {
+        assert!(p.lines.iter().all(|l| l.start >= 0 && l.start <= l.end));
+        assert!(p.scenes.iter().all(|s| s.start >= 0 && s.start <= s.end));
+        assert!(p.events.iter().all(|e| e.start() >= 0));
+        assert!(p.end_sample() >= 0);
+    }
+
     #[test]
-    fn huge_pause_overlap_and_at_values_saturate_without_panic() {
-        let src = present(&[
-            (1, 1, 1000.0),
-            (1, 2, 1000.0),
-            (1, 3, 1000.0),
-            (1, 4, 1000.0),
-        ]);
+    fn huge_pause_saturates_without_panic() {
+        let src = present(&[(1, 1, 1000.0), (1, 2, 1000.0)]);
         let s = scenes(
             "#paragraph[S01]
 #pause 1e300
@@ -598,22 +615,178 @@ mod tests {
 ",
         );
         let p = place(&flatten(&s), &src, 200);
-        assert_eq!(p.lines.len(), 2);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
         assert_eq!(p.lines[0].start, i64::MAX);
         assert_eq!(p.lines[1].start, i64::MAX);
+        assert_eq!(p.end_sample(), i64::MAX);
+        assert_invariants(&p);
+    }
+
+    #[test]
+    fn huge_overlap_warns_and_clamps_to_zero() {
+        let src = present(&[(1, 1, 1000.0), (1, 2, 1000.0)]);
         let s = scenes(
             "#paragraph[S01]
 [S01-L001] A:一
 [S01-L002] B(overlap=1e300):二
-[S01-L003] B(at=L001+9223372036854775807):三
-[S01-L004] B(at=L001-9223372036854775807):四
-#se x.wav at=L001+9223372036854775807
-#se y.wav end=L001-9223372036854775807
 ",
         );
         let p = place(&flatten(&s), &src, 200);
-        assert_eq!(p.lines.len(), 4);
+        assert_eq!(p.warnings.len(), 1, "{:?}", p.warnings);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
         assert_eq!(p.lines[1].start, 0);
-        assert!(p.lines.iter().all(|l| l.start >= 0 && l.end >= l.start));
+        assert_invariants(&p);
+    }
+
+    #[test]
+    fn huge_at_offsets_saturate_or_clamp() {
+        // 参照オフセットは u32 の範囲(約 4.29e9 ms)までしか読めない
+        let src = present(&[(1, 1, 1000.0), (1, 2, 1000.0), (1, 3, 1000.0)]);
+        let s = scenes(
+            "#paragraph[S01]
+[S01-L001] A:一
+[S01-L002] B(at=L001+4294967295):二
+#se x.wav at=L001+4294967295
+#se y.wav end=L001-4294967295
+",
+        );
+        let p = place(&flatten(&s), &src, 200);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        // 台詞の at= は負を読めない。SE y だけが 0 に丸められる
+        assert_eq!(p.warnings.len(), 1, "{:?}", p.warnings);
+        assert_eq!(p.lines[1].start, ms_to_samples(4_294_967_295.0));
+        assert_invariants(&p);
+
+        // 開始が i64::MAX 付近のとき、正のオフセットを足してもあふれず飽和する
+        let s = scenes(
+            "#paragraph[S01]
+#pause 1e300
+[S01-L001] A:一
+[S01-L002] B(at=L001+4294967295):二
+#se x.wav at=L001+4294967295
+",
+        );
+        let p = place(&flatten(&s), &src, 200);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert!(p.warnings.is_empty(), "{:?}", p.warnings);
+        assert_eq!(p.lines[1].start, i64::MAX);
+        assert_eq!(p.lines[1].end, i64::MAX);
+        assert_eq!(p.events[0].start(), i64::MAX);
+        assert_invariants(&p);
+    }
+
+    #[test]
+    fn negative_pause_config_never_moves_before_cursor() {
+        let mut s = scenes(
+            "#paragraph[S01]
+[S01-L001] A:一
+[S01-L002] A:二
+[S01-L003] B:三
+#paragraph[S02]
+[S02-L004] A:四
+",
+        );
+        s[0].pause_config = PauseConfig {
+            sentence_ms: -500.0,
+            cast_ms: -300.0,
+            paragraph_ms: -1000.0,
+        };
+        let src = present(&[
+            (1, 1, 1000.0),
+            (1, 2, 1000.0),
+            (1, 3, 1000.0),
+            (2, 4, 1000.0),
+        ]);
+        let p = place(&flatten(&s), &src, 200);
+        assert_eq!(line_ms(&p, 2), (1000.0, 2000.0));
+        assert_eq!(line_ms(&p, 3), (2000.0, 3000.0));
+        assert_eq!(line_ms(&p, 4), (3000.0, 4000.0));
+        assert_invariants(&p);
+    }
+
+    #[test]
+    fn at_to_unplaced_line_is_an_error_and_falls_back_to_normal_placement() {
+        let s = scenes(
+            "#paragraph[S01]
+[S01-L001] A:一
+[S01-L002] A(at=L009+100):二
+",
+        );
+        let src = present(&[(1, 1, 1000.0), (1, 2, 1000.0)]);
+        let p = place(&flatten(&s), &src, 200);
+        assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+        assert!(p.errors[0].contains("L009"), "{:?}", p.errors);
+        assert_eq!(line_ms(&p, 2), (1500.0, 2500.0));
+    }
+
+    #[test]
+    fn negative_length_is_an_error_and_zero_length_is_allowed() {
+        let s = scenes(
+            "#paragraph[S01]
+[S01-L001] A:一
+[S01-L002] A:二
+",
+        );
+        let mut src = HashMap::new();
+        src.insert(
+            LineId { scene: 1, line: 1 },
+            LineSource::Present { len: -48_000 },
+        );
+        src.insert(
+            LineId { scene: 1, line: 2 },
+            LineSource::Present { len: 1000 },
+        );
+        let p = place(&flatten(&s), &src, 200);
+        assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+        assert_eq!(line_ms(&p, 1), (0.0, 0.0));
+        assert_eq!(
+            (p.lines[1].start, p.lines[1].end),
+            (ms_to_samples(500.0), ms_to_samples(500.0) + 1000)
+        );
+        assert_invariants(&p);
+
+        let src = present(&[(1, 1, 0.0), (1, 2, 1000.0)]);
+        let p = place(&flatten(&s), &src, 200);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(line_ms(&p, 1), (0.0, 0.0));
+        // cursor は 0 のまま。次の台詞は同じ話者の間(500ms)だけ後ろ
+        assert_eq!(line_ms(&p, 2).0, 500.0);
+    }
+
+    #[test]
+    fn parallel_follower_ignores_its_own_at_and_overlap() {
+        let s = scenes(
+            "#paragraph[S01]
+[S01-L001] A:一
+2
+[S01-L002] A:二
+[S01-L003] B(at=L001+5000):三
+",
+        );
+        let src = present(&[(1, 1, 1000.0), (1, 2, 1000.0), (1, 3, 1000.0)]);
+        let p = place(&flatten(&s), &src, 200);
+        assert_eq!(line_ms(&p, 2).0, 1500.0);
+        assert_eq!(line_ms(&p, 3).0, 1500.0);
+    }
+
+    #[test]
+    fn positionless_se_sits_at_cursor_not_last_line_end() {
+        let s = scenes(
+            "#paragraph[S01]
+[S01-L001] A:一
+[S01-L002] B(at=L001+3000):二
+[S01-L003] A(at=L001):三
+#se here.wav
+",
+        );
+        let src = present(&[(1, 1, 1000.0), (1, 2, 1000.0), (1, 3, 1000.0)]);
+        let p = place(&flatten(&s), &src, 200);
+        assert_eq!(line_ms(&p, 2), (3000.0, 4000.0));
+        assert_eq!(line_ms(&p, 3), (0.0, 1000.0));
+        match &p.events[0] {
+            PlacedEvent::Se { start, .. } => assert_eq!(ms(*start), 4000.0),
+            e => panic!("{e:?}"),
+        }
     }
 }
