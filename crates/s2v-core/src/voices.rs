@@ -3,6 +3,8 @@
 use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 
+use anyhow::Context;
+
 use crate::ids::LineId;
 
 #[derive(Debug, Default)]
@@ -18,6 +20,8 @@ enum NameKind {
     Single(LineId),
     /// 範囲を示すファイル名(`S01_L003-L007` など)。①a では未対応
     Range,
+    /// 範囲の書式が不正(`S01_L003-` / 始点が終点より後ろ など)
+    InvalidRange,
     NotVoice,
 }
 
@@ -25,10 +29,37 @@ fn classify(stem: &str) -> NameKind {
     if let Some(id) = LineId::parse_file_stem(stem) {
         return NameKind::Single(id);
     }
-    if stem.starts_with('S') && stem.contains("_L") && stem.contains('-') {
-        return NameKind::Range;
+    if let Some(rest) = voice_prefix_rest(stem) {
+        if let Some((start, end)) = rest.split_once("-L") {
+            if let (Some(a), Some(b)) = (parse_digits(start), parse_digits(end)) {
+                if a <= b {
+                    return NameKind::Range;
+                }
+            }
+        }
+        if rest.contains('-') {
+            return NameKind::InvalidRange;
+        }
     }
     NameKind::NotVoice
+}
+
+/// `S<数字>_L` で始まる stem の、その後ろの部分。
+fn voice_prefix_rest(stem: &str) -> Option<&str> {
+    let after_s = stem.strip_prefix('S')?;
+    let digits = after_s.bytes().take_while(u8::is_ascii_digit).count();
+    if digits == 0 {
+        return None;
+    }
+    after_s[digits..].strip_prefix("_L")
+}
+
+/// 空でない ASCII 数字だけの文字列を数値にする。
+fn parse_digits(s: &str) -> Option<u32> {
+    if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    s.parse().ok()
 }
 
 /// `dir` 直下の収録ファイルを台詞IDに対応付ける。サブフォルダは見ない。
@@ -38,11 +69,20 @@ pub fn match_voice_files(
     allow_flac: bool,
 ) -> anyhow::Result<VoiceMatch> {
     let known: HashSet<LineId> = script_ids.iter().copied().collect();
-    let mut entries: Vec<PathBuf> = std::fs::read_dir(dir)?
-        .filter_map(|e| e.ok())
-        .map(|e| e.path())
-        .filter(|p| p.is_file())
-        .collect();
+    let mut entries: Vec<PathBuf> = Vec::new();
+    let read = std::fs::read_dir(dir)
+        .with_context(|| format!("収録フォルダを読めません: {}", dir.display()))?;
+    for entry in read {
+        let entry =
+            entry.with_context(|| format!("収録フォルダの項目を読めません: {}", dir.display()))?;
+        let path = entry.path();
+        // シンボリックリンクは辿る。壊れたリンクなど取得できない場合は Err にする
+        let meta = std::fs::metadata(&path)
+            .with_context(|| format!("収録フォルダの項目を調べられません: {}", path.display()))?;
+        if meta.is_file() {
+            entries.push(path);
+        }
+    }
     entries.sort();
 
     let mut m = VoiceMatch::default();
@@ -76,6 +116,9 @@ pub fn match_voice_files(
             }
             NameKind::Range => m.warnings.push(format!(
                 "範囲を示すファイル名は、この版(①a)では未対応です（照合の対象から外します）: {name}"
+            )),
+            NameKind::InvalidRange => m.warnings.push(format!(
+                "範囲を示すファイル名の書式が不正です（始点が終点より後ろ、または形式の誤り。無視します）: {name}"
             )),
             NameKind::NotVoice => {
                 m.warnings.push(format!(
@@ -171,6 +214,101 @@ mod tests {
     #[test]
     fn missing_directory_is_an_error() {
         let tmp = tempfile::tempdir().unwrap();
-        assert!(match_voice_files(&tmp.path().join("nothing"), &ids(), false).is_err());
+        let missing = tmp.path().join("nothing");
+        let err = match_voice_files(&missing, &ids(), false).unwrap_err();
+        let msg = format!("{err:#}");
+        assert!(msg.contains("nothing"), "ディレクトリ名がない: {msg}");
+        let io_reason = std::fs::read_dir(&missing).unwrap_err().to_string();
+        assert!(msg.contains(&io_reason), "原因がない: {msg}");
+    }
+
+    #[test]
+    fn classify_pins_each_class() {
+        let l = |s, n| LineId { scene: s, line: n };
+        assert_eq!(classify("S01_L003"), NameKind::Single(l(1, 3)));
+        assert_eq!(classify("S01_L003-L007"), NameKind::Range);
+        assert_eq!(classify("S01_L003-L003"), NameKind::Range);
+        for s in ["take-1", "S1-take", "memo", "S01-L003"] {
+            assert_eq!(classify(s), NameKind::NotVoice, "{s}");
+        }
+        for s in [
+            "S01_L003-",
+            "S01_L-3",
+            "S01_L003-L",
+            "S01_L004-L003",
+            "S01_L003-L007-L009",
+        ] {
+            assert_eq!(classify(s), NameKind::InvalidRange, "{s}");
+        }
+    }
+
+    #[test]
+    fn invalid_and_reversed_range_names_warn_distinctly() {
+        for name in ["S01_L003-.wav", "S01_L-3.wav", "S01_L004-L003.wav"] {
+            let tmp = tempfile::tempdir().unwrap();
+            touch(tmp.path(), name);
+            let m = match_voice_files(tmp.path(), &ids(), false).unwrap();
+            assert!(m.files.is_empty(), "{name}");
+            assert_eq!(m.warnings.len(), 1, "{name}: {:?}", m.warnings);
+            let w = &m.warnings[0];
+            assert!(
+                w.contains(name) && w.contains("不正") && w.contains("無視"),
+                "{w}"
+            );
+            assert!(!w.contains("未対応"), "{w}");
+        }
+        let tmp = tempfile::tempdir().unwrap();
+        touch(tmp.path(), "S01_L004-L003.wav");
+        let m = match_voice_files(tmp.path(), &ids(), false).unwrap();
+        assert!(
+            m.warnings[0].contains("始点が終点より後ろ"),
+            "{:?}",
+            m.warnings
+        );
+    }
+
+    #[test]
+    fn non_voice_hyphen_names_are_not_range_warnings() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(tmp.path(), "take-1.wav");
+        let m = match_voice_files(tmp.path(), &ids(), false).unwrap();
+        assert_eq!(m.warnings.len(), 1);
+        assert!(
+            m.warnings[0].contains("台詞IDの形式でない"),
+            "{:?}",
+            m.warnings
+        );
+    }
+
+    #[test]
+    fn duplicates_keep_all_files_sorted_by_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(tmp.path(), "S01_L001.wav");
+        touch(tmp.path(), "S01_L001.flac");
+        touch(tmp.path(), "S01_L002.WAV");
+        let m = match_voice_files(tmp.path(), &ids(), true).unwrap();
+        assert_eq!(
+            m.files[&LineId { scene: 1, line: 1 }],
+            vec![
+                tmp.path().join("S01_L001.flac"),
+                tmp.path().join("S01_L001.wav")
+            ]
+        );
+        assert_eq!(
+            m.files[&LineId { scene: 1, line: 2 }],
+            vec![tmp.path().join("S01_L002.WAV")]
+        );
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    }
+
+    #[test]
+    fn files_map_is_ordered_by_id_regardless_of_creation_order() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(tmp.path(), "S01_L003.wav");
+        touch(tmp.path(), "S01_L001.wav");
+        touch(tmp.path(), "S01_L002.wav");
+        let m = match_voice_files(tmp.path(), &ids(), false).unwrap();
+        let keys: Vec<u32> = m.files.keys().map(|k| k.line).collect();
+        assert_eq!(keys, vec![1, 2, 3]);
     }
 }
