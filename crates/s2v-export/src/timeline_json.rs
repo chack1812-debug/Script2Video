@@ -146,7 +146,13 @@ enum EventDoc {
 
 /// 小数第2位に丸める(LUFS・dB の表示用)。
 fn r2(v: f64) -> f64 {
-    (v * 100.0).round() / 100.0
+    let r = (v * 100.0).round() / 100.0;
+    // -0.0 は "-0.0" と出力されるので正のゼロにそろえる
+    if r == 0.0 {
+        0.0
+    } else {
+        r
+    }
 }
 
 fn file_name(path: &str) -> String {
@@ -182,6 +188,9 @@ pub fn timeline_value(input: &TimelineInput<'_>) -> anyhow::Result<serde_json::V
             None
         };
         let id = l.id.display();
+        if l.missing.is_none() && a.is_none() {
+            anyhow::bail!("正常な台詞 {id} の音声情報(LineAudioInfo)がありません");
+        }
         let (measured_lufs, requested_gain_db, norm_gain_db) = match a {
             Some(a) => (
                 Some(finite_r2(&format!("{id}.measured_lufs"), a.measured_lufs)?),
@@ -225,7 +234,7 @@ pub fn timeline_value(input: &TimelineInput<'_>) -> anyhow::Result<serde_json::V
             } => EventDoc::Se {
                 file: file_name(path),
                 start_ms: floor_ms(*start),
-                gain_db: finite("events.se.gain_db", *gain_db)?,
+                gain_db: finite_r2("events.se.gain_db", *gain_db)?,
             },
             PlacedEvent::BgmStart { path, start } => EventDoc::BgmStart {
                 file: file_name(path),
@@ -448,6 +457,28 @@ mod tests {
         assert_eq!(v["events"][1]["start_ms"], 100);
     }
 
+    /// 正常な台詞すべてに有効な LineAudioInfo を与える。
+    fn audio_for(placement: &Placement) -> HashMap<LineId, LineAudioInfo> {
+        placement
+            .lines
+            .iter()
+            .filter(|l| l.missing.is_none())
+            .map(|l| {
+                (
+                    l.id,
+                    LineAudioInfo {
+                        src_start: 0,
+                        src_end: 48,
+                        measured_lufs: -20.0,
+                        requested_gain_db: 1.0,
+                        norm_gain_db: 1.0,
+                        norm_clamped: false,
+                    },
+                )
+            })
+            .collect()
+    }
+
     fn input_with<'a>(
         placement: &'a Placement,
         audio: &'a HashMap<LineId, LineAudioInfo>,
@@ -496,7 +527,7 @@ mod tests {
     #[test]
     fn non_finite_target_or_se_gain_is_an_error() {
         let placement = sample_placement();
-        let audio = HashMap::new();
+        let audio = audio_for(&placement);
         let mut input = input_with(&placement, &audio);
         input.target_lufs = f64::NAN;
         assert!(timeline_value(&input).is_err());
@@ -509,13 +540,20 @@ mod tests {
         }];
         let input = input_with(&p2, &audio);
         assert!(timeline_value(&input).is_err());
+        // 同じ入力でも SE が有限なら通る(上の Err が行の欠落ではなく SE 由来である確認)
+        p2.events = vec![PlacedEvent::Se {
+            path: "a.wav".into(),
+            start: 0,
+            gain_db: -3.0,
+        }];
+        assert!(timeline_value(&input_with(&p2, &audio)).is_ok());
     }
 
     #[test]
     fn non_finite_values_of_missing_lines_are_ignored() {
         // 不足の台詞は測定値を出さないので、line_audio の中身は見ない
         let placement = sample_placement();
-        let mut audio = HashMap::new();
+        let mut audio = audio_for(&placement);
         audio.insert(
             LineId { scene: 1, line: 2 },
             LineAudioInfo {
@@ -554,13 +592,14 @@ mod tests {
             visual_text: None,
             visual_kind: None,
         });
-        let audio = HashMap::new();
+        let audio = audio_for(&placement);
         let v = timeline_value(&input_with(&placement, &audio)).unwrap();
         assert_eq!(v["scenes"][0]["id"], "S00");
         assert_eq!(v["lines"][0]["scene"], "S00");
         assert_eq!(v["lines"][0]["id"], "S00-L001");
 
         let empty = Placement::default();
+        let audio = HashMap::new();
         let v = timeline_value(&input_with(&empty, &audio)).unwrap();
         for k in ["cast", "scenes", "takes", "lines", "events"] {
             assert_eq!(v[k].as_array().unwrap().len(), 0, "{k}");
@@ -590,7 +629,7 @@ mod tests {
                 start: 0,
             },
         ];
-        let audio = HashMap::new();
+        let audio = audio_for(&placement);
         let v = timeline_value(&input_with(&placement, &audio)).unwrap();
         assert_eq!(v["lines"][0]["id"], "S01-L001");
         assert_eq!(v["lines"][1]["id"], "S01-L002");
@@ -603,14 +642,98 @@ mod tests {
     #[test]
     fn write_timeline_json_writes_valid_json() {
         let placement = sample_placement();
-        let audio = HashMap::new();
+        let audio = audio_for(&placement);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("timeline.json");
         write_timeline_json(&path, &input_with(&placement, &audio)).unwrap();
         let v: serde_json::Value =
             serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
         assert_eq!(v["schema_version"], 2);
-        // line_audio が無い台詞の計測値は null
-        assert!(v["lines"][0]["measured_lufs"].is_null());
+        assert_eq!(v["lines"][0]["measured_lufs"], -20.0);
+    }
+
+    #[test]
+    fn normal_line_without_audio_info_is_an_error() {
+        let placement = sample_placement();
+        let audio = HashMap::new();
+        let err = timeline_value(&input_with(&placement, &audio)).unwrap_err();
+        assert!(err.to_string().contains("S01-L001"), "{err}");
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.json");
+        assert!(write_timeline_json(&path, &input_with(&placement, &audio)).is_err());
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn normal_lines_have_all_audio_fields_non_null() {
+        let placement = sample_placement();
+        let audio = audio_for(&placement);
+        let v = timeline_value(&input_with(&placement, &audio)).unwrap();
+        let l = &v["lines"][0];
+        for k in [
+            "measured_lufs",
+            "requested_gain_db",
+            "norm_gain_db",
+            "norm_clamped",
+            "src_start_ms",
+            "src_end_ms",
+        ] {
+            assert!(!l[k].is_null(), "{k}");
+        }
+        // 不足の台詞は line_audio があっても全部 null
+        let mut audio = audio;
+        audio.insert(
+            LineId { scene: 1, line: 2 },
+            audio[&LineId { scene: 1, line: 1 }],
+        );
+        let v = timeline_value(&input_with(&placement, &audio)).unwrap();
+        for k in [
+            "measured_lufs",
+            "requested_gain_db",
+            "norm_gain_db",
+            "norm_clamped",
+            "src_start_ms",
+            "src_end_ms",
+        ] {
+            assert!(v["lines"][1][k].is_null(), "{k}");
+        }
+    }
+
+    #[test]
+    fn rounding_has_no_negative_zero_and_rounds_se_gain() {
+        let mut placement = sample_placement();
+        placement.events = vec![
+            PlacedEvent::Se {
+                path: "a.wav".into(),
+                start: 0,
+                gain_db: -3.234,
+            },
+            PlacedEvent::Se {
+                path: "b.wav".into(),
+                start: 1,
+                gain_db: -0.004,
+            },
+        ];
+        let mut audio = HashMap::new();
+        audio.insert(
+            LineId { scene: 1, line: 1 },
+            LineAudioInfo {
+                src_start: 0,
+                src_end: 48,
+                measured_lufs: -31.234,
+                requested_gain_db: -0.004,
+                norm_gain_db: 8.236,
+                norm_clamped: false,
+            },
+        );
+        let v = timeline_value(&input_with(&placement, &audio)).unwrap();
+        let text = serde_json::to_string(&v).unwrap();
+        assert!(!text.contains("-0.0"), "{text}");
+        assert!(!text.contains("-0,"), "{text}");
+        assert_eq!(v["lines"][0]["measured_lufs"], -31.23);
+        assert_eq!(v["lines"][0]["norm_gain_db"], 8.24);
+        assert!(text.contains(r#""requested_gain_db":0.0"#), "{text}");
+        assert_eq!(v["events"][0]["gain_db"], -3.23);
+        assert!(text.contains(r#""gain_db":0.0"#), "{text}");
     }
 }

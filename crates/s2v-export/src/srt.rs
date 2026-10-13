@@ -14,6 +14,18 @@ fn srt_time(ms: i64) -> String {
     )
 }
 
+/// 字幕本文を整える。改行を LF にそろえ、空行・空白だけの行は空白1つにする
+/// (空行はキューの終わりと解釈されるため)。全体が空なら空白1つの行にする。
+fn cue_text(text: &str) -> String {
+    let unified = text.replace("\r\n", "\n").replace('\r', "\n");
+    let unified = unified.trim_end_matches('\n');
+    unified
+        .split('\n')
+        .map(|l| if l.trim().is_empty() { " " } else { l })
+        .collect::<Vec<_>>()
+        .join("\n")
+}
+
 pub fn render_srt(lines: &[PlacedLine]) -> String {
     let mut sorted: Vec<&PlacedLine> = lines.iter().collect();
     sorted.sort_by_key(|l| (l.start, l.flat_index));
@@ -24,7 +36,7 @@ pub fn render_srt(lines: &[PlacedLine]) -> String {
             i + 1,
             srt_time(floor_ms(l.start)),
             srt_time(ceil_ms(l.end)),
-            l.text
+            cue_text(&l.text)
         ));
     }
     out
@@ -87,5 +99,45 @@ mod tests {
             render_srt(&[l]),
             "1\n01:00:00,000 --> 01:00:00,001\n不足\n\n"
         );
+    }
+
+    fn one(text: &str) -> String {
+        render_srt(&[PlacedLine {
+            id: LineId { scene: 1, line: 1 },
+            scene: 1,
+            cast: "A".into(),
+            text: text.into(),
+            start: 0,
+            end: 48,
+            missing: None,
+            flat_index: 0,
+        }])
+    }
+
+    #[test]
+    fn crlf_and_multiline_text_is_normalized() {
+        assert_eq!(
+            one("一\r\n二\r三"),
+            "1\n00:00:00,000 --> 00:00:00,001\n一\n二\n三\n\n"
+        );
+    }
+
+    #[test]
+    fn blank_lines_inside_text_do_not_end_the_cue() {
+        let srt = one("一行目\n\n二行目\n");
+        assert_eq!(
+            srt,
+            "1\n00:00:00,000 --> 00:00:00,001\n一行目\n \n二行目\n\n"
+        );
+        // 空行はキューの区切りの1つだけ
+        assert_eq!(srt.matches("\n\n").count(), 1);
+    }
+
+    #[test]
+    fn empty_or_whitespace_text_becomes_a_single_space_line() {
+        let expect = "1\n00:00:00,000 --> 00:00:00,001\n \n\n";
+        assert_eq!(one(""), expect);
+        assert_eq!(one("  \t"), expect);
+        assert_eq!(one("\n\n"), expect);
     }
 }

@@ -133,6 +133,101 @@ mod tests {
         assert!(render_fcpxml("x", 1, &tracks, true).contains("1001/30000s"));
     }
 
+    /// `<!DOCTYPE fcpxml>` を許可して整形式を検証する。
+    fn parse_xml(xml: &str) -> Result<roxmltree::Document<'_>, roxmltree::Error> {
+        let opt = roxmltree::ParsingOptions {
+            allow_dtd: true,
+            ..Default::default()
+        };
+        roxmltree::Document::parse_with_options(xml, opt)
+    }
+
+    fn attr<'a>(n: roxmltree::Node<'a, 'a>, k: &str) -> &'a str {
+        n.attribute(k)
+            .unwrap_or_else(|| panic!("属性 {k} がありません"))
+    }
+
+    #[test]
+    fn output_is_well_formed_with_expected_structure() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tracks: Vec<(&str, PathBuf)> = ["dialogue", "bgm", "se"]
+            .iter()
+            .map(|n| {
+                let p = tmp.path().join(format!("{n}.wav"));
+                std::fs::write(&p, b"x").unwrap();
+                (*n, p)
+            })
+            .collect();
+        let xml = render_fcpxml("第1話", 48_000, &tracks, false);
+        let doc = parse_xml(&xml).expect("整形式の XML");
+        let root = doc.root_element();
+        assert_eq!(root.tag_name().name(), "fcpxml");
+        assert_eq!(root.attribute("version"), Some("1.8"));
+        let assets: Vec<_> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("asset"))
+            .collect();
+        let clips: Vec<_> = doc
+            .descendants()
+            .filter(|n| n.has_tag_name("asset-clip"))
+            .collect();
+        assert_eq!(assets.len(), 3);
+        assert_eq!(clips.len(), 3);
+        let seq = doc
+            .descendants()
+            .find(|n| n.has_tag_name("sequence"))
+            .unwrap();
+        for (i, (a, c)) in assets.iter().zip(&clips).enumerate() {
+            let n = i + 1;
+            assert_eq!(attr(*a, "id"), format!("a{n}"));
+            assert_eq!(attr(*c, "lane"), n.to_string());
+            assert_eq!(attr(*c, "ref"), attr(*a, "id"));
+            assert_eq!(attr(*a, "duration"), "30000/30000s");
+            assert_eq!(attr(*c, "duration"), attr(*a, "duration"));
+            assert_eq!(attr(seq, "duration"), attr(*a, "duration"));
+            assert!(attr(*a, "src").starts_with("file:///"));
+        }
+        assert_eq!(attr(clips[0], "name"), "dialogue");
+        assert_eq!(attr(clips[2], "name"), "se");
+    }
+
+    #[test]
+    fn zero_duration_and_special_paths_are_well_formed() {
+        let xml = render_fcpxml("x", 0, &[], true);
+        let doc = parse_xml(&xml).expect("整形式の XML");
+        assert_eq!(
+            doc.descendants()
+                .filter(|n| n.has_tag_name("asset"))
+                .count(),
+            0
+        );
+        let seq = doc
+            .descendants()
+            .find(|n| n.has_tag_name("sequence"))
+            .unwrap();
+        assert_eq!(attr(seq, "duration"), "0/30000s");
+
+        let tracks: Vec<(&str, PathBuf)> =
+            vec![("音 & <声>", PathBuf::from(r"C:\第1話 & <x>\音 声.wav"))];
+        let xml = render_fcpxml("題 & <名>", 1, &tracks, false);
+        let doc = parse_xml(&xml).expect("整形式の XML");
+        let project = doc
+            .descendants()
+            .find(|n| n.has_tag_name("project"))
+            .unwrap();
+        assert_eq!(attr(project, "name"), "題 & <名>");
+        let clip = doc
+            .descendants()
+            .find(|n| n.has_tag_name("asset-clip"))
+            .unwrap();
+        assert_eq!(attr(clip, "name"), "音 & <声>");
+        let asset = doc.descendants().find(|n| n.has_tag_name("asset")).unwrap();
+        assert_eq!(attr(asset, "name"), "音 声.wav");
+        let src = attr(asset, "src");
+        assert!(src.starts_with("file:///"));
+        assert!(!src.contains(' ') && !src.contains('&') && !src.contains('<'));
+    }
+
     #[test]
     fn names_are_xml_escaped() {
         let tracks: Vec<(&str, PathBuf)> = vec![("a<b>\"c\"&", PathBuf::from("x.wav"))];
