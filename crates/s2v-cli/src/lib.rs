@@ -3,6 +3,7 @@
 pub mod build;
 pub mod number;
 pub mod proclog;
+pub mod verify;
 pub mod work;
 
 pub use build::{run_build, BuildArgs};

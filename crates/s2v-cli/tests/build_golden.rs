@@ -527,3 +527,131 @@ fn bom_and_crlf_script_gives_same_timeline_as_lf() {
     assert_eq!(a["scenes"], b["scenes"]);
     assert_eq!(a["duration_ms"], b["duration_ms"]);
 }
+
+/// dump_prefade = true で 3 台詞を build し、出力フォルダを返す。
+fn prefade_build() -> (Fixture, PathBuf) {
+    let f = fixture(SCRIPT);
+    for id in ["S01_L001", "S01_L002", "S03_L004"] {
+        write_voice(&f.voices.join(format!("{id}.wav")));
+    }
+    let cfg = f.dir.join("prefade.toml");
+    let builtin =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.toml"))
+            .unwrap();
+    fs::write(
+        &cfg,
+        builtin.replace("dump_prefade = false", "dump_prefade = true"),
+    )
+    .unwrap();
+    assert_eq!(run_build(&args(&f, Some(cfg), false)), Outcome::Warnings);
+    let out = f.dir.join("第1話");
+    (f, out)
+}
+
+fn edit_cache(out: &Path, edit: impl FnOnce(&mut serde_json::Value)) {
+    let path = out.join("work").join("cache.json");
+    let mut v = read_json(&path);
+    edit(&mut v);
+    fs::write(&path, serde_json::to_string(&v).unwrap()).unwrap();
+}
+
+#[test]
+fn verify_tool_passes_on_a_prefade_build() {
+    let (_f, out) = prefade_build();
+    assert_eq!(
+        fs::read_dir(out.join("work").join("lines_prefade"))
+            .unwrap()
+            .count(),
+        3
+    );
+    let checks = s2v_cli::verify::verify_loudness(&out).unwrap();
+    assert_eq!(checks.len(), 3);
+    assert!(checks.iter().all(|c| c.passed), "{checks:?}");
+}
+
+#[test]
+fn verify_rejects_inconsistent_cache_without_panic() {
+    let (_f, out) = prefade_build();
+    // 測定範囲が使用範囲より前にある(引き算が負になる)
+    edit_cache(&out, |v| {
+        let n = &mut v["entries"]["lines/S01-L001.wav"]["norm"];
+        n["src_start"] = serde_json::json!(1_000_000u64);
+        n["measure_start"] = serde_json::json!(10u64);
+        n["measure_end"] = serde_json::json!(40_000u64);
+    });
+    assert!(s2v_cli::verify::verify_loudness(&out).is_err());
+}
+
+#[test]
+fn verify_rejects_measure_range_beyond_prefade_file() {
+    let (_f, out) = prefade_build();
+    edit_cache(&out, |v| {
+        let n = &mut v["entries"]["lines/S01-L001.wav"]["norm"];
+        let s = n["src_start"].as_u64().unwrap();
+        n["measure_start"] = serde_json::json!(s);
+        n["measure_end"] = serde_json::json!(s + 900_000_000u64);
+    });
+    assert!(s2v_cli::verify::verify_loudness(&out).is_err());
+}
+
+#[test]
+fn verify_errors_when_prefade_file_is_missing() {
+    let (_f, out) = prefade_build();
+    fs::remove_file(out.join("work").join("lines_prefade").join("S01-L001.wav")).unwrap();
+    let e = s2v_cli::verify::verify_loudness(&out).unwrap_err();
+    assert!(format!("{e:#}").contains("dump_prefade"), "{e:#}");
+}
+
+#[test]
+fn verify_errors_when_no_lines_can_be_verified() {
+    let (_f, out) = prefade_build();
+    edit_cache(&out, |v| v["entries"] = serde_json::json!({}));
+    assert!(s2v_cli::verify::verify_loudness(&out).is_err());
+}
+
+#[test]
+fn verify_ignores_resampled_entries() {
+    let (_f, out) = prefade_build();
+    let n = s2v_cli::verify::verify_loudness(&out).unwrap().len();
+    edit_cache(&out, |v| {
+        let e = v["entries"]["lines/S01-L001.wav"].clone();
+        v["entries"]["resampled/S01-L001.wav"] = e;
+    });
+    assert_eq!(s2v_cli::verify::verify_loudness(&out).unwrap().len(), n);
+}
+
+#[test]
+fn verify_fails_short_line_with_wrong_gain() {
+    let (_f, out) = prefade_build();
+    edit_cache(&out, |v| {
+        let n = &mut v["entries"]["lines/S01-L001.wav"]["norm"];
+        let s = n["measure_start"].as_u64().unwrap();
+        n["measure_end"] = serde_json::json!(s + 1000u64);
+        n["norm_clamped"] = serde_json::json!(false);
+        let g = n["norm_gain_db"].as_f64().unwrap();
+        n["norm_gain_db"] = serde_json::json!(g + 3.0);
+    });
+    let checks = s2v_cli::verify::verify_loudness(&out).unwrap();
+    let c = checks.iter().find(|c| c.id == "S01-L001").unwrap();
+    assert_eq!(c.kind, s2v_cli::verify::CheckKind::ShortLine);
+    assert!(!c.passed, "{c:?}");
+}
+
+#[test]
+fn verify_fails_long_line_with_tampered_prefade() {
+    let (_f, out) = prefade_build();
+    let p = out.join("work").join("lines_prefade").join("S01-L002.wav");
+    let mut r = hound::WavReader::open(&p).unwrap();
+    let spec = r.spec();
+    let s: Vec<f32> = r.samples::<f32>().map(|x| x.unwrap() * 0.25).collect();
+    drop(r);
+    let mut w = hound::WavWriter::create(&p, spec).unwrap();
+    for x in s {
+        w.write_sample(x).unwrap();
+    }
+    w.finalize().unwrap();
+    let checks = s2v_cli::verify::verify_loudness(&out).unwrap();
+    let c = checks.iter().find(|c| c.id == "S01-L002").unwrap();
+    assert_eq!(c.kind, s2v_cli::verify::CheckKind::Measured);
+    assert!(!c.passed, "{c:?}");
+}
