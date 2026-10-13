@@ -173,10 +173,20 @@ fn remove_final_artifacts(out_dir: &Path) -> std::io::Result<()> {
             }
         }
     }
-    // 空になったときだけ tracks/ を消す(中身があれば残す)
+    // 空になったときだけ tracks/ を消す(他のファイルがあれば、それごと残す)
     let tracks = out_dir.join("tracks");
-    if tracks.is_dir() {
-        let _ = std::fs::remove_dir(&tracks);
+    match std::fs::remove_dir(&tracks) {
+        Ok(()) => {}
+        Err(e)
+            if e.kind() == std::io::ErrorKind::NotFound
+                || e.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                || matches!(e.raw_os_error(), Some(145 | 39 | 66)) => {}
+        Err(e) => {
+            first_err.get_or_insert(std::io::Error::new(
+                e.kind(),
+                format!("{}: {e}", tracks.display()),
+            ));
+        }
     }
     first_err.map_or(Ok(()), Err)
 }
@@ -599,6 +609,7 @@ A:田中
             &mut log,
         );
         assert_eq!(o, Outcome::Failed);
+        assert!(!out.join("tracks").exists(), "tracks/");
         for n in [
             "full_dialogue.wav",
             "timeline.json",
@@ -609,6 +620,22 @@ A:田中
             "tracks/se.wav",
         ] {
             assert!(!out.join(n).exists(), "{n}");
+        }
+    }
+
+    #[test]
+    fn foreign_file_in_tracks_survives_cleanup() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path();
+        std::fs::create_dir_all(out.join("tracks")).unwrap();
+        for n in ["dialogue", "bgm", "se"] {
+            std::fs::write(out.join("tracks").join(format!("{n}.wav")), b"x").unwrap();
+        }
+        std::fs::write(out.join("tracks").join("keep.txt"), b"keep").unwrap();
+        remove_final_artifacts(out).unwrap();
+        assert!(out.join("tracks").join("keep.txt").exists());
+        for n in ["dialogue", "bgm", "se"] {
+            assert!(!out.join("tracks").join(format!("{n}.wav")).exists());
         }
     }
 }
