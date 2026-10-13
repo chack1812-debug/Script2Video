@@ -235,6 +235,12 @@ fn ids_write_failure_leaves_script_untouched() {
     fs::write(&probe, "x").unwrap();
     let _probe_guard = make_readonly(&probe);
     if fs::write(&probe, "y").is_ok() {
+        // Windows では管理者でも読み取り専用属性で書込が拒否される。書けたならテストの前提が壊れている
+        if cfg!(windows) {
+            panic!(
+                "Windows で読み取り専用ファイルに書けてしまいました。テストの前提が崩れています"
+            );
+        }
         eprintln!("skip: 読み取り専用でも書き込める環境のため再現できない");
         return;
     }
