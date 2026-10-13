@@ -1,11 +1,8 @@
-use std::path::Path;
-
 use s2v_core::{AudioConfig, Cast, SceneConfig};
 
 use crate::acoustics::{compute_reverb_params, resolve_room_geometry, ReverbParams, RoomGeometry};
 use crate::early::build_early_taps;
 use crate::geometry::{calc_geometry, directivity_pattern};
-use crate::resampler::resample_mono;
 use crate::reverb::IrCache;
 
 /// room_size/reverb_wet の実効値を決定する (Cast > Scene > AudioConfig の優先順)。
@@ -34,15 +31,29 @@ fn resolve_reverb_params(
 pub struct AudioProcessor {
     config: AudioConfig,
     ir_cache: IrCache,
+    /// 基準ゲイン(設計書 5.10 C)。生成時に較正する。
+    calib_gain: f64,
 }
 
 impl AudioProcessor {
     pub fn new(config: AudioConfig) -> Self {
         let sample_rate = config.sample_rate;
-        Self {
+        let mut p = Self {
             config,
             ir_cache: IrCache::new(sample_rate),
-        }
+            calib_gain: 1.0,
+        };
+        p.calib_gain = crate::calib::compute_calibration_gain(&p);
+        p
+    }
+
+    /// 較正で求めた基準ゲイン。
+    pub fn calibration_gain(&self) -> f64 {
+        self.calib_gain
+    }
+
+    pub fn reference_dist(&self) -> f64 {
+        self.config.reference_dist
     }
 
     pub fn config_sample_rate(&self) -> u32 {
@@ -70,15 +81,29 @@ impl AudioProcessor {
         self.ir_cache.prewarm(params);
     }
 
-    /// WAV ファイルを読み込み、DSP 処理を施して stereo WAV として書き出す。
-    /// 戻り値: 出力サンプル数（失敗時は Err）
-    pub fn process(
+    /// 正規化済みのモノラル(48kHz)に、定位・距離・早期反射・残響を掛けてステレオにする。
+    /// ピーク正規化と台詞ごとのリミッタは行わない(設計書 5.10 C)。
+    pub fn render(
         &self,
-        input: &Path,
-        output: &Path,
+        mono: &[f32],
         cast: &Cast,
         scene: &SceneConfig,
-    ) -> anyhow::Result<usize> {
+    ) -> anyhow::Result<Vec<[f32; 2]>> {
+        self.render_with_gain(mono, cast, scene, self.calib_gain)
+    }
+
+    pub(crate) fn render_with_gain(
+        &self,
+        mono: &[f32],
+        cast: &Cast,
+        scene: &SceneConfig,
+        base_gain: f64,
+    ) -> anyhow::Result<Vec<[f32; 2]>> {
+        // 空の音声は、この先の apply_air_absorption 等が先頭要素に直接アクセスするため Err にする
+        if mono.is_empty() {
+            anyhow::bail!("音声データが空です(0サンプル)");
+        }
+
         // --- パラメータ決定 (Cast > Scene > AudioConfig デフォルト) ---
         let (room_size, reverb_wet) =
             resolve_reverb_params(cast, scene, self.config.room_size, self.config.reverb_wet);
@@ -95,60 +120,19 @@ impl AudioProcessor {
             self.ir_cache.compute_if_needed(rp.rt60, rp.pre_delay);
         }
 
-        // --- WAV 読み込み ---
-        let mut reader = hound::WavReader::open(input)?;
-        let spec = reader.spec();
-        let samples_raw: Vec<f32> = match spec.sample_format {
-            hound::SampleFormat::Int => {
-                let max = (1i64 << (spec.bits_per_sample - 1)) as f32;
-                reader
-                    .samples::<i32>()
-                    .map(|s| s.unwrap() as f32 / max)
-                    .collect()
-            }
-            hound::SampleFormat::Float => reader.samples::<f32>().map(|s| s.unwrap()).collect(),
-        };
-
-        // チャンネル 1 へ変換 (ステレオの場合は L ch のみ使用)
-        let mono: Vec<f32> = if spec.channels == 1 {
-            samples_raw
-        } else {
-            samples_raw
-                .into_iter()
-                .step_by(spec.channels as usize)
-                .collect()
-        };
-
-        // ピーク正規化
-        let peak = mono.iter().cloned().map(f32::abs).fold(0.0_f32, f32::max);
-        let mono: Vec<f32> = if peak > 0.0 {
-            mono.into_iter().map(|s| s / peak).collect()
-        } else {
-            mono
-        };
-
-        // リサンプリング
-        let mono = resample_mono(&mono, spec.sample_rate, self.config.sample_rate)?;
-
-        // 空の音声(0サンプル)は、この先のapply_air_absorption等がout[0]等で先頭要素に
-        // 直接アクセスするためワーカーパニックになり得る。ここで早期にErrへ変換する。
-        if mono.is_empty() {
-            anyhow::bail!("音声データが空です(0サンプル): {}", input.display());
-        }
-
         // --- 幾何学計算 ---
         let pan_rad = cast.pan.to_radians();
         let geo = calc_geometry(self.config.microphone_spacing, cast.distance, pan_rad);
 
         // 空気吸収フィルター
         let data_l = apply_air_absorption(
-            &mono,
+            mono,
             geo.dist_l,
             self.config.sample_rate,
             self.config.air_absorption_coeff,
         );
         let data_r = apply_air_absorption(
-            &mono,
+            mono,
             geo.dist_r,
             self.config.sample_rate,
             self.config.air_absorption_coeff,
@@ -163,14 +147,11 @@ impl AudioProcessor {
         let rel_l = delay_l - min_delay;
         let rel_r = delay_r - min_delay;
 
-        // ILD + 基準音圧ゲイン
+        // ILD + 基準ゲイン
         let mic_angle_rad = self.config.mic_angle.to_radians();
         let k = self.config.mic_directivity;
         let nominal_pat = (1.0 - k) + k * (0.0_f64 - mic_angle_rad).cos();
-        let max_gain_linear = 10.0_f64.powf(self.config.max_gain_db / 20.0);
-        let base_norm = max_gain_linear / nominal_pat.max(1e-6);
-
-        let vol_factor = base_norm * cast.volume;
+        let vol_factor = base_gain / nominal_pat.max(1e-6) * cast.volume;
 
         let dist_gain_l = self.config.reference_dist / geo.dist_l.max(0.1);
         let dist_gain_r = self.config.reference_dist / geo.dist_r.max(0.1);
@@ -187,7 +168,7 @@ impl AudioProcessor {
         // 話者の実効高さ = 基準(@cast、未指定=聴取者高さ) + 行内臨時パラメータの加算
         let source_height = cast.height.unwrap_or(room_geo.listener_height) + cast.height_offset;
         let early_taps = build_early_taps(
-            &mono,
+            mono,
             cast.distance,
             pan_rad,
             vol_factor,
@@ -236,39 +217,7 @@ impl AudioProcessor {
             cast.distance,
             self.config.early_reflections.wet_distance_slope,
         );
-
-        // リミッター
-        let peak_out = stereo
-            .iter()
-            .flat_map(|s| s.iter())
-            .cloned()
-            .map(f32::abs)
-            .fold(0.0_f32, f32::max);
-        if peak_out > max_gain_linear as f32 {
-            let scale = max_gain_linear as f32 / peak_out;
-            stereo.iter_mut().for_each(|s| {
-                s[0] *= scale;
-                s[1] *= scale;
-            });
-        }
-
-        // --- WAV 書き出し ---
-        if let Some(parent) = output.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-        let out_spec = hound::WavSpec {
-            channels: 2,
-            sample_rate: self.config.sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut writer = hound::WavWriter::create(output, out_spec)?;
-        for frame in &stereo {
-            writer.write_sample((frame[0] * 32767.0) as i16)?;
-            writer.write_sample((frame[1] * 32767.0) as i16)?;
-        }
-        writer.finalize()?;
-        Ok(stereo.len())
+        Ok(stereo)
     }
 }
 
@@ -310,15 +259,8 @@ mod tests {
             room_size: 0.1,
             reverb_wet: 0.3,
             reference_dist: 1.0,
-            reference_gain_db: -5.0,
-            max_gain_db: -1.0,
             mic_directivity: 0.5,
             mic_angle: 45.0,
-            engine_volume_offsets: {
-                let mut m = HashMap::new();
-                m.insert("voicevox".to_string(), 1.0);
-                m
-            },
             early_reflections: s2v_core::EarlyConfig::default(),
         }
     }
@@ -396,264 +338,75 @@ mod tests {
         assert!((reverb_wet - 0.1).abs() < 1e-10);
     }
 
-    fn write_test_wav(path: &Path, sample_rate: u32, freq: f32, duration_s: f32) {
-        let n = (sample_rate as f32 * duration_s) as usize;
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut writer = hound::WavWriter::create(path, spec).unwrap();
-        for i in 0..n {
-            let v = (2.0 * std::f32::consts::PI * freq * i as f32 / sample_rate as f32).sin();
-            writer.write_sample((v * 32767.0) as i16).unwrap();
-        }
-        writer.finalize().unwrap();
-    }
-
-    /// 決定的な広帯域ノイズ WAV を書き出す（テスト再現性のため固定シードLCG）。
-    fn write_noise_wav(path: &Path, sample_rate: u32, duration_s: f32) {
-        let n = (sample_rate as f32 * duration_s) as usize;
-        let spec = hound::WavSpec {
-            channels: 1,
-            sample_rate,
-            bits_per_sample: 16,
-            sample_format: hound::SampleFormat::Int,
-        };
-        let mut writer = hound::WavWriter::create(path, spec).unwrap();
+    /// 決定的な広帯域ノイズ(テスト再現性のため固定シードLCG)。
+    fn noise(n: usize, amp: f32) -> Vec<f32> {
         let mut state: u32 = 0x12345678;
-        for _ in 0..n {
-            // 線形合同法で [-0.5, 0.5) の擬似乱数
-            state = state.wrapping_mul(1664525).wrapping_add(1013904223);
-            let v = (state >> 8) as f32 / 16_777_216.0 - 0.5;
-            writer.write_sample((v * 32767.0) as i16).unwrap();
-        }
-        writer.finalize().unwrap();
+        (0..n)
+            .map(|_| {
+                state = state.wrapping_mul(1664525).wrapping_add(1013904223);
+                ((state >> 8) as f32 / 16_777_216.0 - 0.5) * 2.0 * amp
+            })
+            .collect()
     }
 
     #[test]
-    fn process_returns_error_instead_of_panicking_on_empty_wav() {
-        // エンジンが空の音声(0サンプル)を返した場合、apply_air_absorptionのout[0]参照で
-        // ワーカーがパニックしていた(review.txt指摘)。Errとして上位に伝わるべき。
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("empty.wav");
-        write_test_wav(&input, 48000, 440.0, 0.0); // duration_s=0 → 0サンプル
-        let output = dir.path().join("out.wav");
-
-        let proc = AudioProcessor::new(default_audio_config());
-        let result = proc.process(&input, &output, &dummy_cast(0.0, 1.0), &default_scene());
-
-        assert!(
-            result.is_err(),
-            "空の音声データはErrにするべき(パニックしてはいけない)"
-        );
-    }
-
-    /// hound::WavWriter は channels=0 の書き出しをサポートしない(finalize時にパニックする)ため、
-    /// 壊れたWAVヘッダーを手組みしてchannels=0のファイルを直接作る。
-    fn write_raw_wav_header(path: &Path, channels: u16, sample_rate: u32, bits_per_sample: u16) {
-        let byte_rate = sample_rate * channels as u32 * (bits_per_sample as u32 / 8).max(1);
-        let block_align = channels.wrapping_mul(bits_per_sample / 8);
-        let mut buf = Vec::new();
-        buf.extend_from_slice(b"RIFF");
-        buf.extend_from_slice(&36u32.to_le_bytes());
-        buf.extend_from_slice(b"WAVE");
-        buf.extend_from_slice(b"fmt ");
-        buf.extend_from_slice(&16u32.to_le_bytes());
-        buf.extend_from_slice(&1u16.to_le_bytes()); // PCM
-        buf.extend_from_slice(&channels.to_le_bytes());
-        buf.extend_from_slice(&sample_rate.to_le_bytes());
-        buf.extend_from_slice(&byte_rate.to_le_bytes());
-        buf.extend_from_slice(&block_align.to_le_bytes());
-        buf.extend_from_slice(&bits_per_sample.to_le_bytes());
-        buf.extend_from_slice(b"data");
-        buf.extend_from_slice(&0u32.to_le_bytes());
-        std::fs::write(path, buf).unwrap();
-    }
-
-    #[test]
-    fn process_returns_error_instead_of_panicking_on_zero_channel_wav() {
-        // channels=0 の壊れたWAVは、mono変換の step_by(0) で即パニックしていた。
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("zero_channel.wav");
-        write_raw_wav_header(&input, 0, 48000, 16);
-        let output = dir.path().join("out.wav");
-
-        let proc = AudioProcessor::new(default_audio_config());
-        let result = proc.process(&input, &output, &dummy_cast(0.0, 1.0), &default_scene());
-
-        assert!(
-            result.is_err(),
-            "channels=0のWAVはErrにするべき(パニックしてはいけない)"
-        );
-    }
-
-    #[test]
-    fn process_returns_error_instead_of_panicking_on_zero_bit_depth_wav() {
-        // bits_per_sample=0 の壊れたWAVは、`1i64 << (bits_per_sample - 1)` の減算で
-        // オーバーフローパニックし得る。
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("zero_bits.wav");
-        write_raw_wav_header(&input, 1, 48000, 0);
-        let output = dir.path().join("out.wav");
-
-        let proc = AudioProcessor::new(default_audio_config());
-        let result = proc.process(&input, &output, &dummy_cast(0.0, 1.0), &default_scene());
-
-        assert!(
-            result.is_err(),
-            "bits_per_sample=0のWAVはErrにするべき(パニックしてはいけない)"
-        );
-    }
-
-    #[test]
-    fn reference_gain_db_does_not_affect_output_level() {
-        // Python版 (core/audio_processor.py) は config.REFERENCE_GAIN_DB を
-        // 定義しているが、ゲイン計算には一切使用していない（未使用の設定値）。
-        // Rust版が独自に reference_gain_db を音量係数へ乗じてしまうと、
-        // Python版に対して出力音量が変化してしまう（移植バグ）。
-        // よって reference_gain_db を変えても出力レベルは変わらないはず。
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.wav");
-        write_test_wav(&input, 48000, 440.0, 0.1);
-
-        let mut cfg_a = default_audio_config();
-        cfg_a.reference_gain_db = -5.0;
-        let mut cfg_b = default_audio_config();
-        cfg_b.reference_gain_db = -20.0;
-
-        let peak_for = |cfg: AudioConfig| -> f32 {
-            let out = dir
-                .path()
-                .join(format!("out_{}.wav", cfg.reference_gain_db));
-            let proc = AudioProcessor::new(cfg);
-            proc.process(&input, &out, &dummy_cast(0.0, 1.0), &default_scene())
-                .unwrap();
-            let mut r = hound::WavReader::open(&out).unwrap();
-            r.samples::<i16>()
-                .map(|s| (s.unwrap() as f32).abs())
-                .fold(0.0_f32, f32::max)
-        };
-
-        let peak_a = peak_for(cfg_a);
-        let peak_b = peak_for(cfg_b);
-
-        assert!(
-            (peak_a - peak_b).abs() / peak_a.max(1.0) < 0.01,
-            "reference_gain_db should not change output level (Python版に未使用): peak_a={peak_a}, peak_b={peak_b}"
-        );
-    }
-
-    #[test]
-    fn process_creates_stereo_wav() {
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.wav");
-        let output = dir.path().join("out.wav");
-
-        write_test_wav(&input, 24000, 440.0, 0.1);
-
-        let proc = AudioProcessor::new(default_audio_config());
-        let n = proc
-            .process(&input, &output, &dummy_cast(0.0, 1.0), &default_scene())
-            .unwrap();
-        assert!(n > 0);
-        assert!(output.exists());
-
-        let reader = hound::WavReader::open(&output).unwrap();
-        assert_eq!(reader.spec().channels, 2);
-        assert_eq!(reader.spec().sample_rate, 48000);
-    }
-
-    #[test]
-    fn process_panning_creates_stereo_asymmetry() {
+    fn render_panning_creates_stereo_asymmetry() {
         // 外開き(ORTF的)マイク配置: Lマイクは-45°(左向き)、Rマイクは+45°(右向き)。
         // pan は + で右、- で左から聞こえる仕様 (台本仕様.txt) なので、
         // 左パン(pan=-45)では音源がLマイクに近く・正面に来てLchが大きくなり、
         // 右パン(pan=+45)では音源がRマイクに近く・正面に来てRchが大きくなる。
-        // (距離由来のITD/ILDと指向性パターン由来のILDが同じ方向を強め合う)
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.wav");
-        write_test_wav(&input, 48000, 440.0, 0.2);
-
         let proc = AudioProcessor::new(default_audio_config());
+        let input = tone(9_600, 0.5);
 
-        let read_rms = |p: &Path, ch: usize| -> f64 {
-            let mut r = hound::WavReader::open(p).unwrap();
-            let samples: Vec<i16> = r.samples().map(|s| s.unwrap()).collect();
-            let ch_samples: Vec<f64> = samples
-                .iter()
-                .skip(ch)
-                .step_by(2)
-                .map(|&s| s as f64)
-                .collect();
-            let sum_sq: f64 = ch_samples.iter().map(|s| s * s).sum();
-            (sum_sq / ch_samples.len() as f64).sqrt()
+        let rms = |out: &[[f32; 2]], ch: usize| -> f64 {
+            let sum_sq: f64 = out.iter().map(|f| (f[ch] as f64) * (f[ch] as f64)).sum();
+            (sum_sq / out.len() as f64).sqrt()
+        };
+        // 小さな絶対値を避けるため振幅を 32767 倍相当で見る代わりに、比の分母へ微小量を足す
+        let ratio = |out: &[[f32; 2]]| -> f64 {
+            let (l, r) = (rms(out, 0), rms(out, 1));
+            (l - r).abs() / (l + r + 1e-6)
         };
 
         // 中央: L≈R
-        let out_center = dir.path().join("center.wav");
-        proc.process(&input, &out_center, &dummy_cast(0.0, 1.0), &default_scene())
+        let out_center = proc
+            .render(&input, &dummy_cast(0.0, 1.0), &default_scene())
             .unwrap();
-        let l_center = read_rms(&out_center, 0);
-        let r_center = read_rms(&out_center, 1);
-        let center_ratio = (l_center - r_center).abs() / (l_center + r_center + 1.0);
         assert!(
-            center_ratio < 0.1,
-            "center should be approximately symmetric, got ratio={center_ratio:.3}"
+            ratio(&out_center) < 0.1,
+            "center ratio={:.3}",
+            ratio(&out_center)
         );
 
-        // 左パン(pan=-45): 音源は左側 → Lchが大きくなるはず (台本仕様.txt: -=左)
-        let out_left = dir.path().join("left.wav");
-        proc.process(&input, &out_left, &dummy_cast(-45.0, 1.0), &default_scene())
+        // 左パン(pan=-45): Lchが大きくなるはず (台本仕様.txt: -=左)
+        let out_left = proc
+            .render(&input, &dummy_cast(-45.0, 1.0), &default_scene())
             .unwrap();
-        let l_left = read_rms(&out_left, 0);
-        let r_left = read_rms(&out_left, 1);
-        let left_ratio = (l_left - r_left).abs() / (l_left + r_left + 1.0);
+        let (l_left, r_left) = (rms(&out_left, 0), rms(&out_left, 1));
         assert!(
-            left_ratio > 0.05,
-            "left pan should create stereo asymmetry, got ratio={left_ratio:.3}"
+            ratio(&out_left) > 0.05,
+            "left ratio={:.3}",
+            ratio(&out_left)
         );
         assert!(
             l_left > r_left,
-            "pan=-45 (left) should be louder in the L channel, got L={l_left:.1} R={r_left:.1}"
+            "pan=-45 (left) should be louder in the L channel, got L={l_left} R={r_left}"
         );
 
-        // 右パン(pan=+45): 音源は右側 → Rchが大きくなるはず (台本仕様.txt: +=右)
-        let out_right = dir.path().join("right.wav");
-        proc.process(&input, &out_right, &dummy_cast(45.0, 1.0), &default_scene())
+        // 右パン(pan=+45): Rchが大きくなるはず (台本仕様.txt: +=右)
+        let out_right = proc
+            .render(&input, &dummy_cast(45.0, 1.0), &default_scene())
             .unwrap();
-        let l_right = read_rms(&out_right, 0);
-        let r_right = read_rms(&out_right, 1);
-        let right_ratio = (l_right - r_right).abs() / (l_right + r_right + 1.0);
+        let (l_right, r_right) = (rms(&out_right, 0), rms(&out_right, 1));
         assert!(
-            right_ratio > 0.05,
-            "right pan should create stereo asymmetry, got ratio={right_ratio:.3}"
+            ratio(&out_right) > 0.05,
+            "right ratio={:.3}",
+            ratio(&out_right)
         );
         assert!(
             r_right > l_right,
-            "pan=+45 (right) should be louder in the R channel, got L={l_right:.1} R={r_right:.1}"
+            "pan=+45 (right) should be louder in the R channel, got L={l_right} R={r_right}"
         );
-    }
-
-    #[test]
-    fn prewarm_then_process_succeeds() {
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.wav");
-        let output = dir.path().join("out.wav");
-        write_test_wav(&input, 48000, 880.0, 0.1);
-
-        let proc = AudioProcessor::new(default_audio_config());
-        let scene = default_scene();
-        let params: Vec<(f64, usize)> = [0.1_f64, 0.3, 0.8]
-            .iter()
-            .map(|&rs| proc.reverb_params_for(&scene, rs))
-            .collect();
-        proc.prewarm_reverb(&params);
-        let n = proc
-            .process(&input, &output, &dummy_cast(30.0, 2.0), &scene)
-            .unwrap();
-        assert!(n > 0);
     }
 
     #[test]
@@ -671,34 +424,24 @@ mod tests {
 
     #[test]
     fn early_reflections_disabled_matches_no_early_output() {
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.wav");
-        write_test_wav(&input, 48000, 440.0, 0.1);
-
         let mut cfg = default_audio_config();
         cfg.early_reflections.enabled = false;
         cfg.reverb_wet = 0.0;
         let proc = AudioProcessor::new(cfg);
-        let out = dir.path().join("out.wav");
-        proc.process(
-            &input,
-            &out,
-            &dummy_cast(20.0, 2.0),
-            &SceneConfig {
-                room_size: Some(0.1),
-                reverb_wet: Some(0.0),
-                ..SceneConfig::new("s")
-            },
-        )
-        .unwrap();
-
-        let mut r = hound::WavReader::open(&out).unwrap();
-        let energy: f64 = r
-            .samples::<i16>()
-            .map(|s| {
-                let v = s.unwrap() as f64;
-                v * v
-            })
+        let out = proc
+            .render(
+                &tone(4_800, 0.5),
+                &dummy_cast(20.0, 2.0),
+                &SceneConfig {
+                    room_size: Some(0.1),
+                    reverb_wet: Some(0.0),
+                    ..SceneConfig::new("s")
+                },
+            )
+            .unwrap();
+        let energy: f64 = out
+            .iter()
+            .map(|f| (f[0] as f64).powi(2) + (f[1] as f64).powi(2))
             .sum();
         assert!(energy > 0.0, "出力が生成されること");
     }
@@ -709,9 +452,7 @@ mod tests {
         // 位相関係（コムフィルタ）で総エネルギーが増減し得るが、無相関ノイズに
         // 遅延・減衰コピーを加えると総エネルギーは確実に増える（位相依存しない）。
         // かつて純音で FAIL した cast(20.0, 2.0) でも頑健に成り立つことを示す。
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.wav");
-        write_noise_wav(&input, 48000, 0.1);
+        let input = noise(4_800, 0.5);
         let scene = SceneConfig {
             room_size: Some(0.1),
             reverb_wet: Some(0.0),
@@ -723,15 +464,9 @@ mod tests {
             cfg.reverb_wet = 0.0;
             cfg.early_reflections.enabled = enabled;
             let proc = AudioProcessor::new(cfg);
-            let out = dir.path().join(format!("out_{enabled}.wav"));
-            proc.process(&input, &out, &dummy_cast(20.0, 2.0), &scene)
-                .unwrap();
-            let mut r = hound::WavReader::open(&out).unwrap();
-            r.samples::<i16>()
-                .map(|s| {
-                    let v = s.unwrap() as f64;
-                    v * v
-                })
+            let out = proc.render(&input, &dummy_cast(20.0, 2.0), &scene).unwrap();
+            out.iter()
+                .map(|f| (f[0] as f64).powi(2) + (f[1] as f64).powi(2))
                 .sum()
         };
 
@@ -745,9 +480,6 @@ mod tests {
 
     #[test]
     fn outdoor_scene_processes_with_near_dry_reverb() {
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.wav");
-        write_noise_wav(&input, 48000, 0.1);
         let mut cfg = default_audio_config();
         cfg.early_reflections.enabled = false;
         cfg.early_reflections.ceiling.reflection_coeff = 0.0;
@@ -763,15 +495,13 @@ mod tests {
             reverb_wet: Some(1.0),
             ..SceneConfig::new("屋外")
         };
-        let n = proc
-            .process(
-                &input,
-                &dir.path().join("outdoor.wav"),
-                &dummy_cast(0.0, 1.0),
-                &scene,
-            )
+        let out = proc
+            .render(&noise(4_800, 0.5), &dummy_cast(0.0, 1.0), &scene)
             .unwrap();
-        assert!(n > 0, "屋外 scene でも処理が成功し出力が生成されること");
+        assert!(
+            !out.is_empty(),
+            "屋外 scene でも処理が成功し出力が生成されること"
+        );
     }
 
     #[test]
@@ -800,10 +530,8 @@ mod tests {
     #[test]
     fn scene_room_dims_affect_process_output_length() {
         // 大きい部屋ほど rt60 が長く、残響テール分だけ出力サンプル数が増える。
-        // process() が scene 寸法を実際に残響へ反映していることを end-to-end で検証する。
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.wav");
-        write_noise_wav(&input, 48000, 0.1);
+        // render() が scene 寸法を実際に残響へ反映していることを end-to-end で検証する。
+        let input = noise(4_800, 0.5);
         let proc = AudioProcessor::new(default_audio_config());
 
         let small = SceneConfig {
@@ -822,21 +550,13 @@ mod tests {
         };
 
         let n_small = proc
-            .process(
-                &input,
-                &dir.path().join("small.wav"),
-                &dummy_cast(0.0, 1.0),
-                &small,
-            )
-            .unwrap();
+            .render(&input, &dummy_cast(0.0, 1.0), &small)
+            .unwrap()
+            .len();
         let n_big = proc
-            .process(
-                &input,
-                &dir.path().join("big.wav"),
-                &dummy_cast(0.0, 1.0),
-                &big,
-            )
-            .unwrap();
+            .render(&input, &dummy_cast(0.0, 1.0), &big)
+            .unwrap()
+            .len();
 
         assert!(
             n_big > n_small,
@@ -847,9 +567,7 @@ mod tests {
     #[test]
     fn speaker_height_changes_process_output() {
         // 話者高さを変えると早期反射の床反射が変わり、出力(早期反射ON)が変化する
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.wav");
-        write_noise_wav(&input, 48000, 0.1);
+        let input = noise(4_800, 0.5);
         let mut cfg = default_audio_config();
         cfg.reverb_wet = 0.0; // 残響を切り早期反射のみ比較
         let proc = AudioProcessor::new(cfg);
@@ -865,28 +583,16 @@ mod tests {
         low.height = Some(1.0);
         let mut high = dummy_cast(0.0, 2.0);
         high.height = Some(3.0);
-        let out_low = dir.path().join("low.wav");
-        let out_high = dir.path().join("high.wav");
-        proc.process(&input, &out_low, &low, &scene).unwrap();
-        proc.process(&input, &out_high, &high, &scene).unwrap();
+        let out_low = proc.render(&input, &low, &scene).unwrap();
+        let out_high = proc.render(&input, &high, &scene).unwrap();
 
-        let read = |p: &std::path::Path| -> Vec<i16> {
-            let mut r = hound::WavReader::open(p).unwrap();
-            r.samples::<i16>().map(|s| s.unwrap()).collect()
-        };
-        assert_ne!(
-            read(&out_low),
-            read(&out_high),
-            "話者高さで出力が変わること"
-        );
+        assert_ne!(out_low, out_high, "話者高さで出力が変わること");
     }
 
     #[test]
     fn speaker_height_base_plus_offset_equals_absolute() {
         // 実効高さ = cast.height + height_offset。基準1.5+行内0.3 は 絶対1.8(+0) と同一出力になること。
-        let dir = tempfile::tempdir().unwrap();
-        let input = dir.path().join("in.wav");
-        write_noise_wav(&input, 48000, 0.1);
+        let input = noise(4_800, 0.5);
         let mut cfg = default_audio_config();
         cfg.reverb_wet = 0.0;
         let proc = AudioProcessor::new(cfg);
@@ -905,19 +611,56 @@ mod tests {
         absolute.height = Some(1.8);
         absolute.height_offset = 0.0;
 
-        let out_c = dir.path().join("combined.wav");
-        let out_a = dir.path().join("absolute.wav");
-        proc.process(&input, &out_c, &combined, &scene).unwrap();
-        proc.process(&input, &out_a, &absolute, &scene).unwrap();
-
-        let read = |p: &std::path::Path| -> Vec<i16> {
-            let mut r = hound::WavReader::open(p).unwrap();
-            r.samples::<i16>().map(|s| s.unwrap()).collect()
-        };
+        let out_c = proc.render(&input, &combined, &scene).unwrap();
+        let out_a = proc.render(&input, &absolute, &scene).unwrap();
         assert_eq!(
-            read(&out_c),
-            read(&out_a),
+            out_c, out_a,
             "基準+行内オフセットの合算が絶対指定と一致すること"
         );
+    }
+
+    fn tone(n: usize, amp: f32) -> Vec<f32> {
+        (0..n).map(|i| amp * ((i as f32) * 0.05).sin()).collect()
+    }
+
+    #[test]
+    fn render_rejects_empty_input() {
+        let p = AudioProcessor::new(default_audio_config());
+        assert!(p
+            .render(&[], &dummy_cast(0.0, 1.0), &default_scene())
+            .is_err());
+    }
+
+    #[test]
+    fn render_is_linear_without_per_line_normalization_or_limiter() {
+        let p = AudioProcessor::new(default_audio_config());
+        let x = tone(4_800, 0.2);
+        let x4: Vec<f32> = x.iter().map(|v| v * 4.0).collect();
+        let cast = dummy_cast(0.0, 0.3);
+        let a = p.render(&x, &cast, &default_scene()).unwrap();
+        let b = p.render(&x4, &cast, &default_scene()).unwrap();
+        assert_eq!(a.len(), b.len());
+        for (fa, fb) in a.iter().zip(&b) {
+            assert!((fb[0] - 4.0 * fa[0]).abs() < 1e-4);
+            assert!((fb[1] - 4.0 * fa[1]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn volume_half_lowers_output_by_6_db() {
+        let p = AudioProcessor::new(default_audio_config());
+        let x = tone(9_600, 0.2);
+        let full = dummy_cast(0.0, 1.0);
+        let mut half = full.clone();
+        half.volume = 0.5;
+        let a = p.render(&x, &full, &default_scene()).unwrap();
+        let b = p.render(&x, &half, &default_scene()).unwrap();
+        let energy = |v: &[[f32; 2]]| {
+            v.iter()
+                .map(|f| (f[0] * f[0] + f[1] * f[1]) as f64)
+                .sum::<f64>()
+        };
+        let db = 10.0 * (energy(&b) / energy(&a)).log10();
+        assert!((db + 6.02).abs() < 0.1, "{db}");
     }
 }

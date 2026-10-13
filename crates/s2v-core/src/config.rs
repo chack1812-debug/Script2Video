@@ -1,4 +1,3 @@
-use std::collections::HashMap;
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
@@ -40,26 +39,10 @@ pub struct AudioConfig {
     pub room_size: f64,
     pub reverb_wet: f64,
     pub reference_dist: f64,
-    /// Task 12 で削除する(基準ゲインの再較正に置き換える)。
-    #[serde(default = "legacy_reference_gain_db")]
-    pub reference_gain_db: f64,
-    /// Task 12 で削除する(台詞ごとのリミッタを廃止する)。
-    #[serde(default = "legacy_max_gain_db")]
-    pub max_gain_db: f64,
     pub mic_directivity: f64,
     pub mic_angle: f64,
-    /// Task 12 で削除する(音声合成エンジンごとの補正。Script2Video では使わない)。
-    #[serde(default)]
-    pub engine_volume_offsets: HashMap<String, f64>,
     #[serde(default)]
     pub early_reflections: EarlyConfig,
-}
-
-fn legacy_reference_gain_db() -> f64 {
-    -5.0
-}
-fn legacy_max_gain_db() -> f64 {
-    -1.0
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]

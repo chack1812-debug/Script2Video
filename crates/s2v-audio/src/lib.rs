@@ -1,4 +1,5 @@
 pub mod acoustics;
+pub mod calib;
 pub mod detect;
 pub mod early;
 pub(crate) mod filters;

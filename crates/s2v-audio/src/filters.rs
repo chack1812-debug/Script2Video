@@ -25,7 +25,6 @@ impl Biquad {
         }
     }
 
-    #[allow(dead_code)] // Task 12 の calib.rs(較正信号)で使う。そこで allow を外す
     /// RBJ のローパス。
     pub(crate) fn lowpass(fc: f64, q: f64, fs: f64) -> Self {
         let (cos, alpha) = Self::rbj(fc, q, fs);
@@ -40,7 +39,6 @@ impl Biquad {
         )
     }
 
-    #[allow(dead_code)] // Task 12 の calib.rs(較正信号)で使う。そこで allow を外す
     /// RBJ のハイパス。
     pub(crate) fn highpass(fc: f64, q: f64, fs: f64) -> Self {
         let (cos, alpha) = Self::rbj(fc, q, fs);
@@ -55,7 +53,6 @@ impl Biquad {
         )
     }
 
-    #[allow(dead_code)] // Task 12 の calib.rs(較正信号)で使う。そこで allow を外す
     fn rbj(fc: f64, q: f64, fs: f64) -> (f64, f64) {
         let w0 = 2.0 * std::f64::consts::PI * fc / fs;
         (w0.cos(), w0.sin() / (2.0 * q))

@@ -129,7 +129,6 @@ fn material_lowpass(samples: &[f32], mat: &MaterialConfig, fs: f64) -> Vec<f32> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::HashMap;
 
     fn geo_for(room_size: f64, er: &EarlyConfig) -> RoomGeometry {
         RoomGeometry {
@@ -148,11 +147,8 @@ mod tests {
             room_size: 0.1,
             reverb_wet: 0.3,
             reference_dist: 1.0,
-            reference_gain_db: -5.0,
-            max_gain_db: -1.0,
             mic_directivity: 0.2,
             mic_angle: 30.0,
-            engine_volume_offsets: HashMap::new(),
             early_reflections: EarlyConfig::default(),
         }
     }
