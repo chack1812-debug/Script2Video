@@ -1,4 +1,5 @@
 pub mod acoustics;
+pub mod detect;
 pub mod early;
 pub mod geometry;
 pub mod input;

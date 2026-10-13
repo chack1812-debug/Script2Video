@@ -3,6 +3,7 @@ pub mod config;
 pub mod ids;
 pub mod numbering;
 pub mod parser;
+pub mod time;
 pub mod timeline;
 pub mod types;
 pub mod validate;
