@@ -13,3 +13,4 @@
 {"id":"int-59017b17a066ab3e50e2b546e7288d84","kind":"field_change","created_at":"2026-10-13T10:48:46.9685963Z","actor":"村上孝伸","issue_id":"s2vid-y30","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-825e8c4070d7fb174e9b992cbe7b93fa","kind":"field_change","created_at":"2026-10-13T11:14:57.9326741Z","actor":"村上孝伸","issue_id":"s2vid-5uw","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
 {"id":"int-0228e476b5bbcf0c1841be3d7356103a","kind":"field_change","created_at":"2026-10-13T11:28:39.0160777Z","actor":"村上孝伸","issue_id":"s2vid-4cb","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
+{"id":"int-6e889024fab1f5a24b8c0c30d8993053","kind":"field_change","created_at":"2026-10-13T11:40:07.7225731Z","actor":"村上孝伸","issue_id":"s2vid-q6s","extra":{"field":"status","new_value":"closed","old_value":"in_progress","reason":"Closed"}}
