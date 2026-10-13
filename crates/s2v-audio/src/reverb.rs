@@ -10,10 +10,13 @@ use realfft::RealFftPlanner;
 /// 信号ごとの(ピーク依存の)再正規化は行わず、この定数だけを掛ける(処理を入力に対して線形に保つ)。
 pub const REVERB_WET_GAIN: f32 = 0.4;
 
+type IrKey = (OrderedFloat<f64>, usize);
+type StereoIr = [Vec<f32>; 2];
+
 /// (rt60, pre_delay) をキーとした stereo IR キャッシュ ([ir_l, ir_r])
 pub struct IrCache {
     sample_rate: u32,
-    cache: Mutex<HashMap<(OrderedFloat<f64>, usize), [Vec<f32>; 2]>>,
+    cache: Mutex<HashMap<IrKey, StereoIr>>,
 }
 
 impl IrCache {
@@ -41,9 +44,10 @@ impl IrCache {
     }
 
     /// IR を使って stereo バッファにリバーブをかける (in-place)
+    #[allow(clippy::too_many_arguments)] // 移植元の署名を保つ(引数を束ねるリファクタは行わない)
     pub fn apply(
         &self,
-        stereo: &mut Vec<[f32; 2]>,
+        stereo: &mut [[f32; 2]],
         rt60: f64,
         pre_delay: usize,
         reverb_wet: f64,

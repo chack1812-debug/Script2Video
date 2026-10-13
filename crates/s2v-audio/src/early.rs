@@ -19,6 +19,7 @@ pub struct EarlyTap {
 
 /// 6面の一次反射タップを生成する。`min_delay_direct` は直接音の最早到達サンプル
 /// (processor が time-zero とする値)で、各タップの相対遅延の基準にする。
+#[allow(clippy::too_many_arguments)] // 移植元の署名を保つ(引数を束ねるリファクタは行わない)
 pub fn build_early_taps(
     mono: &[f32],
     distance: f64,
@@ -163,8 +164,10 @@ mod tests {
 
     #[test]
     fn disabled_returns_no_taps() {
-        let mut er = EarlyConfig::default();
-        er.enabled = false;
+        let er = EarlyConfig {
+            enabled: false,
+            ..EarlyConfig::default()
+        };
         let mono = vec![1.0_f32; 1000];
         let taps = build_early_taps(
             &mono,

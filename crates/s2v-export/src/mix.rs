@@ -145,10 +145,10 @@ pub fn mix(req: MixRequest<'_>) -> anyhow::Result<Mixed> {
             if bgm_failed.contains(&p) {
                 continue;
             }
-            if !bgm_src.contains_key(&p) {
+            if let std::collections::hash_map::Entry::Vacant(slot) = bgm_src.entry(p.clone()) {
                 match read_stereo_48k(&p) {
                     Ok(v) => {
-                        bgm_src.insert(p, v);
+                        slot.insert(v);
                     }
                     Err(err) => {
                         warnings.push(format!("BGM を読めません（無視します）: {path}: {err}"));

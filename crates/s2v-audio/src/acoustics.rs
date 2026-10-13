@@ -132,8 +132,10 @@ mod tests {
 
     #[test]
     fn resolve_listener_uses_scene_then_config() {
-        let mut er = EarlyConfig::default();
-        er.listener_offset = [1.0, 2.0];
+        let er = EarlyConfig {
+            listener_offset: [1.0, 2.0],
+            ..EarlyConfig::default()
+        };
         let scene_none = SceneConfig::new("x");
         assert_eq!(
             resolve_room_geometry(&scene_none, &er, 0.5).listener_offset,
@@ -152,8 +154,10 @@ mod tests {
 
     #[test]
     fn resolve_listener_height_uses_scene_then_config() {
-        let mut er = EarlyConfig::default();
-        er.ear_height = 1.2;
+        let er = EarlyConfig {
+            ear_height: 1.2,
+            ..EarlyConfig::default()
+        };
         let scene_none = SceneConfig::new("x");
         assert!((resolve_room_geometry(&scene_none, &er, 0.5).listener_height - 1.2).abs() < 1e-10);
         let scene_set = SceneConfig {

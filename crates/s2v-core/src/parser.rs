@@ -79,13 +79,13 @@ impl ScriptParser {
 
             if line.starts_with('@') {
                 self.flush_pending_cast();
-                if line.starts_with("@scene") {
+                if let Some(scene_rest) = line.strip_prefix("@scene") {
                     if let Some(mut s) = current_scene.take() {
                         s.casts = self.casts.clone();
                         Self::fill_items_scene_config(&mut s);
                         scenes.push(s);
                     }
-                    let scene_raw = line["@scene".len()..].trim();
+                    let scene_raw = scene_rest.trim();
                     let scene = self.parse_scene_header(scene_raw, line_no);
                     let mut s = Scene::new(scene);
                     s.pause_config = self.pause_config.clone();
