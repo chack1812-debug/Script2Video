@@ -111,7 +111,7 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
         .map(|w| format!("{} 行目: {}", w.line_no, w.message))
         .collect();
     // ここから先の失敗は Process.log に記録する
-    let result = produce(
+    Ok(run_after_commit(
         args,
         &config,
         &scenes,
@@ -119,19 +119,37 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
         &stem,
         &out_dir,
         &mut log,
-    )
-    .and_then(|o| log.check().map(|()| o));
+    ))
+}
+
+/// コミットポイント以降を実行する。失敗(Process.log に書けない場合を含む)は
+/// `[ERROR]` として記録し、成果物を残さずに Failed を返す。
+fn run_after_commit(
+    args: &BuildArgs,
+    config: &Config,
+    scenes: &[Scene],
+    script_warnings: &[String],
+    stem: &str,
+    out_dir: &Path,
+    log: &mut ProcLog,
+) -> Outcome {
+    let result = produce(args, config, scenes, script_warnings, stem, out_dir, log)
+        .and_then(|o| log.check().map(|()| o));
     match result {
-        Ok(o) => Ok(o),
+        Ok(o) => o,
         Err(e) => {
             log.error(format!("{e:#}"));
-            Ok(Outcome::Failed)
+            if let Err(e) = remove_final_artifacts(out_dir) {
+                eprintln!("[ERROR] 出力の取り消しに失敗しました: {e}");
+            }
+            Outcome::Failed
         }
     }
 }
 
-/// 前回の最終成果物(これだけ)を消す。`work/` と `Process.log` には触れない。
-fn remove_stale_outputs(out_dir: &Path) -> anyhow::Result<()> {
+/// 最終成果物(これだけ)を消す。`work/` と `Process.log` には触れない。
+/// 途中で失敗しても残りを消し続け、最初の失敗を返す。
+fn remove_final_artifacts(out_dir: &Path) -> std::io::Result<()> {
     let finals = [
         "full_dialogue.wav",
         "tracks/dialogue.wav",
@@ -141,14 +159,17 @@ fn remove_stale_outputs(out_dir: &Path) -> anyhow::Result<()> {
         "subtitles.srt",
         "timeline.fcpxml",
     ];
+    let mut first_err = None;
     for rel in finals {
         let path = out_dir.join(rel);
         match std::fs::remove_file(&path) {
             Ok(()) => {}
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => {
-                return Err(e)
-                    .with_context(|| format!("前回の出力を消せません: {}", path.display()))
+                first_err.get_or_insert(std::io::Error::new(
+                    e.kind(),
+                    format!("{}: {e}", path.display()),
+                ));
             }
         }
     }
@@ -157,7 +178,7 @@ fn remove_stale_outputs(out_dir: &Path) -> anyhow::Result<()> {
     if tracks.is_dir() {
         let _ = std::fs::remove_dir(&tracks);
     }
-    Ok(())
+    first_err.map_or(Ok(()), Err)
 }
 
 /// コミットポイントより後の処理。失敗は呼び出し側が Process.log に記録して終了コード 2 にする。
@@ -171,7 +192,8 @@ fn produce(
     log: &mut ProcLog,
 ) -> anyhow::Result<Outcome> {
     // コミットポイント: 前回の成果物が古いまま残らないよう、新しく作る前に消す
-    remove_stale_outputs(out_dir)?;
+    remove_final_artifacts(out_dir)
+        .with_context(|| format!("前回の出力を消せません: {}", out_dir.display()))?;
     for w in script_warnings {
         log.warn(w);
     }
@@ -525,4 +547,68 @@ fn prepare_line(
         meta,
         file_len: resampled.len(),
     }))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    struct Failing;
+    impl std::io::Write for Failing {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("書き込み失敗"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn log_write_failure_after_output_removes_final_artifacts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let out = tmp.path().join("ep");
+        std::fs::create_dir_all(&out).unwrap();
+        let script = tmp.path().join("ep.txt");
+        let text = "@scene 居間
+@cast
+A:田中
+
+@script
+#paragraph[S01]
+[S01-L001] A:あ
+";
+        std::fs::write(&script, text).unwrap();
+        let voices = tmp.path().join("v");
+        std::fs::create_dir_all(&voices).unwrap();
+        let mut parser = ScriptParser::new();
+        let scenes = parser.parse_str(text).unwrap();
+        let args = BuildArgs {
+            script,
+            voice_dir: voices,
+            config: None,
+            no_cache: false,
+        };
+        let mut log = ProcLog::from_writer(Box::new(Failing));
+        let o = run_after_commit(
+            &args,
+            &Config::builtin(),
+            &scenes,
+            &[],
+            "ep",
+            &out,
+            &mut log,
+        );
+        assert_eq!(o, Outcome::Failed);
+        for n in [
+            "full_dialogue.wav",
+            "timeline.json",
+            "subtitles.srt",
+            "timeline.fcpxml",
+            "tracks/dialogue.wav",
+            "tracks/bgm.wav",
+            "tracks/se.wav",
+        ] {
+            assert!(!out.join(n).exists(), "{n}");
+        }
+    }
 }
