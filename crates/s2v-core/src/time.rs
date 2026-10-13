@@ -17,7 +17,12 @@ pub fn floor_ms(samples: i64) -> i64 {
 
 /// 終了の時刻・長さ: 切り上げ(負の値も +∞ 方向)。
 pub fn ceil_ms(samples: i64) -> i64 {
-    -(-samples).div_euclid(SAMPLES_PER_MS)
+    let q = samples.div_euclid(SAMPLES_PER_MS);
+    if samples.rem_euclid(SAMPLES_PER_MS) != 0 {
+        q + 1
+    } else {
+        q
+    }
 }
 
 #[cfg(test)]
@@ -46,5 +51,49 @@ mod tests {
         assert_eq!(ceil_ms(-48), -1);
         assert_eq!(ceil_ms(-49), -1);
         assert_eq!(floor_ms(-49), -2);
+    }
+
+    fn floor_oracle(s: i64) -> i64 {
+        (s as i128).div_euclid(48) as i64
+    }
+
+    fn ceil_oracle(s: i64) -> i64 {
+        (-((-(s as i128)).div_euclid(48))) as i64
+    }
+
+    #[test]
+    fn extreme_samples_match_i128_oracle() {
+        for s in [i64::MIN, i64::MIN + 1, i64::MAX - 1, i64::MAX] {
+            assert_eq!(floor_ms(s), floor_oracle(s), "floor {s}");
+            assert_eq!(ceil_ms(s), ceil_oracle(s), "ceil {s}");
+        }
+    }
+
+    #[test]
+    fn rounding_matches_i128_oracle_around_multiples_of_48() {
+        for s in -100..=100i64 {
+            assert_eq!(floor_ms(s), floor_oracle(s), "floor {s}");
+            assert_eq!(ceil_ms(s), ceil_oracle(s), "ceil {s}");
+        }
+        for k in [
+            1i64,
+            1_000,
+            1_000_000,
+            192_153_584_101_141_000,
+            -192_153_584_101_141_000,
+        ] {
+            for d in -1..=1i64 {
+                let s = k * 48 + d;
+                assert_eq!(floor_ms(s), floor_oracle(s), "floor {s}");
+                assert_eq!(ceil_ms(s), ceil_oracle(s), "ceil {s}");
+            }
+        }
+    }
+
+    #[test]
+    fn ms_to_samples_saturates_and_nan_is_zero() {
+        assert_eq!(ms_to_samples(f64::INFINITY), i64::MAX);
+        assert_eq!(ms_to_samples(f64::NEG_INFINITY), i64::MIN);
+        assert_eq!(ms_to_samples(f64::NAN), 0);
     }
 }
