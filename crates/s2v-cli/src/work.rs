@@ -61,6 +61,8 @@ impl WorkDir {
         for sub in SUBDIRS {
             std::fs::create_dir_all(root.join(sub))?;
         }
+        // 前回の異常終了で残った一時ファイル
+        let _ = std::fs::remove_file(root.join("cache.json.tmp"));
         let (entries, note) = match std::fs::read_to_string(root.join("cache.json")) {
             Ok(s) => match serde_json::from_str::<CacheFile>(&s) {
                 Ok(c) if c.version == 1 => (c.entries, None),
@@ -178,23 +180,33 @@ impl WorkDir {
 
     fn save(&self) -> anyhow::Result<()> {
         let tmp = self.root.join("cache.json.tmp");
-        std::fs::write(&tmp, serde_json::to_string_pretty(&self.cache)?)?;
-        std::fs::rename(&tmp, self.root.join("cache.json"))?;
-        Ok(())
+        let written = serde_json::to_string_pretty(&self.cache)
+            .map_err(anyhow::Error::from)
+            .and_then(|s| Ok(std::fs::write(&tmp, s)?))
+            .and_then(|()| Ok(std::fs::rename(&tmp, self.root.join("cache.json"))?));
+        if written.is_err() {
+            let _ = std::fs::remove_file(&tmp);
+        }
+        written
     }
 }
 
-/// `rel` が `work/` の中に収まる相対パス(通常の名前の連なりだけ)であることを確かめる。
+/// `rel` が厳密に `<subdir>/<file>`(subdir は `SUBDIRS` のどれか、file は単純なファイル名)であることを確かめる。
+/// これにより `used` の文字列は常に正規形になり、`finish` の 1 階層の走査で漏れなく扱える。
 fn check_rel(rel: &str) -> anyhow::Result<()> {
-    let p = Path::new(rel);
-    let ok = p.components().next().is_some()
-        && p.components()
-            .all(|c| matches!(c, std::path::Component::Normal(_)))
-        && !rel.starts_with(['/', '\\']);
+    let ok = rel.split_once('/').is_some_and(|(sub, file)| {
+        SUBDIRS.contains(&sub)
+            && !file.is_empty()
+            && file != "."
+            && file != ".."
+            && !file.contains(['/', '\\', ':'])
+    });
     if ok {
         Ok(())
     } else {
-        anyhow::bail!("work/ の外を指す相対パスは使えません: {rel}")
+        anyhow::bail!(
+            "work/ の `<サブフォルダ>/<ファイル名>` 形式ではない相対パスは使えません: {rel}"
+        )
     }
 }
 
@@ -239,6 +251,15 @@ pub struct LineKeyParams {
     pub prefade: bool,
 }
 
+/// `-0.0` を `0.0` にそろえる(表記が違うだけでキーが変わらないように)。
+fn canon(v: f64) -> f64 {
+    if v == 0.0 {
+        0.0
+    } else {
+        v
+    }
+}
+
 /// `lines/` のキー: `resampled/` のキー + 使用範囲 + 測定範囲を決める設定 + 正規化の設定 + 処理のバージョン。
 pub fn line_key(resampled_key: &str, p: &LineKeyParams) -> String {
     sha256_hex(
@@ -246,10 +267,10 @@ pub fn line_key(resampled_key: &str, p: &LineKeyParams) -> String {
             "lines|v{NORMALIZE_VERSION}|{resampled_key}|{}|{}|{}|{}|{}|{}|{}",
             p.src_start,
             p.src_end,
-            p.trim_threshold_db,
-            p.target_lufs,
-            p.max_boost_db,
-            p.max_cut_db,
+            canon(p.trim_threshold_db),
+            canon(p.target_lufs),
+            canon(p.max_boost_db),
+            canon(p.max_cut_db),
             p.prefade
         )
         .as_bytes(),
@@ -350,29 +371,137 @@ mod tests {
             prefade: false,
         };
         let k = line_key("r", &base);
-        assert_ne!(k, line_key("r2", &base));
-        assert_ne!(k, line_key("r", &LineKeyParams { src_end: 3, ..base }));
-        assert_ne!(
+        assert_eq!(k, line_key("r", &base));
+        let keys = vec![
             k,
+            line_key("r2", &base),
+            line_key(
+                "r",
+                &LineKeyParams {
+                    src_start: 9,
+                    ..base
+                },
+            ),
+            line_key("r", &LineKeyParams { src_end: 3, ..base }),
+            line_key(
+                "r",
+                &LineKeyParams {
+                    trim_threshold_db: -40.0,
+                    ..base
+                },
+            ),
             line_key(
                 "r",
                 &LineKeyParams {
                     target_lufs: -20.0,
                     ..base
-                }
-            )
-        );
-        assert_ne!(
-            k,
+                },
+            ),
+            line_key(
+                "r",
+                &LineKeyParams {
+                    max_boost_db: 12.0,
+                    ..base
+                },
+            ),
+            line_key(
+                "r",
+                &LineKeyParams {
+                    max_cut_db: 12.0,
+                    ..base
+                },
+            ),
             line_key(
                 "r",
                 &LineKeyParams {
                     prefade: true,
                     ..base
+                },
+            ),
+        ];
+        let set: std::collections::HashSet<_> = keys.iter().collect();
+        assert_eq!(set.len(), keys.len());
+        assert_ne!(resampled_key("a"), resampled_key("b"));
+        assert_eq!(resampled_key("a"), resampled_key("a"));
+    }
+
+    #[test]
+    fn negative_zero_gives_the_same_key() {
+        let base = LineKeyParams {
+            src_start: 1,
+            src_end: 2,
+            trim_threshold_db: -50.0,
+            target_lufs: 0.0,
+            max_boost_db: 24.0,
+            max_cut_db: 24.0,
+            prefade: false,
+        };
+        assert_eq!(
+            line_key("r", &base),
+            line_key(
+                "r",
+                &LineKeyParams {
+                    target_lufs: -0.0,
+                    ..base
                 }
             )
         );
-        assert_ne!(resampled_key("a"), resampled_key("b"));
+    }
+
+    #[test]
+    fn rel_must_be_exactly_subdir_slash_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (mut w, _) = WorkDir::open(tmp.path(), false).unwrap();
+        for bad in [
+            "lines//a.wav",
+            "lines\\a.wav",
+            "lines/nested/a.wav",
+            "lines/",
+            "/lines/a.wav",
+            "C:lines/a.wav",
+            "lines/..",
+            "lines/.",
+            "other/a.wav",
+            "lines/a:b.wav",
+        ] {
+            assert!(w.store(bad, "k", &[0.1], None).is_err(), "store {bad}");
+            assert!(w.lookup(bad, "k").is_none(), "lookup {bad}");
+        }
+        w.store("lines/S01-L001.wav", "k", &[0.1], None).unwrap();
+        w.store("resampled/S01_L001.wav", "k", &[0.1], None)
+            .unwrap();
+        w.store("lines_prefade/S01-L001.wav", "k", &[0.1], None)
+            .unwrap();
+        w.finish().unwrap();
+        assert!(tmp.path().join("lines/S01-L001.wav").exists());
+        assert!(tmp.path().join("resampled/S01_L001.wav").exists());
+    }
+
+    #[test]
+    fn stale_cache_json_tmp_is_removed_on_open() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("cache.json.tmp"), "garbage").unwrap();
+        let (mut w, _) = WorkDir::open(tmp.path(), false).unwrap();
+        assert!(!tmp.path().join("cache.json.tmp").exists());
+        w.store("lines/a.wav", "k", &[0.1], None).unwrap();
+        let (mut w2, _) = WorkDir::open(tmp.path(), false).unwrap();
+        assert!(w2.lookup("lines/a.wav", "k").is_some());
+    }
+
+    #[test]
+    fn read_mono_of_int_wav_is_an_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (w, _) = WorkDir::open(tmp.path(), false).unwrap();
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: 48_000,
+            bits_per_sample: 16,
+            sample_format: hound::SampleFormat::Int,
+        };
+        let mut wr = hound::WavWriter::create(tmp.path().join("lines/i.wav"), spec).unwrap();
+        wr.write_sample(100i16).unwrap();
+        wr.finalize().unwrap();
+        assert!(w.read_mono("lines/i.wav").is_err());
     }
 
     #[test]
