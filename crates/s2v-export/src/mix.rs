@@ -88,7 +88,7 @@ pub fn mix(req: MixRequest<'_>) -> anyhow::Result<Mixed> {
                 // SE は終わりが「開始 + ファイル長」で確定する。BGM は区間の終わりで
                 // 切られる/ループするので、ここでは単独の長さだけを見る
                 if let PlacedEvent::Se { start, .. } = e {
-                    if (*start).max(0) as u64 + n > MAX_TOTAL_SAMPLES as u64 {
+                    if ((*start).max(0) as u64).saturating_add(n) > MAX_TOTAL_SAMPLES as u64 {
                         anyhow::bail!("SE の終わりが上限（1 時間）を超えます: {path}");
                     }
                 }
