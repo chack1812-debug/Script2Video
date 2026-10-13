@@ -18,10 +18,14 @@ impl IdsRecord {
         let mut r = Self::default();
         for line in text.lines() {
             if let Some((k, v)) = line.split_once('=') {
-                let v = v.trim().parse::<u32>().unwrap_or(0);
+                // 壊れた値の行は無視する(0 で上書きすると欠番が再利用されてしまう)。
+                // 同じキーが複数回正しく読めた場合は、安全側として最大値を採る。
+                let Ok(v) = v.trim().parse::<u32>() else {
+                    continue;
+                };
                 match k.trim() {
-                    "max_line" => r.max_line = v,
-                    "max_scene" => r.max_scene = v,
+                    "max_line" => r.max_line = r.max_line.max(v),
+                    "max_scene" => r.max_scene = r.max_scene.max(v),
                     _ => {}
                 }
             }
@@ -109,20 +113,19 @@ pub fn number_script(text: &str, record: IdsRecord) -> Result<Numbered, Vec<Pars
         return Err(errors);
     }
 
-    let mut next_line = seen_lines
+    // 使用済みの最大番号。新しい番号が必要になったときだけ checked_add で進める。
+    let mut last_line = seen_lines
         .keys()
         .copied()
         .max()
         .unwrap_or(0)
-        .max(record.max_line)
-        + 1;
-    let mut next_scene = seen_scenes
+        .max(record.max_line);
+    let mut last_scene = seen_scenes
         .keys()
         .copied()
         .max()
         .unwrap_or(0)
-        .max(record.max_scene)
-        + 1;
+        .max(record.max_scene);
 
     // 2回目: 番号のない行に書き込む
     let mut out = String::with_capacity(text.len() + 256);
@@ -146,8 +149,10 @@ pub fn number_script(text: &str, record: IdsRecord) -> Result<Numbered, Vec<Pars
                     current_scene = n;
                     out.push_str(raw);
                 } else if after.is_empty() || after.starts_with(char::is_whitespace) {
-                    let n = next_scene;
-                    next_scene += 1;
+                    let Some(n) = last_scene.checked_add(1) else {
+                        return Err(exhausted("シーン番号"));
+                    };
+                    last_scene = n;
                     assigned_scenes += 1;
                     current_scene = n;
                     let at = indent_len + "#paragraph".len();
@@ -155,7 +160,8 @@ pub fn number_script(text: &str, record: IdsRecord) -> Result<Numbered, Vec<Pars
                     out.push_str(&format!("[{}]", format_scene_id(n)));
                     out.push_str(&raw[at..]);
                 } else {
-                    // `[` で始まるが書式が不正: パーサが警告するので、ここでは触らない
+                    // `#paragraph` の直後が `[` だが `[Sxx]` として読めない(`[abc]` など): パーサが警告するので触らない。
+                    // `#paragraphXYZ` のような別コマンドは classify が Other にするので、ここには来ない
                     out.push_str(raw);
                 }
             }
@@ -169,11 +175,14 @@ pub fn number_script(text: &str, record: IdsRecord) -> Result<Numbered, Vec<Pars
                     });
                     warned_s00 = true;
                 }
+                let Some(line) = last_line.checked_add(1) else {
+                    return Err(exhausted("台詞番号"));
+                };
+                last_line = line;
                 let id = LineId {
                     scene: current_scene,
-                    line: next_line,
+                    line,
                 };
-                next_line += 1;
                 assigned_lines += 1;
                 out.push_str(&raw[..indent_len]);
                 out.push_str(&format!("[{}] ", id.display()));
@@ -186,13 +195,20 @@ pub fn number_script(text: &str, record: IdsRecord) -> Result<Numbered, Vec<Pars
     Ok(Numbered {
         text: out,
         record: IdsRecord {
-            max_line: next_line - 1,
-            max_scene: next_scene - 1,
+            max_line: last_line,
+            max_scene: last_scene,
         },
         assigned_lines,
         assigned_scenes,
         warnings,
     })
+}
+
+fn exhausted(kind: &str) -> Vec<ParseWarning> {
+    vec![ParseWarning {
+        line_no: 0,
+        message: format!("{kind}が上限に達しました。これ以上採番できません"),
+    }]
 }
 
 /// 改行を除き、前後の空白を除いた内容と、行頭の字下げの長さ(バイト)を返す。
@@ -372,5 +388,205 @@ mod tests {
         };
         assert_eq!(IdsRecord::parse(&r.to_text()), r);
         assert_eq!(IdsRecord::parse("ゴミ\n"), IdsRecord::default());
+    }
+
+    fn script(body: &str) -> String {
+        format!("{HEAD}{body}")
+    }
+
+    #[test]
+    fn ids_record_ignores_corrupt_later_line() {
+        let r = IdsRecord::parse("max_line=12\nmax_line=壊れた値\nmax_scene=3\nmax_scene=\n");
+        assert_eq!(
+            r,
+            IdsRecord {
+                max_line: 12,
+                max_scene: 3
+            }
+        );
+    }
+
+    #[test]
+    fn ids_record_corrupt_only_line_is_zero() {
+        let r = IdsRecord::parse("max_line=壊れた値\nmax_scene=-1\n");
+        assert_eq!(r, IdsRecord::default());
+    }
+
+    #[test]
+    fn ids_record_duplicate_valid_lines_keep_largest() {
+        let r = IdsRecord::parse("max_line=5\nmax_line=12\nmax_line=7\nmax_scene=9\nmax_scene=2\n");
+        assert_eq!(
+            r,
+            IdsRecord {
+                max_line: 12,
+                max_scene: 9
+            }
+        );
+    }
+
+    #[test]
+    fn exhausted_line_number_from_record_is_error() {
+        let errs = number_script(
+            &script("#paragraph[S01]\nA:一\n"),
+            IdsRecord {
+                max_line: u32::MAX,
+                max_scene: 0,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("台詞番号"), "{}", errs[0].message);
+    }
+
+    #[test]
+    fn exhausted_line_number_from_existing_id_is_error() {
+        let errs = number_script(
+            &script("#paragraph[S01]\n[S01-L4294967295] A:一\nB:二\n"),
+            IdsRecord::default(),
+        )
+        .unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert!(errs[0].message.contains("台詞番号"), "{}", errs[0].message);
+    }
+
+    #[test]
+    fn max_line_number_with_nothing_to_number_is_ok() {
+        let src = script("#paragraph[S01]\n[S01-L4294967295] A:一\n");
+        let n = number_script(&src, IdsRecord::default()).unwrap();
+        assert_eq!(n.text, src);
+        assert_eq!(
+            n.record,
+            IdsRecord {
+                max_line: u32::MAX,
+                max_scene: 1
+            }
+        );
+        let n = number_script(
+            &script("#paragraph[S01]\n"),
+            IdsRecord {
+                max_line: u32::MAX,
+                max_scene: 0,
+            },
+        )
+        .unwrap();
+        assert_eq!(n.record.max_line, u32::MAX);
+    }
+
+    #[test]
+    fn exhausted_scene_number_from_record_is_error() {
+        let errs = number_script(
+            &script("#paragraph\n"),
+            IdsRecord {
+                max_line: 0,
+                max_scene: u32::MAX,
+            },
+        )
+        .unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert!(
+            errs[0].message.contains("シーン番号"),
+            "{}",
+            errs[0].message
+        );
+    }
+
+    #[test]
+    fn exhausted_scene_number_from_existing_id_is_error() {
+        let errs = number_script(
+            &script("#paragraph[S4294967295]\n#paragraph\n"),
+            IdsRecord::default(),
+        )
+        .unwrap_err();
+        assert_eq!(errs.len(), 1);
+        assert!(
+            errs[0].message.contains("シーン番号"),
+            "{}",
+            errs[0].message
+        );
+    }
+
+    #[test]
+    fn max_scene_number_with_nothing_to_number_is_ok() {
+        let src = script("#paragraph[S4294967295]\n");
+        let n = number_script(&src, IdsRecord::default()).unwrap();
+        assert_eq!(n.text, src);
+        assert_eq!(
+            n.record,
+            IdsRecord {
+                max_line: 0,
+                max_scene: u32::MAX
+            }
+        );
+        let n = number_script(
+            &script("[S01-L001] A:一\n"),
+            IdsRecord {
+                max_line: 0,
+                max_scene: u32::MAX,
+            },
+        )
+        .unwrap();
+        assert_eq!(n.record.max_scene, u32::MAX);
+    }
+
+    #[test]
+    fn paragraph_whitespace_between_tokens_is_preserved() {
+        let n = run(
+            "#paragraph\n#paragraph\t朝\n#paragraph  \t 名称\n#paragraph[S09] \t名称\n\tA:x\n",
+            IdsRecord::default(),
+        );
+        assert_eq!(
+            n.text,
+            script("#paragraph[S10]\n#paragraph[S11]\t朝\n#paragraph[S12]  \t 名称\n#paragraph[S09] \t名称\n\t[S09-L001] A:x\n")
+        );
+    }
+
+    #[test]
+    fn paragraph_like_command_is_untouched() {
+        let src = script("#paragraphXYZ\n#paragraph[S01]\n");
+        let n = number_script(&src, IdsRecord::default()).unwrap();
+        assert_eq!(n.text, src);
+        assert_eq!(n.assigned_scenes, 0);
+    }
+
+    #[test]
+    fn numbering_continues_across_sections_and_scene_blocks() {
+        let src = "@scene 居間\n@cast\nA:田中\n\n@script\n#paragraph\nA:一\n@scene 台所\n@cast\nA:田中\n\n@script\n#paragraph\nA:二\n";
+        let n = number_script(src, IdsRecord::default()).unwrap();
+        assert_eq!(
+            n.text,
+            "@scene 居間\n@cast\nA:田中\n\n@script\n#paragraph[S01]\n[S01-L001] A:一\n@scene 台所\n@cast\nA:田中\n\n@script\n#paragraph[S02]\n[S02-L002] A:二\n"
+        );
+        assert_eq!(
+            n.record,
+            IdsRecord {
+                max_line: 2,
+                max_scene: 2
+            }
+        );
+    }
+
+    #[test]
+    fn last_line_without_trailing_newline() {
+        let n = run("#paragraph\nA:一", IdsRecord::default());
+        assert_eq!(n.text, script("#paragraph[S01]\n[S01-L001] A:一"));
+    }
+
+    #[test]
+    fn mixed_lf_and_crlf_are_preserved() {
+        let n = run("#paragraph\r\nA:一\nB:二\r\n", IdsRecord::default());
+        assert_eq!(
+            n.text,
+            script("#paragraph[S01]\r\n[S01-L001] A:一\n[S01-L002] B:二\r\n")
+        );
+    }
+
+    #[test]
+    fn empty_and_bom_only_inputs() {
+        let n = number_script("", IdsRecord::default()).unwrap();
+        assert_eq!(n.text, "");
+        assert_eq!(n.record, IdsRecord::default());
+        let n = number_script("\u{feff}", IdsRecord::default()).unwrap();
+        assert_eq!(n.text, "\u{feff}");
+        assert_eq!(n.assigned_lines, 0);
     }
 }
