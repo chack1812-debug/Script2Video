@@ -62,6 +62,7 @@ impl ScriptParser {
         self.asset_config.clear();
         self.warnings.clear();
         self.errors.clear();
+        let text = text.strip_prefix('\u{feff}').unwrap_or(text);
         self.pending_cast_name = None;
         self.pending_cast_appearance.clear();
         let mut scenes: Vec<Scene> = Vec::new();
@@ -1767,5 +1768,15 @@ A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
         let (scenes, p) = parse_script("#fade 100\n#pause abc\n");
         assert!(scenes[0].items.is_empty());
         assert_eq!(p.warnings().len(), 2);
+    }
+
+    #[test]
+    fn bom_is_ignored() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str("\u{feff}@scene 居間\n@cast\nA:田中\n\n@script\n[S01-L001] A:やあ\n")
+            .unwrap();
+        assert_eq!(scenes.len(), 1);
+        assert_eq!(scenes[0].items.len(), 1);
     }
 }

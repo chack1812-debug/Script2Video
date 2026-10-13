@@ -37,7 +37,8 @@ enum Command {
 fn main() -> ExitCode {
     let cli = Cli::parse();
     let outcome = match cli.command {
-        Command::Number { .. } | Command::Build { .. } => {
+        Command::Number { script } => s2v_cli::run_number(&script),
+        Command::Build { .. } => {
             eprintln!("このコマンドはまだ実装されていません");
             Outcome::Failed
         }

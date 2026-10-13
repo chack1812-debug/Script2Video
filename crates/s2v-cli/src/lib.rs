@@ -1,5 +1,9 @@
 //! Script2Video のコマンド実装。`main.rs` は引数の解析だけを行い、ここを呼ぶ。
 
+pub mod number;
+
+pub use number::run_number;
+
 /// 終了コード(設計書 5.6)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Outcome {
