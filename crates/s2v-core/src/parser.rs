@@ -3,7 +3,10 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::cast::Cast;
-use crate::types::{PauseConfig, Scene, SceneConfig, ScriptCommand, ScriptItem};
+use crate::ids::{parse_line_ref, parse_scene_id, split_line_id_prefix, LineRef};
+use crate::types::{
+    PauseConfig, Scene, SceneConfig, ScriptCommand, ScriptItem, SeAnchor, VisualKind,
+};
 
 /// パース中に検出した非致命的な問題（行は無視されるがパース自体は続行）。
 #[derive(Debug, Clone, PartialEq)]
@@ -18,6 +21,8 @@ pub struct ScriptParser {
     pause_config: PauseConfig,
     asset_config: HashMap<String, String>,
     warnings: Vec<ParseWarning>,
+    /// 出力を止める問題（終了コード 2）。
+    errors: Vec<ParseWarning>,
     /// `@cast`セクションで定義行を読んだ直後から、空行または次のセクションが来るまでの間、
     /// 収集中のキャスト名を保持する（自由記述の宛先を追跡するための状態）。
     pending_cast_name: Option<String>,
@@ -32,6 +37,7 @@ impl ScriptParser {
             pause_config: PauseConfig::default(),
             asset_config: HashMap::new(),
             warnings: Vec::new(),
+            errors: Vec::new(),
             pending_cast_name: None,
             pending_cast_appearance: Vec::new(),
         }
@@ -42,6 +48,11 @@ impl ScriptParser {
         &self.warnings
     }
 
+    /// 出力を止める問題(終了コード 2)。未定義の役名など。
+    pub fn errors(&self) -> &[ParseWarning] {
+        &self.errors
+    }
+
     pub fn parse_str(&mut self, text: &str) -> anyhow::Result<Vec<Scene>> {
         // 台本固有の状態を全消去する。casts/pause_config/asset_configは
         // 同一パース内ではシーンをまたいで引き継がれる仕様だが、
@@ -50,6 +61,7 @@ impl ScriptParser {
         self.pause_config = PauseConfig::default();
         self.asset_config.clear();
         self.warnings.clear();
+        self.errors.clear();
         self.pending_cast_name = None;
         self.pending_cast_appearance.clear();
         let mut scenes: Vec<Scene> = Vec::new();
@@ -384,68 +396,62 @@ impl ScriptParser {
     }
 
     fn parse_script_line(&mut self, line: &str, line_no: usize) -> Option<ScriptItem> {
-        // 数字のみ → Parallel
-        if line.trim().chars().all(|c| c.is_ascii_digit()) && !line.trim().is_empty() {
-            let n: usize = line.trim().parse().ok()?;
+        let trimmed = line.trim();
+        // 数字のみ → 同時発声(流用元と同じ)
+        if !trimmed.is_empty() && trimmed.chars().all(|c| c.is_ascii_digit()) {
+            let n: usize = trimmed.parse().ok()?;
             return Some(ScriptItem::Command(ScriptCommand::Parallel(n)));
         }
 
-        // # コマンド行
-        if line.starts_with('#') {
-            let rest = &line[1..];
+        if let Some(rest) = trimmed.strip_prefix('#') {
             // `# ` または `#\t` → コメント
             if rest.is_empty() || rest.starts_with(' ') || rest.starts_with('\t') {
                 return None;
             }
-            let parts: Vec<&str> = rest.splitn(2, char::is_whitespace).collect();
-            let cmd = parts[0];
-            let arg = parts.get(1).map(|s| s.trim()).unwrap_or("");
-            return match cmd {
-                "pause" => arg
-                    .parse::<f64>()
-                    .ok()
-                    .map(|ms| ScriptItem::Command(ScriptCommand::Pause(ms))),
-                "paragraph" => {
-                    let name = if arg.is_empty() {
-                        None
-                    } else {
-                        Some(arg.to_string())
-                    };
-                    let name = match name {
-                        Some(n) if n.contains(']') => {
-                            self.warnings.push(ParseWarning {
-                                line_no,
-                                message: format!("#paragraph の名称に「]」は使えません（名称なしとして扱います）: {n}"),
-                            });
-                            None
-                        }
-                        Some(n) => {
-                            if n.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
-                                self.warnings.push(ParseWarning {
-                                    line_no,
-                                    message: format!("#paragraph の名称にファイル名として使えない文字が含まれます（素材の自動検索が失敗します）: {n}"),
-                                });
-                            }
-                            Some(n)
-                        }
-                        None => None,
-                    };
-                    Some(ScriptItem::Command(ScriptCommand::Paragraph(name)))
+            let (cmd, arg) = match rest.split_once(char::is_whitespace) {
+                Some((c, a)) => (c, a.trim()),
+                None => (rest, ""),
+            };
+            if let Some(after) = cmd.strip_prefix("paragraph") {
+                if after.is_empty() || after.starts_with('[') {
+                    return self.parse_paragraph(after, arg, line_no);
                 }
+            }
+            return match cmd {
+                "pause" => match arg.parse::<f64>() {
+                    Ok(ms) if ms.is_finite() && ms >= 0.0 => {
+                        Some(ScriptItem::Command(ScriptCommand::Pause(ms)))
+                    }
+                    _ => {
+                        self.warnings.push(ParseWarning {
+                            line_no,
+                            message: format!(
+                                "#pause の値が正しくありません（この行は無視されます）: {arg}"
+                            ),
+                        });
+                        None
+                    }
+                },
+                "visual" => Some(parse_visual(arg)),
                 "bgm_start" => Some(ScriptItem::Command(ScriptCommand::BgmStart(
                     self.resolve_asset_path("bgm_dir", "BGM", arg, line_no),
                 ))),
                 "bgm_stop" => Some(ScriptItem::Command(ScriptCommand::BgmStop)),
-                "se" => Some(ScriptItem::Command(ScriptCommand::Se(
-                    self.resolve_asset_path("se_dir", "SE", arg, line_no),
-                ))),
-                _ => None,
+                "se" => self.parse_se(arg, line_no),
+                other => {
+                    self.warnings.push(ParseWarning {
+                        line_no,
+                        message: format!("不明なコマンド「#{other}」です（この行は無視されます）"),
+                    });
+                    None
+                }
             };
         }
 
-        // 台詞行: `役名(params):テキスト`（区切りは半角コロンのみ）
-        let Some((name_part, raw_text)) = line.split_once(':') else {
-            if line.contains('：') {
+        // 台詞行: `[S01-L003] 役名(params):テキスト`(区切りは半角コロンのみ)
+        let (id, content) = split_line_id_prefix(trimmed);
+        let Some((name_part, raw_text)) = content.split_once(':') else {
+            if content.contains('：') {
                 self.warnings.push(ParseWarning {
                     line_no,
                     message: "行に全角「：」が使われています。役名の区切りは半角「:」です（この行は無視されます）".to_string(),
@@ -454,12 +460,11 @@ impl ScriptParser {
             return None;
         };
         let name_part = name_part.trim();
-        let raw_text = raw_text.trim();
-
         let (role, params_str) = if let Some(idx) = name_part.find('(') {
-            let role = name_part[..idx].trim();
-            let params_inner = name_part[idx + 1..].trim_end_matches(')');
-            (role, params_inner)
+            (
+                name_part[..idx].trim(),
+                name_part[idx + 1..].trim_end_matches(')'),
+            )
         } else {
             (name_part, "")
         };
@@ -470,31 +475,185 @@ impl ScriptParser {
             } else {
                 ""
             };
-            self.warnings.push(ParseWarning {
+            self.errors.push(ParseWarning {
                 line_no,
-                message: format!("キャスト「{role}」が未定義です（この行は無視されます）{hint}"),
+                message: format!("キャスト「{role}」が未定義です{hint}"),
             });
             return None;
         }
 
-        if raw_text.contains('｜') {
-            self.warnings.push(ParseWarning {
-                line_no,
-                message: "台詞に全角「｜」が含まれます。ルビの区切りは半角「|」です（全角は区切りとして扱われません）".to_string(),
-            });
-        }
-
-        let (text, display_text) = expand_ruby(raw_text);
-        let (offset_params, rejected) = extract_kv_params(params_str);
-        self.warn_non_finite(line_no, &rejected);
-
+        let (offset_params, overlap_ms, at) = self.parse_speech_params(params_str, line_no);
         Some(ScriptItem::Speech {
+            id,
+            line_no,
             cast_name: role.to_string(),
-            text,
-            display_text,
+            text: raw_text.trim().to_string(),
             offset_params,
+            overlap_ms,
+            at,
             scene_config: crate::types::SceneConfig::new(String::new()),
         })
+    }
+
+    fn parse_paragraph(&mut self, after: &str, arg: &str, line_no: usize) -> Option<ScriptItem> {
+        let id = if after.is_empty() {
+            None
+        } else {
+            match after
+                .strip_prefix('[')
+                .and_then(|s| s.strip_suffix(']'))
+                .and_then(parse_scene_id)
+            {
+                Some(n) => Some(n),
+                None => {
+                    self.warnings.push(ParseWarning {
+                        line_no,
+                        message: format!(
+                            "#paragraph のシーン番号の書式が正しくありません（[S02] の形式。この行は無視されます）: {after}"
+                        ),
+                    });
+                    return None;
+                }
+            }
+        };
+        let name = match (!arg.is_empty()).then(|| arg.to_string()) {
+            Some(n) if n.contains(']') => {
+                self.warnings.push(ParseWarning {
+                    line_no,
+                    message: format!(
+                        "#paragraph の名称に「]」は使えません（名称なしとして扱います）: {n}"
+                    ),
+                });
+                None
+            }
+            Some(n) => {
+                if n.contains(['\\', '/', ':', '*', '?', '"', '<', '>', '|']) {
+                    self.warnings.push(ParseWarning {
+                        line_no,
+                        message: format!("#paragraph の名称にファイル名として使えない文字が含まれます（素材の自動検索が失敗します）: {n}"),
+                    });
+                }
+                Some(n)
+            }
+            None => None,
+        };
+        Some(ScriptItem::Command(ScriptCommand::Paragraph {
+            id,
+            name,
+            line_no,
+        }))
+    }
+
+    fn parse_se(&mut self, arg: &str, line_no: usize) -> Option<ScriptItem> {
+        let mut tokens: Vec<&str> = arg.split_whitespace().collect();
+        let mut anchor: Option<SeAnchor> = None;
+        let mut gain_db = 0.0;
+        while let Some(&last) = tokens.last() {
+            let Some((k, v)) = last.split_once('=') else {
+                break;
+            };
+            match k {
+                "at" | "end" => match parse_line_ref(v) {
+                    Some(r) => {
+                        if anchor.is_some() {
+                            self.warnings.push(ParseWarning {
+                                line_no,
+                                message: "#se の at= と end= は同時に指定できません（先に書いた指定を使います）".to_string(),
+                            });
+                        }
+                        anchor = Some(if k == "at" {
+                            SeAnchor::Start(r)
+                        } else {
+                            SeAnchor::End(r)
+                        });
+                    }
+                    None => self.warnings.push(ParseWarning {
+                        line_no,
+                        message: format!("#se の {k}= の書式が正しくありません（無視します）: {v}"),
+                    }),
+                },
+                "gain" => match v.parse::<f64>() {
+                    Ok(g) if g.is_finite() => gain_db = g,
+                    _ => self.warnings.push(ParseWarning {
+                        line_no,
+                        message: format!("#se の gain= の値が正しくありません（無視します）: {v}"),
+                    }),
+                },
+                _ => break,
+            }
+            tokens.pop();
+        }
+        let file = tokens.join(" ");
+        if file.is_empty() {
+            self.warnings.push(ParseWarning {
+                line_no,
+                message: "#se にファイル名がありません（この行は無視されます）".to_string(),
+            });
+            return None;
+        }
+        let path = self.resolve_asset_path("se_dir", "SE", &file, line_no);
+        Some(ScriptItem::Command(ScriptCommand::Se {
+            path,
+            anchor,
+            gain_db,
+            line_no,
+        }))
+    }
+
+    /// 台詞行の臨時パラメータ。戻り値: (±差分, overlap, at)
+    fn parse_speech_params(
+        &mut self,
+        s: &str,
+        line_no: usize,
+    ) -> (HashMap<String, f64>, Option<f64>, Option<LineRef>) {
+        let mut offsets = HashMap::new();
+        let mut overlap = None;
+        let mut at = None;
+        for part in s.split(',') {
+            let part = part.trim();
+            if part.is_empty() {
+                continue;
+            }
+            let Some((k, v)) = part.split_once('=') else {
+                self.warnings.push(ParseWarning {
+                    line_no,
+                    message: format!(
+                        "臨時パラメータの書式が正しくありません（無視します）: {part}"
+                    ),
+                });
+                continue;
+            };
+            let (k, v) = (k.trim(), v.trim());
+            match k {
+                "at" => match parse_line_ref(v) {
+                    Some(r) if r.offset_ms >= 0 => at = Some(r),
+                    _ => self.warnings.push(ParseWarning {
+                        line_no,
+                        message: format!(
+                            "at= の書式が正しくありません（at=L003+500 の形式。無視します）: {v}"
+                        ),
+                    }),
+                },
+                "overlap" => match v.parse::<f64>() {
+                    Ok(ms) if ms.is_finite() && ms >= 0.0 => overlap = Some(ms),
+                    _ => self.warnings.push(ParseWarning {
+                        line_no,
+                        message: format!("overlap= の値が正しくありません（無視します）: {v}"),
+                    }),
+                },
+                "pan" | "distance" | "height" | "volume" => match v.parse::<f64>() {
+                    Ok(x) if x.is_finite() => {
+                        offsets.insert(k.to_string(), x);
+                    }
+                    _ => self.warn_non_finite(line_no, &[k.to_string()]),
+                },
+                other => self.warnings.push(ParseWarning {
+                    line_no,
+                    message: format!("臨時パラメータ「{other}」は使えません（無視します）"),
+                }),
+            }
+        }
+        (offsets, overlap, at)
     }
 }
 
@@ -504,25 +663,19 @@ impl Default for ScriptParser {
     }
 }
 
-/// ルビ記法の正規表現。半角パイプのみを区切りとする（全角｜は対象外）。
-fn ruby_re() -> &'static regex::Regex {
-    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"'([^'|]+?)\|([^'|]+?)'").expect("ルビ正規表現が不正"))
-}
-
-/// `'word|reading'` → (reading_text, display_text) に展開
-fn expand_ruby(text: &str) -> (String, String) {
-    let mut synthesis = text.to_string();
-    let mut display = text.to_string();
-
-    for cap in ruby_re().captures_iter(text) {
-        let full = &cap[0];
-        let word = &cap[1];
-        let reading = &cap[2];
-        synthesis = synthesis.replace(full, reading);
-        display = display.replace(full, word);
-    }
-    (synthesis, display)
+/// `#visual (image) 本文` を読む。
+fn parse_visual(arg: &str) -> ScriptItem {
+    let (kind, text) = if let Some(t) = arg.strip_prefix("(image)") {
+        (Some(VisualKind::Image), t.trim())
+    } else if let Some(t) = arg.strip_prefix("(video)") {
+        (Some(VisualKind::Video), t.trim())
+    } else {
+        (None, arg)
+    };
+    ScriptItem::Command(ScriptCommand::Visual {
+        kind,
+        text: text.to_string(),
+    })
 }
 
 /// カンマ区切り `key=value` 文字列から数値パラメータを抽出する。
@@ -687,10 +840,12 @@ paragraph 1000
     #[test]
     fn parses_paragraph_command() {
         let scenes = ScriptParser::new().parse_str(SIMPLE_SCRIPT).unwrap();
-        let found = scenes[0]
-            .items
-            .iter()
-            .any(|i| matches!(i, ScriptItem::Command(ScriptCommand::Paragraph(None))));
+        let found = scenes[0].items.iter().any(|i| {
+            matches!(
+                i,
+                ScriptItem::Command(ScriptCommand::Paragraph { name: None, .. })
+            )
+        });
         assert!(found);
     }
 
@@ -709,7 +864,7 @@ A:さようなら
 "#;
         let scenes = ScriptParser::new().parse_str(script).unwrap();
         let name = scenes[0].items.iter().find_map(|i| match i {
-            ScriptItem::Command(ScriptCommand::Paragraph(n)) => Some(n.clone()),
+            ScriptItem::Command(ScriptCommand::Paragraph { name, .. }) => Some(name.clone()),
             _ => None,
         });
         assert_eq!(name, Some(Some("オープニング 前半".to_string())));
@@ -730,7 +885,7 @@ A:こんにちは
         let mut parser = ScriptParser::new();
         let scenes = parser.parse_str(script).unwrap();
         let name = scenes[0].items.iter().find_map(|i| match i {
-            ScriptItem::Command(ScriptCommand::Paragraph(n)) => Some(n.clone()),
+            ScriptItem::Command(ScriptCommand::Paragraph { name, .. }) => Some(name.clone()),
             _ => None,
         });
         assert_eq!(name, Some(None), "]を含む名称は無名として扱う");
@@ -752,7 +907,7 @@ A:こんにちは
         let mut parser = ScriptParser::new();
         let scenes = parser.parse_str(script).unwrap();
         let name = scenes[0].items.iter().find_map(|i| match i {
-            ScriptItem::Command(ScriptCommand::Paragraph(n)) => Some(n.clone()),
+            ScriptItem::Command(ScriptCommand::Paragraph { name, .. }) => Some(name.clone()),
             _ => None,
         });
         assert_eq!(name, Some(Some("a/b".to_string())));
@@ -830,100 +985,6 @@ B:セリフB
         if let ScriptItem::Command(ScriptCommand::Parallel(n)) = parallel.unwrap() {
             assert_eq!(*n, 2);
         }
-    }
-
-    #[test]
-    fn ruby_notation_separates_text_and_display() {
-        let script = r#"
-@scene テスト room_size=0.1
-
-@cast
-A:A
-
-@script
-A:'東京|とうきょう'に行く
-"#;
-        let scenes = ScriptParser::new().parse_str(script).unwrap();
-        if let ScriptItem::Speech {
-            text, display_text, ..
-        } = &scenes[0].items[0]
-        {
-            assert_eq!(text, "とうきょうに行く");
-            assert_eq!(display_text, "東京に行く");
-        } else {
-            panic!("expected speech");
-        }
-    }
-
-    #[test]
-    fn ruby_word_may_contain_colon() {
-        let script = r#"
-@scene テスト room_size=0.1
-
-@cast
-A:A
-
-@script
-A:'13:00|じゅうさんじ'に始めます
-"#;
-        let scenes = ScriptParser::new().parse_str(script).unwrap();
-        if let ScriptItem::Speech {
-            text, display_text, ..
-        } = &scenes[0].items[0]
-        {
-            assert_eq!(text, "じゅうさんじに始めます");
-            assert_eq!(display_text, "13:00に始めます");
-        } else {
-            panic!("expected speech");
-        }
-    }
-
-    #[test]
-    fn legacy_colon_ruby_is_not_expanded() {
-        let script = r#"
-@scene テスト room_size=0.1
-
-@cast
-A:A
-
-@script
-A:'東京:とうきょう'に行く
-"#;
-        let scenes = ScriptParser::new().parse_str(script).unwrap();
-        if let ScriptItem::Speech {
-            text, display_text, ..
-        } = &scenes[0].items[0]
-        {
-            assert_eq!(text, "'東京:とうきょう'に行く");
-            assert_eq!(display_text, "'東京:とうきょう'に行く");
-        } else {
-            panic!("expected speech");
-        }
-    }
-
-    #[test]
-    fn fullwidth_pipe_is_not_a_ruby_separator() {
-        let script = r#"
-@scene テスト room_size=0.1
-
-@cast
-A:A
-
-@script
-A:'東京｜とうきょう'に行く
-"#;
-        let mut parser = ScriptParser::new();
-        let scenes = parser.parse_str(script).unwrap();
-        if let ScriptItem::Speech { text, .. } = &scenes[0].items[0] {
-            assert_eq!(text, "'東京｜とうきょう'に行く");
-        } else {
-            panic!("expected speech");
-        }
-        assert!(
-            parser.warnings.iter().any(|w| w.message.contains("｜")),
-            "全角パイプの警告が出るべき: {:?}",
-            parser.warnings
-        );
     }
 
     #[test]
@@ -1036,11 +1097,11 @@ A(pan=15,distance=2):セリフ
         );
         assert!(
             parser
-                .warnings()
+                .errors()
                 .iter()
                 .any(|w| w.message.contains("ずんだもん")),
             "未定義キャストとして警告が出るべき: {:?}",
-            parser.warnings()
+            parser.errors()
         );
 
         // pause_configも既定値(500/300/1500)に戻っているべき(前の台本は200/500/1000)
@@ -1074,8 +1135,8 @@ A(pan=15,distance=2):セリフ
             .filter(|i| matches!(i, ScriptItem::Speech { .. }))
             .count();
         assert_eq!(n, 1);
-        // 警告が行番号付きで記録される
-        let w = p.warnings();
+        // 出力を止める問題として行番号付きで記録される
+        let w = p.errors();
         assert_eq!(w.len(), 1);
         assert_eq!(w[0].line_no, 6);
         assert!(w[0].message.contains("誰か"));
@@ -1086,9 +1147,9 @@ A(pan=15,distance=2):セリフ
         let mut p = ScriptParser::new();
         let src = "@scene テスト room_size=0.1\n@cast\nA:話者,pan=0\n@script\n誰か:こんばんは\n";
         p.parse_str(src).unwrap();
-        assert_eq!(p.warnings().len(), 1);
+        assert_eq!(p.errors().len(), 1);
         p.parse_str(src).unwrap();
-        assert_eq!(p.warnings().len(), 1, "2回目のparseで累積しない");
+        assert_eq!(p.errors().len(), 1, "2回目のparseで累積しない");
     }
 
     #[test]
@@ -1272,7 +1333,7 @@ A:開始は'13:00|じゅうさんじ'です
         } = &scenes[0].items[0]
         {
             assert_eq!(cast_name, "A");
-            assert_eq!(text, "開始はじゅうさんじです");
+            assert_eq!(text, "開始は'13:00|じゅうさんじ'です");
         } else {
             panic!("expected speech");
         }
@@ -1375,7 +1436,7 @@ A:開始は'13:00|じゅうさんじ'です
         for item in &scene.items {
             match item {
                 ScriptItem::Command(ScriptCommand::BgmStart(p)) => bgm.push(p.clone()),
-                ScriptItem::Command(ScriptCommand::Se(p)) => se.push(p.clone()),
+                ScriptItem::Command(ScriptCommand::Se { path: p, .. }) => se.push(p.clone()),
                 _ => {}
             }
         }
@@ -1520,5 +1581,191 @@ A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
         assert_eq!(w.len(), 2, "{w:?}");
         assert!(w.iter().any(|x| x.message.contains("speedScale")));
         assert!(w.iter().any(|x| x.message.contains("style")));
+    }
+
+    const CAST_HEADER: &str = "@scene 居間\n@cast\nA:田中\n\nB:佐藤\n\n@script\n";
+
+    fn parse_script(body: &str) -> (Vec<Scene>, ScriptParser) {
+        let mut p = ScriptParser::new();
+        let scenes = p.parse_str(&format!("{CAST_HEADER}{body}")).unwrap();
+        (scenes, p)
+    }
+
+    #[test]
+    fn speech_line_with_id_prefix() {
+        let (scenes, p) = parse_script("[S01-L003] A:おはよう。\n");
+        match &scenes[0].items[0] {
+            ScriptItem::Speech {
+                id,
+                cast_name,
+                text,
+                line_no,
+                ..
+            } => {
+                assert_eq!(*id, Some(crate::ids::LineId { scene: 1, line: 3 }));
+                assert_eq!(cast_name, "A");
+                assert_eq!(text, "おはよう。");
+                assert_eq!(*line_no, 8);
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(p.errors().is_empty());
+    }
+
+    #[test]
+    fn dialogue_text_starting_with_bracket_is_not_an_id() {
+        let (scenes, _) = parse_script("A:[笑]それは:どうかな\n");
+        match &scenes[0].items[0] {
+            ScriptItem::Speech { id, text, .. } => {
+                assert_eq!(*id, None);
+                assert_eq!(text, "[笑]それは:どうかな");
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn overlap_and_at_and_offsets_are_extracted() {
+        let (scenes, p) = parse_script(
+            "[S01-L001] A:一\n[S01-L002] B(overlap=400,pan=10):二\n[S01-L003] A(at=L001+500,volume=-0.2):三\n",
+        );
+        match &scenes[0].items[1] {
+            ScriptItem::Speech {
+                overlap_ms,
+                at,
+                offset_params,
+                ..
+            } => {
+                assert_eq!(*overlap_ms, Some(400.0));
+                assert_eq!(*at, None);
+                assert_eq!(offset_params.get("pan"), Some(&10.0));
+            }
+            other => panic!("{other:?}"),
+        }
+        match &scenes[0].items[2] {
+            ScriptItem::Speech {
+                at, offset_params, ..
+            } => {
+                assert_eq!(
+                    *at,
+                    Some(crate::ids::LineRef {
+                        line: 1,
+                        offset_ms: 500
+                    })
+                );
+                assert_eq!(offset_params.get("volume"), Some(&-0.2));
+            }
+            other => panic!("{other:?}"),
+        }
+        assert!(p.warnings().is_empty(), "{:?}", p.warnings());
+    }
+
+    #[test]
+    fn paragraph_with_scene_id_and_name() {
+        let (scenes, _) = parse_script("#paragraph[S02] 港の朝\n#paragraph\n#paragraph[S03]\n");
+        let ids: Vec<_> = scenes[0]
+            .items
+            .iter()
+            .map(|i| match i {
+                ScriptItem::Command(ScriptCommand::Paragraph { id, name, .. }) => {
+                    (*id, name.clone())
+                }
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            ids,
+            vec![
+                (Some(2), Some("港の朝".to_string())),
+                (None, None),
+                (Some(3), None)
+            ]
+        );
+    }
+
+    #[test]
+    fn visual_kinds() {
+        let (scenes, _) =
+            parse_script("#visual (image) 朝の港。\n#visual (video) パンする。\n#visual 補足\n");
+        let got: Vec<_> = scenes[0]
+            .items
+            .iter()
+            .map(|i| match i {
+                ScriptItem::Command(ScriptCommand::Visual { kind, text }) => (*kind, text.clone()),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (Some(VisualKind::Image), "朝の港。".to_string()),
+                (Some(VisualKind::Video), "パンする。".to_string()),
+                (None, "補足".to_string()),
+            ]
+        );
+    }
+
+    #[test]
+    fn se_options_and_filename_with_spaces() {
+        let (scenes, _) =
+            parse_script("#se door open.wav at=L003+200 gain=-3\n#se bell.wav end=L004-100\n");
+        match &scenes[0].items[0] {
+            ScriptItem::Command(ScriptCommand::Se {
+                path,
+                anchor,
+                gain_db,
+                ..
+            }) => {
+                assert!(path.ends_with("door open.wav"), "{path}");
+                assert_eq!(
+                    *anchor,
+                    Some(SeAnchor::Start(crate::ids::LineRef {
+                        line: 3,
+                        offset_ms: 200
+                    }))
+                );
+                assert_eq!(*gain_db, -3.0);
+            }
+            other => panic!("{other:?}"),
+        }
+        match &scenes[0].items[1] {
+            ScriptItem::Command(ScriptCommand::Se {
+                anchor, gain_db, ..
+            }) => {
+                assert_eq!(
+                    *anchor,
+                    Some(SeAnchor::End(crate::ids::LineRef {
+                        line: 4,
+                        offset_ms: -100
+                    }))
+                );
+                assert_eq!(*gain_db, 0.0);
+            }
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn undefined_cast_is_an_error() {
+        let (scenes, p) = parse_script("C:だれ？\n");
+        assert!(scenes[0].items.is_empty());
+        assert_eq!(p.errors().len(), 1);
+        assert!(p.errors()[0].message.contains("C"));
+    }
+
+    #[test]
+    fn ruby_like_quote_is_kept_as_plain_text() {
+        let (scenes, _) = parse_script("A:'今日|きょう'は晴れ\n");
+        match &scenes[0].items[0] {
+            ScriptItem::Speech { text, .. } => assert_eq!(text, "'今日|きょう'は晴れ"),
+            other => panic!("{other:?}"),
+        }
+    }
+
+    #[test]
+    fn unknown_command_and_bad_pause_warn() {
+        let (scenes, p) = parse_script("#fade 100\n#pause abc\n");
+        assert!(scenes[0].items.is_empty());
+        assert_eq!(p.warnings().len(), 2);
     }
 }

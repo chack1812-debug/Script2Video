@@ -3,6 +3,7 @@ use std::collections::HashMap;
 use serde::{Deserialize, Serialize};
 
 use crate::cast::Cast;
+use crate::ids::{LineId, LineRef};
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct SceneConfig {
@@ -52,10 +53,19 @@ impl SceneConfig {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum ScriptItem {
     Speech {
+        /// 行頭の `[S01-L003]`。`number` を実行していなければ None。
+        id: Option<LineId>,
+        /// 台本の行番号(1始まり。エラーメッセージ用)。
+        line_no: usize,
         cast_name: String,
+        /// 台詞テキスト(字幕・吹き出しに使う。読み指定は廃止)。
         text: String,
-        display_text: String,
+        /// 臨時パラメータ(pan / distance / height / volume の±差分)。
         offset_params: HashMap<String, f64>,
+        /// `overlap=ミリ秒`
+        overlap_ms: Option<f64>,
+        /// `at=台詞ID+ミリ秒`
+        at: Option<LineRef>,
         scene_config: SceneConfig,
     },
     Command(ScriptCommand),
@@ -64,12 +74,44 @@ pub enum ScriptItem {
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum ScriptCommand {
     Pause(f64),
-    /// 段落区切り。`Some(name)` は `#paragraph 名称` で付けられた名称。
-    Paragraph(Option<String>),
+    /// `#paragraph[S02] 名称`
+    Paragraph {
+        id: Option<u32>,
+        name: Option<String>,
+        line_no: usize,
+    },
+    /// `#visual (image) 本文`
+    Visual {
+        kind: Option<VisualKind>,
+        text: String,
+    },
     BgmStart(String),
     BgmStop,
-    Se(String),
+    /// `#se ファイル名 [at=|end=] [gain=]`
+    Se {
+        path: String,
+        anchor: Option<SeAnchor>,
+        gain_db: f64,
+        line_no: usize,
+    },
     Parallel(usize),
+}
+
+/// `#visual` の素材の種類の希望。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum VisualKind {
+    Image,
+    Video,
+}
+
+/// `#se` の位置指定。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+pub enum SeAnchor {
+    /// `at=`: 台詞の開始が基準
+    Start(LineRef),
+    /// `end=`: 台詞の終了が基準
+    End(LineRef),
 }
 
 #[derive(Debug, Clone)]
@@ -149,10 +191,13 @@ mod tests {
     #[test]
     fn script_item_speech_round_trip() {
         let item = ScriptItem::Speech {
+            id: Some(LineId { scene: 1, line: 3 }),
+            line_no: 10,
             cast_name: "キャラA".to_string(),
             text: "こんにちは".to_string(),
-            display_text: "こんにちは".to_string(),
             offset_params: HashMap::new(),
+            overlap_ms: None,
+            at: None,
             scene_config: SceneConfig::new("室内"),
         };
         if let ScriptItem::Speech {
@@ -170,13 +215,26 @@ mod tests {
     fn script_command_variants_are_constructible() {
         let cmds = vec![
             ScriptCommand::Pause(300.0),
-            ScriptCommand::Paragraph(None),
+            ScriptCommand::Paragraph {
+                id: Some(1),
+                name: None,
+                line_no: 1,
+            },
+            ScriptCommand::Visual {
+                kind: Some(VisualKind::Image),
+                text: "港".to_string(),
+            },
             ScriptCommand::BgmStart("bgm01.wav".to_string()),
             ScriptCommand::BgmStop,
-            ScriptCommand::Se("se_door.wav".to_string()),
+            ScriptCommand::Se {
+                path: "se_door.wav".to_string(),
+                anchor: None,
+                gain_db: 0.0,
+                line_no: 2,
+            },
             ScriptCommand::Parallel(3),
         ];
-        assert_eq!(cmds.len(), 6);
+        assert_eq!(cmds.len(), 7);
     }
 
     #[test]
