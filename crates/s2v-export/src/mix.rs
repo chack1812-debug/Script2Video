@@ -85,6 +85,13 @@ pub fn mix(req: MixRequest<'_>) -> anyhow::Result<Mixed> {
                 if n > MAX_TOTAL_SAMPLES as u64 {
                     anyhow::bail!("音声ファイルが長すぎます（上限 1 時間）: {path}");
                 }
+                // SE は終わりが「開始 + ファイル長」で確定する。BGM は区間の終わりで
+                // 切られる/ループするので、ここでは単独の長さだけを見る
+                if let PlacedEvent::Se { start, .. } = e {
+                    if (*start).max(0) as u64 + n > MAX_TOTAL_SAMPLES as u64 {
+                        anyhow::bail!("SE の終わりが上限（1 時間）を超えます: {path}");
+                    }
+                }
             }
         }
     }
@@ -511,8 +518,8 @@ mod tests {
 
     /// ヘッダーだけが巨大な長さを宣言する WAV(本体はほぼ空)。デコードしたら Err ではなく
     /// 警告で終わるので、Err になることは「デコード前にヘッダーで弾いた」ことの証拠になる。
-    fn write_fake_huge_wav(path: &Path) {
-        let data_len: u32 = 48_000 * 2 * 4000; // 16bit モノラル 48kHz で 4000 秒
+    fn write_fake_huge_wav(path: &Path, secs: u32) {
+        let data_len: u32 = 48_000 * 2 * secs; // 16bit モノラル 48kHz で secs 秒
         let mut b = Vec::new();
         b.extend_from_slice(b"RIFF");
         b.extend_from_slice(&(36 + data_len).to_le_bytes());
@@ -534,7 +541,7 @@ mod tests {
     fn file_longer_than_cap_is_rejected_from_the_header() {
         let tmp = tempfile::tempdir().unwrap();
         let wav = tmp.path().join("huge.wav");
-        write_fake_huge_wav(&wav);
+        write_fake_huge_wav(&wav, 4000);
         let p = wav.to_string_lossy().into_owned();
         let cfg = bgm_cfg();
         let bgm = [PlacedEvent::BgmStart {
@@ -549,5 +556,30 @@ mod tests {
             gain_db: 0.0,
         }];
         assert!(mix(req(vec![], &se, 0, &cfg)).is_err());
+    }
+
+    #[test]
+    fn se_whose_start_plus_length_exceeds_cap_is_rejected_before_decoding() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wav = tmp.path().join("long_se.wav");
+        write_fake_huge_wav(&wav, 1000);
+        let p = wav.to_string_lossy().into_owned();
+        let cfg = bgm_cfg();
+        let se = |start: i64| {
+            [PlacedEvent::Se {
+                path: p.clone(),
+                start,
+                gain_db: 0.0,
+            }]
+        };
+        // 3000s + 1000s > 3600s(開始も長さも単独では上限内)
+        let err = mix(req(vec![], &se(3000 * 48_000), 0, &cfg))
+            .err()
+            .unwrap()
+            .to_string();
+        assert!(err.contains("long_se.wav"), "{err}");
+        // 2000s + 1000s は収まる(本体が空なのでデコードは警告で無視される)
+        let out = mix(req(vec![], &se(2000 * 48_000), 0, &cfg)).unwrap();
+        assert_eq!(out.warnings.len(), 1);
     }
 }
