@@ -6,6 +6,7 @@ pub mod parser;
 pub mod timeline;
 pub mod types;
 pub mod validate;
+pub mod voices;
 
 pub use cast::Cast;
 pub use config::{
