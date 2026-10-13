@@ -2,6 +2,16 @@
 
 use std::path::Path;
 
+/// ヘッダーだけを読んで、48kHz に換算した長さ[サンプル]を返す(デコードしない)。
+pub fn duration_48k_samples(path: &Path) -> anyhow::Result<u64> {
+    let reader = hound::WavReader::open(path)?;
+    let rate = reader.spec().sample_rate;
+    if rate == 0 {
+        anyhow::bail!("サンプルレートが 0 です");
+    }
+    Ok((reader.duration() as u128 * 48_000 / rate as u128) as u64)
+}
+
 /// BGM/SE を読む(モノラル・ステレオ可)。48kHz でなければ左右別々にリサンプルする。
 /// 空のファイルや、NaN/無限大を含むファイル(リサンプル後も含む)は Err。
 pub fn read_stereo_48k(path: &Path) -> anyhow::Result<Vec<[f32; 2]>> {

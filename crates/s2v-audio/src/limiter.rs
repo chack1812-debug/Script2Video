@@ -9,14 +9,19 @@ pub const LOOKAHEAD: usize = 240;
 /// リリースの時定数[秒]。
 pub const RELEASE_S: f64 = 0.05;
 
-/// 前提: 入力はすべて有限値であること(呼び出し側で保証する。NaN を渡してもパニックはしないが、
+/// 前提: `ceiling_db` は有限で 0 以下(非有限なら -1dBFS を使う)。入力はすべて有限値であること(呼び出し側で保証する。NaN を渡してもパニックはしないが、
 /// その位置の出力は NaN のままで、ゲイン計算は NaN を無視する)。
 pub fn soft_limit(buf: &mut [[f32; 2]], ceiling_db: f64) {
     let n = buf.len();
     if n == 0 {
         return;
     }
-    let ceiling = 10f64.powf(ceiling_db / 20.0);
+    // 非有限の天井は -1dBFS にフォールバックする(`mix` は呼ぶ前に検証している)
+    let ceiling = if ceiling_db.is_finite() {
+        10f64.powf(ceiling_db / 20.0)
+    } else {
+        10f64.powf(-1.0 / 20.0)
+    };
     let req: Vec<f64> = buf
         .iter()
         .map(|f| {
@@ -213,5 +218,17 @@ mod tests {
         assert_eq!(x.len(), 1_000);
         let mut y = vec![[f32::NAN; 2]; 10];
         soft_limit(&mut y, -1.0);
+    }
+
+    #[test]
+    fn non_finite_ceiling_falls_back_to_minus_one_db() {
+        let c = 10f32.powf(-1.0 / 20.0);
+        for db in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut x = vec![[2.0f32, -2.0]; 1_000];
+            soft_limit(&mut x, db);
+            assert!(x
+                .iter()
+                .all(|f| f[0].abs() <= c + 1e-6 && f[1].abs() <= c + 1e-6));
+        }
     }
 }

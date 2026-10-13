@@ -9,7 +9,7 @@ use s2v_core::placement::PlacedEvent;
 use s2v_core::BgmConfig;
 
 use crate::bgm::compute_bgm_segments;
-use crate::wavio::read_stereo_48k;
+use crate::wavio::{duration_48k_samples, read_stereo_48k};
 
 /// BGM の音量(流用元と同じ -10dB 相当)。
 const BGM_GAIN: f32 = 0.3;
@@ -54,6 +54,40 @@ fn add_at(buf: &mut [[f32; 2]], start: usize, src: &[[f32; 2]], gain: f32) {
 /// あるときは Err(大きな確保の前に判定する)。見つからない BGM/SE は警告して無視する。
 pub fn mix(req: MixRequest<'_>) -> anyhow::Result<Mixed> {
     let mut warnings = Vec::new();
+
+    if !req.master_ceiling_db.is_finite() || req.master_ceiling_db > 0.0 {
+        anyhow::bail!(
+            "マスターの天井が不正です（有限で 0dB 以下が必要）: {}",
+            req.master_ceiling_db
+        );
+    }
+
+    // 音声を読む前に、安く判定できる上限チェックをすべて済ませる
+    let cap = MAX_TOTAL_SAMPLES as i64;
+    if req.timeline_end > cap {
+        anyhow::bail!("配置の終わりが上限を超えています: {}", req.timeline_end);
+    }
+    for (start, v) in &req.dialogue {
+        if *start > cap || start.max(&0).saturating_add(v.len() as i64) > cap {
+            anyhow::bail!("台詞の配置が上限（{MAX_TOTAL_SAMPLES} サンプル）を超えています");
+        }
+    }
+    for e in req.events {
+        if e.start() > cap {
+            anyhow::bail!(
+                "イベントの開始が上限（{MAX_TOTAL_SAMPLES} サンプル）を超えています: {}",
+                e.start()
+            );
+        }
+        if let PlacedEvent::Se { path, .. } | PlacedEvent::BgmStart { path, .. } = e {
+            // ヘッダーだけで長さを調べる(読めないファイルはここでは無視し、後の読み込みで警告する)
+            if let Ok(n) = duration_48k_samples(Path::new(path)) {
+                if n > MAX_TOTAL_SAMPLES as u64 {
+                    anyhow::bail!("音声ファイルが長すぎます（上限 1 時間）: {path}");
+                }
+            }
+        }
+    }
 
     for (start, v) in &req.dialogue {
         if v.iter().any(|f| !f[0].is_finite() || !f[1].is_finite()) {
@@ -393,8 +427,9 @@ mod tests {
             start: far,
             gain_db: 0.0,
         };
-        // SE が読めなければ無視されるので Err にならない(長さに寄与しない)
-        assert!(mix(req(vec![], &[se], 0, &cfg)).is_ok());
+        // 開始位置が上限超なら、読めないファイルでも Err(音声を読む前に判定する)
+        assert!(mix(req(vec![], &[se], 0, &cfg)).is_err());
+        assert!(mix(req(vec![], &[PlacedEvent::BgmStop { start: far }], 0, &cfg)).is_err());
         let tmp = tempfile::tempdir().unwrap();
         let wav = tmp.path().join("s.wav");
         write_mono(&wav, 0.1, 10);
@@ -459,5 +494,60 @@ mod tests {
         let out = mix_ok(req(vec![], &events, 1_000, &cfg));
         assert_eq!(out.master.len(), 1_000);
         assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
+    }
+
+    #[test]
+    fn invalid_ceiling_is_an_error() {
+        let cfg = bgm_cfg();
+        for c in [f64::NAN, 0.5, f64::INFINITY, f64::NEG_INFINITY] {
+            let mut r = req(vec![(0, vec![[0.1, 0.1]])], &[], 0, &cfg);
+            r.master_ceiling_db = c;
+            assert!(mix(r).is_err(), "{c}");
+        }
+        let mut r = req(vec![(0, vec![[0.1, 0.1]])], &[], 0, &cfg);
+        r.master_ceiling_db = 0.0;
+        assert!(mix(r).is_ok());
+    }
+
+    /// ヘッダーだけが巨大な長さを宣言する WAV(本体はほぼ空)。デコードしたら Err ではなく
+    /// 警告で終わるので、Err になることは「デコード前にヘッダーで弾いた」ことの証拠になる。
+    fn write_fake_huge_wav(path: &Path) {
+        let data_len: u32 = 48_000 * 2 * 4000; // 16bit モノラル 48kHz で 4000 秒
+        let mut b = Vec::new();
+        b.extend_from_slice(b"RIFF");
+        b.extend_from_slice(&(36 + data_len).to_le_bytes());
+        b.extend_from_slice(b"WAVEfmt ");
+        b.extend_from_slice(&16u32.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&1u16.to_le_bytes());
+        b.extend_from_slice(&48_000u32.to_le_bytes());
+        b.extend_from_slice(&96_000u32.to_le_bytes());
+        b.extend_from_slice(&2u16.to_le_bytes());
+        b.extend_from_slice(&16u16.to_le_bytes());
+        b.extend_from_slice(b"data");
+        b.extend_from_slice(&data_len.to_le_bytes());
+        b.extend_from_slice(&[0u8; 10]);
+        std::fs::write(path, b).unwrap();
+    }
+
+    #[test]
+    fn file_longer_than_cap_is_rejected_from_the_header() {
+        let tmp = tempfile::tempdir().unwrap();
+        let wav = tmp.path().join("huge.wav");
+        write_fake_huge_wav(&wav);
+        let p = wav.to_string_lossy().into_owned();
+        let cfg = bgm_cfg();
+        let bgm = [PlacedEvent::BgmStart {
+            path: p.clone(),
+            start: 0,
+        }];
+        let err = mix(req(vec![], &bgm, 0, &cfg)).err().unwrap().to_string();
+        assert!(err.contains("huge.wav"), "{err}");
+        let se = [PlacedEvent::Se {
+            path: p,
+            start: 0,
+            gain_db: 0.0,
+        }];
+        assert!(mix(req(vec![], &se, 0, &cfg)).is_err());
     }
 }

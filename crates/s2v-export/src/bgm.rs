@@ -74,8 +74,12 @@ pub fn compute_bgm_segments(
         });
     }
 
-    // 前の区間が切り替えで終わったときだけ、境目をクロスフェードする
-    let switched: Vec<bool> = raw.iter().map(|r| r.switched).collect();
+    // 長さ 0 以下の区間(start 直後に stop など)は無かったことにしてから、
+    // 前の区間が切り替えで終わり、次の区間が同じ時刻から始まるときだけクロスフェードする
+    raw.retain(|r| r.end > r.start);
+    let switched: Vec<bool> = (0..raw.len())
+        .map(|k| raw[k].switched && raw.get(k + 1).is_some_and(|n| n.start == raw[k].end))
+        .collect();
     raw.into_iter()
         .enumerate()
         .map(|(k, seg)| {
@@ -220,11 +224,26 @@ mod tests {
             ),
             (5.0, 5.0, 0.0)
         );
-        // start -> stop: A は B に切り替わる(クロスフェード)、B は長さ 0
+        // start -> stop: B は長さ 0 なので消え、A は stop で終わる(フェードも延長もなし)
         let segs =
             compute_bgm_segments(&[st("a.wav", 0), st("b.wav", 5 * S), sp(5 * S)], 10.0, 3.0);
+        assert_eq!(segs.len(), 1);
+        assert_eq!(
+            (
+                segs[0].mix_start_s,
+                segs[0].mix_duration_s,
+                segs[0].fade_out_s
+            ),
+            (0.0, 5.0, 0.0)
+        );
+        // start -> start(同時刻): 長さ 0 の B は消え、A は C に切り替わる
+        let segs = compute_bgm_segments(
+            &[st("a.wav", 0), st("b.wav", 5 * S), st("c.wav", 5 * S)],
+            10.0,
+            3.0,
+        );
         assert_eq!(segs.len(), 2);
         assert_eq!((segs[0].mix_duration_s, segs[0].fade_out_s), (6.5, 3.0));
-        assert_eq!((segs[1].mix_duration_s, segs[1].fade_in_s), (0.0, 0.0));
+        assert_eq!((segs[1].mix_start_s, segs[1].fade_in_s), (3.5, 3.0));
     }
 }
