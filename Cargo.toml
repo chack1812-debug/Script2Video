@@ -1,0 +1,9 @@
+[workspace]
+members = ["crates/s2v-core", "crates/s2v-audio", "crates/s2v-export", "crates/s2v-cli"]
+resolver = "2"
+
+[workspace.dependencies]
+anyhow = "1"
+thiserror = "2"
+serde = { version = "1", features = ["derive"] }
+tracing = "0.1"

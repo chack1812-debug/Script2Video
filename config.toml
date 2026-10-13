@@ -1,0 +1,79 @@
+# exe_path: 未起動時に自動起動する実行ファイルのパス（省略可）。
+# 絶対パス（例: VOICEVOX/AivisSpeechのrun.exe）と、PATH上のコマンド名（例: "python"）の両方を指定できます。
+# args: exe_path に渡す引数（省略可、配列）。コマンドライン全体を1本の文字列にせず、
+#       トークンごとに配列要素として分けてください（パスに空白を含む場合もクォート不要）。
+# 設定すると、接続確認に失敗した場合に自動的に起動し、終了時に停止します。
+# startup_timeout_s: 自動起動の待機秒数（省略時 60。モデルロードが遅い場合は増やす）。
+[voicevox]
+url = "http://127.0.0.1:50021"
+exe_path = "C:/Program Files/VOICEVOX/vv-engine/run.exe"
+
+[aivis]
+url = "http://127.0.0.1:10101"
+exe_path = "C:/Program Files/AivisSpeech/AivisSpeech-Engine/run.exe"
+
+[xtts]
+url = "http://localhost:8020"
+exe_path = "python"
+args = [
+    "-m", "xtts_api_server",
+    "--port", "8020",
+    "-v", "v2.0.2",
+    "-mf", "C:/Users/村上 孝伸/AppData/Local/tts/tts_models--multilingual--multi-dataset--xtts_v2",
+    "-sf", "C:/Users/村上 孝伸/AppData/Local/tts/tts_models--multilingual--multi-dataset--xtts_v2",
+]
+
+[audio]
+sample_rate = 48000
+microphone_spacing = 0.2
+sound_speed = 340.0
+air_absorption_coeff = 0.05
+room_size = 0.1
+reverb_wet = 1.0  # 物理基準値 wet_base へのスケーラ（1.0 = 物理量そのまま）
+reference_dist = 1.0
+reference_gain_db = -5.0
+max_gain_db = -1.0
+mic_directivity = 0.2
+mic_angle = 30.0
+
+[audio.early_reflections]
+enabled = true
+ear_height = 1.2
+listener_offset = [0.0, 0.0]
+room_dims_min = [4.0, 5.0, 3.0]
+room_dims_max = [25.0, 45.0, 18.0]
+early_level = 1.0
+wet_distance_slope = 0.1
+floor = { reflection_coeff = 0.5, absorption_cutoff_hz = 3500.0 }
+ceiling = { reflection_coeff = 0.6, absorption_cutoff_hz = 6000.0 }
+front_wall = { reflection_coeff = 0.85, absorption_cutoff_hz = 10000.0 }
+back_wall = { reflection_coeff = 0.40, absorption_cutoff_hz = 4000.0 }
+side_walls = { reflection_coeff = 0.70, absorption_cutoff_hz = 8000.0 }
+
+[audio.engine_volume_offsets]
+voicevox = 1.2
+aivis = 0.9
+xtts = 1.0
+
+[concurrency]
+voicevox = 3
+aivis = 3
+xtts = 2
+audio_process = 0   # 0 = CPU コア数を自動使用
+
+[bgm]
+crossfade_s = 3.0
+se_fade_out_s = 0.05
+
+# エンジンへのHTTPリクエスト(version/speakers/音声合成)のタイムアウト（省略可）。
+# 未設定でも既定値(connect=10秒, request=180秒)が使われます。
+# エンジンが接続だけ受け付けて応答しない場合に台詞の処理が無期限に待機しないよう、必ず有限値になります。
+[http]
+connect_timeout_s = 10
+request_timeout_s = 180
+
+# fcpxml_2997fps: FCPXMLを29.97fps(NTSCドロップフレーム相当)で出力するか（省略可、既定 false = 30fps）。
+# 字幕ズレ調査により、SRT/WAVとの時間基準を合わせるには30fpsが正しいことが確定しています。
+# 29.97fps前提の編集環境に取り込む場合のみ true にしてください。
+[export]
+fcpxml_2997fps = false
