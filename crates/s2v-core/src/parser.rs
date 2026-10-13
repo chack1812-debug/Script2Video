@@ -547,7 +547,8 @@ fn extract_kv_params(s: &str) -> (HashMap<String, f64>, Vec<String>) {
 }
 
 /// `@cast` 定義行用のパラメータ抽出。`extract_kv_params` と違い、数値として読めない値は
-/// 文字列として保持する（`language=en` など。台本仕様の「使用言語」）。
+/// 文字列として保持する。これは呼び出し側が許可されないキーを警告して捨てられるようにするためで、
+/// 許可キーは pan、distance、height、volume、room_size、reverb_wet のみ（それ以外は呼び出し側が警告して捨てる）。
 /// 有限でない数値の扱いは `extract_kv_params` と同じ。
 fn extract_cast_params(s: &str) -> (HashMap<String, Value>, Vec<String>) {
     let mut map = HashMap::new();
@@ -1482,9 +1483,42 @@ A:開始は'13:00|じゅうさんじ'です
     #[test]
     fn unknown_cast_param_warns() {
         let mut p = ScriptParser::new();
-        p.parse_str("@scene 居間\n@cast\nA:田中,speedScale=1.2\n\n@script\n")
+        let scenes = p
+            .parse_str(
+                "@scene 居間
+@cast
+A:田中,speedScale=1.2
+
+@script
+",
+            )
             .unwrap();
         assert_eq!(p.warnings().len(), 1);
         assert!(p.warnings()[0].message.contains("speedScale"));
+        assert!(!scenes[0].casts["A"].params.contains_key("speedScale"));
+    }
+
+    #[test]
+    fn cast_keeps_only_room_size_and_reverb_wet_in_params() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str(
+                "@scene 居間
+@cast
+A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
+
+@script
+",
+            )
+            .unwrap();
+        let params = &scenes[0].casts["A"].params;
+        assert_eq!(params["room_size"].as_f64(), Some(0.4));
+        assert_eq!(params["reverb_wet"].as_f64(), Some(0.2));
+        assert!(!params.contains_key("speedScale"));
+        assert!(!params.contains_key("style"));
+        let w = p.warnings();
+        assert_eq!(w.len(), 2, "{w:?}");
+        assert!(w.iter().any(|x| x.message.contains("speedScale")));
+        assert!(w.iter().any(|x| x.message.contains("style")));
     }
 }
