@@ -13,7 +13,7 @@ use s2v_core::ids::LineId;
 use s2v_core::placement::{flatten, place, LineSource, MissingReason};
 use s2v_core::time::{ceil_ms, floor_ms};
 use s2v_core::voices::match_voice_files;
-use s2v_core::{validate, Config, ScriptItem, ScriptParser};
+use s2v_core::{validate, Config, Scene, ScriptItem, ScriptParser};
 use s2v_export::fcpxml::render_fcpxml;
 use s2v_export::srt::render_srt;
 use s2v_export::timeline_json::{
@@ -104,8 +104,76 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
     std::fs::create_dir_all(&out_dir)
         .with_context(|| format!("出力フォルダを作れません: {}", out_dir.display()))?;
     let mut log = ProcLog::create(&out_dir.join("Process.log"))?;
-    for w in parser.warnings().iter().chain(diag.warnings.iter()) {
-        log.warn(format!("{} 行目: {}", w.line_no, w.message));
+    let script_warnings: Vec<String> = parser
+        .warnings()
+        .iter()
+        .chain(diag.warnings.iter())
+        .map(|w| format!("{} 行目: {}", w.line_no, w.message))
+        .collect();
+    // ここから先の失敗は Process.log に記録する
+    let result = produce(
+        args,
+        &config,
+        &scenes,
+        &script_warnings,
+        &stem,
+        &out_dir,
+        &mut log,
+    )
+    .and_then(|o| log.check().map(|()| o));
+    match result {
+        Ok(o) => Ok(o),
+        Err(e) => {
+            log.error(format!("{e:#}"));
+            Ok(Outcome::Failed)
+        }
+    }
+}
+
+/// 前回の最終成果物(これだけ)を消す。`work/` と `Process.log` には触れない。
+fn remove_stale_outputs(out_dir: &Path) -> anyhow::Result<()> {
+    let finals = [
+        "full_dialogue.wav",
+        "tracks/dialogue.wav",
+        "tracks/bgm.wav",
+        "tracks/se.wav",
+        "timeline.json",
+        "subtitles.srt",
+        "timeline.fcpxml",
+    ];
+    for rel in finals {
+        let path = out_dir.join(rel);
+        match std::fs::remove_file(&path) {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => {
+                return Err(e)
+                    .with_context(|| format!("前回の出力を消せません: {}", path.display()))
+            }
+        }
+    }
+    // 空になったときだけ tracks/ を消す(中身があれば残す)
+    let tracks = out_dir.join("tracks");
+    if tracks.is_dir() {
+        let _ = std::fs::remove_dir(&tracks);
+    }
+    Ok(())
+}
+
+/// コミットポイントより後の処理。失敗は呼び出し側が Process.log に記録して終了コード 2 にする。
+fn produce(
+    args: &BuildArgs,
+    config: &Config,
+    scenes: &[Scene],
+    script_warnings: &[String],
+    stem: &str,
+    out_dir: &Path,
+    log: &mut ProcLog,
+) -> anyhow::Result<Outcome> {
+    // コミットポイント: 前回の成果物が古いまま残らないよう、新しく作る前に消す
+    remove_stale_outputs(out_dir)?;
+    for w in script_warnings {
+        log.warn(w);
     }
     let (mut work, note) = WorkDir::open(&out_dir.join("work"), args.no_cache)
         .with_context(|| format!("work/ に書き込めません: {}", out_dir.display()))?;
@@ -114,7 +182,7 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
     }
 
     // 4. 照合
-    let flat = flatten(&scenes);
+    let flat = flatten(scenes);
     let ids: Vec<LineId> = flat
         .iter()
         .filter_map(|f| match f.item {
@@ -137,7 +205,7 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
         let names: Vec<String> = files.iter().map(|p| file_name(p)).collect();
         let result = match files.as_slice() {
             [] => Err(MissingReason::NoFile),
-            [one] => prepare_line(*id, one, &config, &mut work, &mut log)?,
+            [one] => prepare_line(*id, one, config, &mut work, log)?,
             _ => Err(MissingReason::Duplicate),
         };
         match result {
@@ -248,7 +316,7 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
 
     // 9. timeline.json・字幕・FCPXML
     let mut casts: BTreeMap<String, CastInfo> = BTreeMap::new();
-    for s in &scenes {
+    for s in scenes {
         for (name, c) in &s.casts {
             casts.insert(
                 name.clone(),
@@ -296,9 +364,10 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
     ];
     std::fs::write(
         out_dir.join("timeline.fcpxml"),
-        render_fcpxml(&stem, total, &track_paths, config.export.fcpxml_2997fps),
+        render_fcpxml(stem, total, &track_paths, config.export.fcpxml_2997fps),
     )?;
     work.finish()?;
+    log.check()?;
 
     let missing = placement
         .lines
