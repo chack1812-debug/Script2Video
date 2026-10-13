@@ -79,13 +79,22 @@ pub fn verify_loudness(out_dir: &Path) -> anyhow::Result<Vec<LineCheck>> {
         }
         let mut r = hound::WavReader::open(&prefade)?;
         let samples: Vec<f32> = r.samples::<f32>().collect::<Result<_, _>>()?;
-        let from = meta
+        let from_u64 = meta
             .measure_start
             .checked_sub(meta.src_start)
             .ok_or_else(|| {
-                anyhow::anyhow!("{id}: cache.json の測定範囲が使用範囲より前にあります")
-            })? as usize;
-        let to = from + measure_len as usize;
+                anyhow::anyhow!("{id}: cache.json の measure_start が src_start より前にあります")
+            })?;
+        let to_u64 = meta
+            .measure_end
+            .checked_sub(meta.src_start)
+            .ok_or_else(|| {
+                anyhow::anyhow!("{id}: cache.json の measure_end が src_start より前にあります")
+            })?;
+        let from = usize::try_from(from_u64)
+            .map_err(|_| anyhow::anyhow!("{id}: cache.json の measure_start が大きすぎます"))?;
+        let to = usize::try_from(to_u64)
+            .map_err(|_| anyhow::anyhow!("{id}: cache.json の measure_end が大きすぎます"))?;
         let Some(range) = samples.get(from..to) else {
             anyhow::bail!(
                 "{id}: 測定範囲 {from}..{to} が lines_prefade の長さ {} を超えています",
@@ -110,4 +119,48 @@ pub fn verify_loudness(out_dir: &Path) -> anyhow::Result<Vec<LineCheck>> {
         anyhow::bail!("確認できる台詞がありません(cache.json に lines/ の正規化記録がありません)");
     }
     Ok(checks)
+}
+
+/// 例 `verify_loudness` の本体。(終了コード, 表示する文面)を返す。
+/// 0=すべて OK、1=不合格あり、2=使い方の誤り・確認できない。
+pub fn run_cli(args: &[String]) -> (u8, String) {
+    let Some(dir) = args.first() else {
+        return (
+            2,
+            "使い方: verify_loudness <出力フォルダ>
+"
+            .to_string(),
+        );
+    };
+    match verify_loudness(Path::new(dir)) {
+        Ok(checks) => {
+            let mut text = String::new();
+            let mut failed = 0;
+            for c in &checks {
+                let mark = if c.passed { "OK " } else { "NG " };
+                text.push_str(&format!(
+                    "{mark} {:<12} {:?} {}
+",
+                    c.id, c.kind, c.detail
+                ));
+                if !c.passed {
+                    failed += 1;
+                }
+            }
+            text.push_str(&format!(
+                "{} 件中 {} 件が不合格
+",
+                checks.len(),
+                failed
+            ));
+            (u8::from(failed != 0), text)
+        }
+        Err(e) => (
+            2,
+            format!(
+                "[ERROR] {e:#}
+"
+            ),
+        ),
+    }
 }

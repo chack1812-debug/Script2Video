@@ -655,3 +655,68 @@ fn verify_fails_long_line_with_tampered_prefade() {
     assert_eq!(c.kind, s2v_cli::verify::CheckKind::Measured);
     assert!(!c.passed, "{c:?}");
 }
+
+fn set_norm(out: &Path, set: impl FnOnce(&mut serde_json::Value)) {
+    edit_cache(
+        out,
+        |v| set(&mut v["entries"]["lines/S01-L001.wav"]["norm"]),
+    );
+}
+
+#[test]
+fn verify_rejects_huge_or_inverted_positions_without_panic() {
+    let max = serde_json::json!(u64::MAX);
+    let cases: Vec<(u64, u64, u64)> = vec![
+        // (src_start, measure_start, measure_end)
+        (0, 0, u64::MAX),
+        (0, 30_000, 10_000),
+        (1_000_000, 10, 40_000),
+        (0, u64::MAX - 30_000, u64::MAX),
+        (0, 0, 900_000_000),
+    ];
+    for (src, ms, me) in cases {
+        let (_f, out) = prefade_build();
+        set_norm(&out, |n| {
+            n["src_start"] = serde_json::json!(src);
+            n["measure_start"] = serde_json::json!(ms);
+            n["measure_end"] = serde_json::json!(me);
+            n["norm_clamped"] = serde_json::json!(false);
+        });
+        assert!(
+            s2v_cli::verify::verify_loudness(&out).is_err(),
+            "{src} {ms} {me} {max}"
+        );
+    }
+}
+
+fn cli(args: &[&str]) -> (u8, String) {
+    let a: Vec<String> = args.iter().map(|s| s.to_string()).collect();
+    s2v_cli::verify::run_cli(&a)
+}
+
+#[test]
+fn verify_cli_exit_codes() {
+    assert_eq!(cli(&[]).0, 2);
+    let (_f, out) = prefade_build();
+    let missing = out.join("存在しない");
+    assert_eq!(cli(&[missing.to_str().unwrap()]).0, 2);
+
+    let (code, text) = cli(&[out.to_str().unwrap()]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("3 件中 0 件が不合格"), "{text}");
+
+    // 長い台詞の prefade を改ざん -> 1
+    let p = out.join("work").join("lines_prefade").join("S01-L002.wav");
+    let mut r = hound::WavReader::open(&p).unwrap();
+    let spec = r.spec();
+    let s: Vec<f32> = r.samples::<f32>().map(|x| x.unwrap() * 0.25).collect();
+    drop(r);
+    let mut w = hound::WavWriter::create(&p, spec).unwrap();
+    for x in s {
+        w.write_sample(x).unwrap();
+    }
+    w.finalize().unwrap();
+    let (code, text) = cli(&[out.to_str().unwrap()]);
+    assert_eq!(code, 1, "{text}");
+    assert!(text.contains("NG "), "{text}");
+}
