@@ -3,7 +3,16 @@
 use std::path::Path;
 
 /// BGM/SE を読む(モノラル・ステレオ可)。48kHz でなければ左右別々にリサンプルする。
+/// 空のファイルや、NaN/無限大を含むファイル(リサンプル後も含む)は Err。
 pub fn read_stereo_48k(path: &Path) -> anyhow::Result<Vec<[f32; 2]>> {
+    let out = read_stereo_48k_unchecked(path)?;
+    if out.iter().any(|f| !f[0].is_finite() || !f[1].is_finite()) {
+        anyhow::bail!("音声に NaN/無限大が含まれています: {}", path.display());
+    }
+    Ok(out)
+}
+
+fn read_stereo_48k_unchecked(path: &Path) -> anyhow::Result<Vec<[f32; 2]>> {
     let mut reader = hound::WavReader::open(path)?;
     let spec = reader.spec();
     if spec.bits_per_sample == 0 || spec.bits_per_sample > 32 {
@@ -127,5 +136,37 @@ mod tests {
         write_raw(&p, 8, 48_000, 1, &[64, -64]);
         let v = read_stereo_48k(&p).unwrap();
         assert_eq!(v, vec![[0.5, 0.5], [-0.5, -0.5]]);
+    }
+
+    fn write_float(path: &Path, rate: u32, samples: &[f32]) {
+        let spec = hound::WavSpec {
+            channels: 1,
+            sample_rate: rate,
+            bits_per_sample: 32,
+            sample_format: hound::SampleFormat::Float,
+        };
+        let mut w = hound::WavWriter::create(path, spec).unwrap();
+        for s in samples {
+            w.write_sample(*s).unwrap();
+        }
+        w.finalize().unwrap();
+    }
+
+    #[test]
+    fn non_finite_samples_are_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        for (name, bad) in [
+            ("nan.wav", f32::NAN),
+            ("inf.wav", f32::INFINITY),
+            ("ninf.wav", f32::NEG_INFINITY),
+        ] {
+            let p = tmp.path().join(name);
+            write_float(&p, 48_000, &[0.1, bad, 0.1]);
+            let err = read_stereo_48k(&p).unwrap_err().to_string();
+            assert!(err.contains(name), "{err}");
+        }
+        let p = tmp.path().join("ok.wav");
+        write_float(&p, 48_000, &[0.1, -0.2]);
+        assert!(read_stereo_48k(&p).is_ok());
     }
 }

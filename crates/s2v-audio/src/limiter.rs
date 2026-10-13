@@ -9,6 +9,8 @@ pub const LOOKAHEAD: usize = 240;
 /// リリースの時定数[秒]。
 pub const RELEASE_S: f64 = 0.05;
 
+/// 前提: 入力はすべて有限値であること(呼び出し側で保証する。NaN を渡してもパニックはしないが、
+/// その位置の出力は NaN のままで、ゲイン計算は NaN を無視する)。
 pub fn soft_limit(buf: &mut [[f32; 2]], ceiling_db: f64) {
     let n = buf.len();
     if n == 0 {
@@ -199,5 +201,17 @@ mod tests {
         assert!(3.0 * g[0] <= c + 1e-6 && 3.0 * g[9_999] <= c + 1e-6);
         assert!(g[0] < c / 3.0 + 1e-6 && g[9_999] < c / 3.0 + 1e-6);
         assert!(g[9_999 - 100] < 1.0);
+    }
+
+    #[test]
+    fn nan_input_does_not_panic() {
+        let mut x = vec![[0.5f32, 0.5]; 1_000];
+        x[500] = [f32::NAN, 0.3];
+        x[600] = [f32::NAN, f32::NAN];
+        x[700] = [3.0, 0.1];
+        soft_limit(&mut x, -1.0);
+        assert_eq!(x.len(), 1_000);
+        let mut y = vec![[f32::NAN; 2]; 10];
+        soft_limit(&mut y, -1.0);
     }
 }

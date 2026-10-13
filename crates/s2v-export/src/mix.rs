@@ -1,7 +1,8 @@
 //! トラック別ミックスとマスター(設計書 5.4)。dialogue / bgm / se は浮動小数のまま、
 //! マスター(full_dialogue)にだけソフトリミッタを掛ける。
 
-use std::path::Path;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
 
 use s2v_audio::limiter::soft_limit;
 use s2v_core::placement::PlacedEvent;
@@ -32,8 +33,8 @@ pub struct Mixed {
     pub warnings: Vec<String>,
 }
 
-/// 総サンプル数の上限(48kHz で 4 時間)。これを超える配置は切り詰めて警告する。
-const MAX_TOTAL: usize = 48_000 * 3600 * 4;
+/// 総サンプル数の上限(48kHz で 1 時間。`render` と同じ)。超える配置は Err にする。
+pub const MAX_TOTAL_SAMPLES: usize = 48_000 * 3600;
 
 /// 負の開始位置は 0 に丸める。
 fn start_idx(start: i64) -> usize {
@@ -49,12 +50,16 @@ fn add_at(buf: &mut [[f32; 2]], start: usize, src: &[[f32; 2]], gain: f32) {
     }
 }
 
-pub fn mix(req: MixRequest<'_>) -> Mixed {
-    mix_capped(req, MAX_TOTAL)
-}
-
-fn mix_capped(req: MixRequest<'_>, max_total: usize) -> Mixed {
+/// ミックスする。総長が `MAX_TOTAL_SAMPLES` を超える、または dialogue に非有限値が
+/// あるときは Err(大きな確保の前に判定する)。見つからない BGM/SE は警告して無視する。
+pub fn mix(req: MixRequest<'_>) -> anyhow::Result<Mixed> {
     let mut warnings = Vec::new();
+
+    for (start, v) in &req.dialogue {
+        if v.iter().any(|f| !f[0].is_finite() || !f[1].is_finite()) {
+            anyhow::bail!("台詞の音声に NaN/無限大が含まれています（開始サンプル {start}）");
+        }
+    }
 
     // SE を読む
     let mut ses: Vec<(usize, Vec<[f32; 2]>, f32)> = Vec::new();
@@ -88,7 +93,33 @@ fn mix_capped(req: MixRequest<'_>, max_total: usize) -> Mixed {
         .max()
         .unwrap_or(0);
     let base_end = dialogue_end.max(start_idx(req.timeline_end));
-    let segs = compute_bgm_segments(req.events, base_end as f64 / 48_000.0, req.bgm.crossfade_s);
+
+    // 読めない・空の BGM は、その #bgm_start ごと無視する(区間も長さも作らない)
+    let mut bgm_src: HashMap<PathBuf, Vec<[f32; 2]>> = HashMap::new();
+    let mut bgm_failed: HashSet<PathBuf> = HashSet::new();
+    let mut events: Vec<PlacedEvent> = Vec::with_capacity(req.events.len());
+    for e in req.events {
+        if let PlacedEvent::BgmStart { path, .. } = e {
+            let p = PathBuf::from(path);
+            if bgm_failed.contains(&p) {
+                continue;
+            }
+            if !bgm_src.contains_key(&p) {
+                match read_stereo_48k(&p) {
+                    Ok(v) => {
+                        bgm_src.insert(p, v);
+                    }
+                    Err(err) => {
+                        warnings.push(format!("BGM を読めません（無視します）: {path}: {err}"));
+                        bgm_failed.insert(p);
+                        continue;
+                    }
+                }
+            }
+        }
+        events.push(e.clone());
+    }
+    let segs = compute_bgm_segments(&events, base_end as f64 / 48_000.0, req.bgm.crossfade_s);
     let bgm_end = segs
         .iter()
         .map(|s| ((s.mix_start_s + s.mix_duration_s) * 48_000.0) as usize)
@@ -99,12 +130,9 @@ fn mix_capped(req: MixRequest<'_>, max_total: usize) -> Mixed {
         .map(|(s, v, _)| s.saturating_add(v.len()))
         .max()
         .unwrap_or(0);
-    let mut total = base_end.max(bgm_end).max(se_end);
-    if total > max_total {
-        warnings.push(format!(
-            "音声が長すぎるため {max_total} サンプルで打ち切ります（要求: {total}）"
-        ));
-        total = max_total;
+    let total = base_end.max(bgm_end).max(se_end);
+    if total > MAX_TOTAL_SAMPLES {
+        anyhow::bail!("音声が長すぎます: {total} サンプル（上限 {MAX_TOTAL_SAMPLES}）");
     }
 
     let mut dialogue = vec![[0.0f32; 2]; total];
@@ -119,16 +147,8 @@ fn mix_capped(req: MixRequest<'_>, max_total: usize) -> Mixed {
 
     let mut bgm = vec![[0.0f32; 2]; total];
     for seg in &segs {
-        let src = match read_stereo_48k(&seg.path) {
-            Ok(v) if !v.is_empty() => v,
-            Ok(_) => continue,
-            Err(err) => {
-                warnings.push(format!(
-                    "BGM を読めません（無視します）: {}: {err}",
-                    seg.path.display()
-                ));
-                continue;
-            }
+        let Some(src) = bgm_src.get(&seg.path) else {
+            continue;
         };
         let seg_start = (seg.mix_start_s * 48_000.0) as usize;
         if seg_start >= total {
@@ -165,13 +185,13 @@ fn mix_capped(req: MixRequest<'_>, max_total: usize) -> Mixed {
         .collect();
     soft_limit(&mut master, req.master_ceiling_db);
 
-    Mixed {
+    Ok(Mixed {
         dialogue,
         bgm,
         se,
         master,
         warnings,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -184,6 +204,10 @@ mod tests {
             crossfade_s: 3.0,
             se_fade_out_s: 0.05,
         }
+    }
+
+    fn mix_ok(req: MixRequest<'_>) -> Mixed {
+        mix(req).unwrap()
     }
 
     fn write_mono(path: &Path, value: f32, n: usize) {
@@ -203,7 +227,7 @@ mod tests {
     #[test]
     fn dialogue_is_placed_and_tracks_are_separate() {
         let cfg = bgm_cfg();
-        let out = mix(MixRequest {
+        let out = mix_ok(MixRequest {
             dialogue: vec![(480, vec![[0.5, 0.25]; 100])],
             events: &[],
             timeline_end: 1_000,
@@ -236,7 +260,7 @@ mod tests {
             },
         ];
         let cfg = bgm_cfg();
-        let out = mix(MixRequest {
+        let out = mix_ok(MixRequest {
             dialogue: vec![],
             events: &events,
             timeline_end: 0,
@@ -261,7 +285,7 @@ mod tests {
             PlacedEvent::BgmStop { start: 48_000 },
         ];
         let cfg = bgm_cfg();
-        let out = mix(MixRequest {
+        let out = mix_ok(MixRequest {
             dialogue: vec![],
             events: &events,
             timeline_end: 96_000,
@@ -275,7 +299,7 @@ mod tests {
     #[test]
     fn master_is_limited_but_dialogue_track_is_not() {
         let cfg = bgm_cfg();
-        let out = mix(MixRequest {
+        let out = mix_ok(MixRequest {
             dialogue: vec![(0, vec![[3.0, -3.0]; 4_800])],
             events: &[],
             timeline_end: 0,
@@ -330,7 +354,7 @@ mod tests {
             crossfade_s: 3.0,
             se_fade_out_s: 0.0,
         };
-        let out = mix(MixRequest {
+        let out = mix_ok(MixRequest {
             dialogue: vec![(-10, vec![[0.1, 0.1]; 5])],
             events: &events,
             timeline_end: -1,
@@ -343,25 +367,59 @@ mod tests {
         assert_eq!(out.dialogue[0], [0.1, 0.1]);
     }
 
-    #[test]
-    fn huge_total_is_capped_with_a_warning() {
-        let cfg = bgm_cfg();
-        let out = mix_capped(
-            MixRequest {
-                dialogue: vec![(0, vec![[0.1, 0.1]; 10])],
-                events: &[],
-                timeline_end: i64::MAX,
-                bgm: &cfg,
-                master_ceiling_db: -1.0,
-            },
-            1_000,
-        );
-        assert_eq!(out.master.len(), 1_000);
-        assert_eq!(out.warnings.len(), 1);
+    fn req<'a>(
+        dialogue: Vec<(i64, Vec<[f32; 2]>)>,
+        events: &'a [PlacedEvent],
+        timeline_end: i64,
+        cfg: &'a BgmConfig,
+    ) -> MixRequest<'a> {
+        MixRequest {
+            dialogue,
+            events,
+            timeline_end,
+            bgm: cfg,
+            master_ceiling_db: -1.0,
+        }
     }
 
     #[test]
-    fn empty_bgm_file_is_skipped() {
+    fn total_beyond_cap_is_an_error_without_allocating() {
+        let cfg = bgm_cfg();
+        let far = MAX_TOTAL_SAMPLES as i64 + 1;
+        assert!(mix(req(vec![(far, vec![[0.0; 2]])], &[], 0, &cfg)).is_err());
+        assert!(mix(req(vec![], &[], i64::MAX, &cfg)).is_err());
+        let se = PlacedEvent::Se {
+            path: "none.wav".into(),
+            start: far,
+            gain_db: 0.0,
+        };
+        // SE が読めなければ無視されるので Err にならない(長さに寄与しない)
+        assert!(mix(req(vec![], &[se], 0, &cfg)).is_ok());
+        let tmp = tempfile::tempdir().unwrap();
+        let wav = tmp.path().join("s.wav");
+        write_mono(&wav, 0.1, 10);
+        let se = PlacedEvent::Se {
+            path: wav.to_string_lossy().into_owned(),
+            start: far,
+            gain_db: 0.0,
+        };
+        assert!(mix(req(vec![], &[se], 0, &cfg)).is_err());
+        let bgm = PlacedEvent::BgmStart {
+            path: wav.to_string_lossy().into_owned(),
+            start: far,
+        };
+        assert!(mix(req(vec![], &[bgm], 0, &cfg)).is_err());
+    }
+
+    #[test]
+    fn non_finite_dialogue_is_an_error() {
+        let cfg = bgm_cfg();
+        assert!(mix(req(vec![(0, vec![[0.0, f32::NAN]])], &[], 0, &cfg)).is_err());
+        assert!(mix(req(vec![(0, vec![[f32::INFINITY, 0.0]])], &[], 0, &cfg)).is_err());
+    }
+
+    #[test]
+    fn empty_bgm_file_is_ignored_with_a_warning() {
         let tmp = tempfile::tempdir().unwrap();
         let bgm = tmp.path().join("e.wav");
         write_mono(&bgm, 0.5, 0);
@@ -370,13 +428,36 @@ mod tests {
             start: 0,
         }];
         let cfg = bgm_cfg();
-        let out = mix(MixRequest {
-            dialogue: vec![],
-            events: &events,
-            timeline_end: 1_000,
-            bgm: &cfg,
-            master_ceiling_db: -1.0,
-        });
+        let out = mix_ok(req(vec![], &events, 1_000, &cfg));
+        assert_eq!(out.bgm.len(), 1_000);
         assert!(out.bgm.iter().all(|f| *f == [0.0, 0.0]));
+        assert_eq!(out.warnings.len(), 1);
+        assert!(
+            out.warnings[0].contains("BGM を読めません"),
+            "{:?}",
+            out.warnings
+        );
+        assert!(out.warnings[0].contains("e.wav"));
+    }
+
+    #[test]
+    fn missing_bgm_past_the_end_does_not_extend_the_timeline() {
+        let tmp = tempfile::tempdir().unwrap();
+        let none = tmp.path().join("none.wav").to_string_lossy().into_owned();
+        let events = vec![
+            PlacedEvent::BgmStart {
+                path: none.clone(),
+                start: 5_000,
+            },
+            PlacedEvent::BgmStart {
+                path: none,
+                start: 9_000,
+            },
+            PlacedEvent::BgmStop { start: 9_500 },
+        ];
+        let cfg = bgm_cfg();
+        let out = mix_ok(req(vec![], &events, 1_000, &cfg));
+        assert_eq!(out.master.len(), 1_000);
+        assert_eq!(out.warnings.len(), 1, "{:?}", out.warnings);
     }
 }
