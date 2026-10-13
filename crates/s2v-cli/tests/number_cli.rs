@@ -205,3 +205,48 @@ fn silent_scene_is_rendered_without_crashing() {
     assert_ne!(run_number(&script), Outcome::Failed);
     assert!(dir.path().join("q.html").exists());
 }
+
+/// Drop で読み取り専用を解除し、tempdir を確実に削除できるようにする。
+struct Writable(std::path::PathBuf);
+impl Drop for Writable {
+    fn drop(&mut self) {
+        if let Ok(m) = fs::metadata(&self.0) {
+            let mut p = m.permissions();
+            #[allow(clippy::permissions_set_readonly_false)]
+            p.set_readonly(false);
+            let _ = fs::set_permissions(&self.0, p);
+        }
+    }
+}
+
+fn make_readonly(path: &std::path::Path) -> Writable {
+    let guard = Writable(path.to_path_buf());
+    let mut p = fs::metadata(path).unwrap().permissions();
+    p.set_readonly(true);
+    fs::set_permissions(path, p).unwrap();
+    guard
+}
+
+#[test]
+fn ids_write_failure_leaves_script_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    // 読み取り専用にしても書けてしまう環境(管理者権限など)では、実際の失敗を再現できないので飛ばす
+    let probe = dir.path().join("probe.txt");
+    fs::write(&probe, "x").unwrap();
+    let _probe_guard = make_readonly(&probe);
+    if fs::write(&probe, "y").is_ok() {
+        eprintln!("skip: 読み取り専用でも書き込める環境のため再現できない");
+        return;
+    }
+
+    let script = dir.path().join("r.txt");
+    fs::write(&script, SCRIPT).unwrap();
+    let ids = dir.path().join("r.ids");
+    fs::write(&ids, "max_line=0\nmax_scene=0\n").unwrap();
+    let _guard = make_readonly(&ids);
+
+    assert_eq!(run_number(&script), Outcome::Failed);
+    assert_eq!(fs::read(&script).unwrap(), SCRIPT.as_bytes());
+    assert!(!dir.path().join("r.bak").exists());
+    assert!(!dir.path().join("r.html").exists());
+}
