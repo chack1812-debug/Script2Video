@@ -1,6 +1,7 @@
 pub mod acoustics;
 pub mod early;
 pub mod geometry;
+pub mod input;
 pub mod processor;
 pub mod resampler;
 pub mod reverb;

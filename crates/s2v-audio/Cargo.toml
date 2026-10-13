@@ -8,6 +8,7 @@ s2v-core = { path = "../s2v-core" }
 anyhow.workspace = true
 thiserror.workspace = true
 hound = "3"
+claxon = "0.4"
 rubato = "0.15"
 realfft = "3"
 rayon = "1"
