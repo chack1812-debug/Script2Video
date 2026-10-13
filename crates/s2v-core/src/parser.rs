@@ -43,7 +43,7 @@ impl ScriptParser {
         }
     }
 
-    /// パース中に検出した非致命的な警告（未定義キャストなど）を返す。
+    /// パース中に検出した非致命的な警告を返す（未定義キャストは `errors()` で報告される）。
     pub fn warnings(&self) -> &[ParseWarning] {
         &self.warnings
     }
@@ -1124,7 +1124,7 @@ A(pan=15,distance=2):セリフ
     }
 
     #[test]
-    fn unknown_cast_produces_warning_with_line_number() {
+    fn unknown_cast_produces_error_with_line_number() {
         let mut p = ScriptParser::new();
         let src = "@scene テスト room_size=0.1\n@cast\nA:話者,pan=0\n@script\nA:こんにちは\n誰か:こんばんは\n";
         let scenes = p.parse_str(src).unwrap();

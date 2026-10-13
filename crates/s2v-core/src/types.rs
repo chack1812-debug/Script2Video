@@ -50,6 +50,8 @@ impl SceneConfig {
     }
 }
 
+// 後続タスクが ScriptItem::Speech { .. } を直接パターンマッチするため Box 化しない(要素は少数で短命)。
+#[allow(clippy::large_enum_variant)]
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub enum ScriptItem {
     Speech {
@@ -213,7 +215,7 @@ mod tests {
 
     #[test]
     fn script_command_variants_are_constructible() {
-        let cmds = vec![
+        let cmds = [
             ScriptCommand::Pause(300.0),
             ScriptCommand::Paragraph {
                 id: Some(1),
