@@ -2,7 +2,6 @@ use std::path::PathBuf;
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use s2v_cli::Outcome;
 
 #[derive(Parser)]
 #[command(
@@ -38,10 +37,17 @@ fn main() -> ExitCode {
     let cli = Cli::parse();
     let outcome = match cli.command {
         Command::Number { script } => s2v_cli::run_number(&script),
-        Command::Build { .. } => {
-            eprintln!("このコマンドはまだ実装されていません");
-            Outcome::Failed
-        }
+        Command::Build {
+            script,
+            voice_dir,
+            config,
+            no_cache,
+        } => s2v_cli::run_build(&s2v_cli::BuildArgs {
+            script,
+            voice_dir,
+            config,
+            no_cache,
+        }),
     };
     ExitCode::from(outcome.code())
 }

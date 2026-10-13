@@ -1,8 +1,11 @@
 //! Script2Video のコマンド実装。`main.rs` は引数の解析だけを行い、ここを呼ぶ。
 
+pub mod build;
 pub mod number;
+pub mod proclog;
 pub mod work;
 
+pub use build::{run_build, BuildArgs};
 pub use number::run_number;
 
 /// 終了コード(設計書 5.6)。
