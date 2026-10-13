@@ -142,4 +142,25 @@ mod tests {
         assert!(html.contains("S01-L002"));
         assert!(html.contains("おはよう &amp; &lt;こんにちは&gt;"));
     }
+
+    #[test]
+    fn untrusted_text_is_escaped_everywhere() {
+        let text = "@scene 居間
+@cast
+A:<script>田中\"
+外見<script>\"x\"
+
+@script
+#paragraph[S01] 見出し<script>
+#visual (image) <script>\"v\"
+[S01-L001] A:\"台詞\"<script>
+";
+        let mut p = ScriptParser::new();
+        let scenes = p.parse_str(text).unwrap();
+        let html = render_script_html("題<script>\"", &scenes);
+        assert!(!html.contains("<script>"), "{html}");
+        assert!(html.contains("&lt;script&gt;"));
+        assert!(html.contains("&quot;"));
+        assert!(html.contains("<title>題&lt;script&gt;&quot;</title>"));
+    }
 }

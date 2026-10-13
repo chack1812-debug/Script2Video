@@ -85,3 +85,123 @@ fn bak_is_byte_exact_with_bom_and_crlf() {
         .unwrap()
         .contains("[S01-L001] A:おはよう\r\n"));
 }
+
+#[test]
+fn script_named_like_a_derived_file_is_refused_untouched() {
+    for name in ["foo.ids", "foo.html", "foo.bak", "FOO.IDS"] {
+        let dir = tempfile::tempdir().unwrap();
+        let script = dir.path().join(name);
+        fs::write(&script, SCRIPT).unwrap();
+        assert_eq!(run_number(&script), Outcome::Failed, "{name}");
+        assert_eq!(fs::read(&script).unwrap(), SCRIPT.as_bytes(), "{name}");
+        let entries = fs::read_dir(dir.path()).unwrap().count();
+        assert_eq!(entries, 1, "{name}: 他のファイルが作られた");
+    }
+}
+
+#[test]
+fn unreadable_ids_fails_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("s.txt");
+    fs::write(&script, SCRIPT).unwrap();
+    // ディレクトリは .ids として読めない(NotFound 以外のエラー)
+    fs::create_dir(dir.path().join("s.ids")).unwrap();
+    assert_eq!(run_number(&script), Outcome::Failed);
+    assert_eq!(fs::read(&script).unwrap(), SCRIPT.as_bytes());
+    assert!(!dir.path().join("s.bak").exists());
+    assert!(!dir.path().join("s.html").exists());
+}
+
+#[test]
+fn non_utf8_ids_fails_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("s.txt");
+    fs::write(&script, SCRIPT).unwrap();
+    fs::write(dir.path().join("s.ids"), [0xffu8, 0xfe, 0x82]).unwrap();
+    assert_eq!(run_number(&script), Outcome::Failed);
+    assert_eq!(fs::read(&script).unwrap(), SCRIPT.as_bytes());
+    assert_eq!(
+        fs::read(dir.path().join("s.ids")).unwrap(),
+        [0xffu8, 0xfe, 0x82]
+    );
+    assert!(!dir.path().join("s.bak").exists());
+}
+
+#[test]
+fn unwritable_ids_target_leaves_script_untouched() {
+    // 読めるが書けない .ids を作るのは移植性が低いので、書込失敗は
+    // 「.ids がディレクトリ」で代用する(読込段階で失敗し、何も書かない)。
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("w.txt");
+    fs::write(&script, SCRIPT).unwrap();
+    fs::create_dir(dir.path().join("w.ids")).unwrap();
+    assert_eq!(run_number(&script), Outcome::Failed);
+    assert_eq!(fs::read(&script).unwrap(), SCRIPT.as_bytes());
+    assert!(!dir.path().join("w.bak").exists());
+}
+
+#[test]
+fn second_run_keeps_script_and_bak_untouched() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("t.txt");
+    fs::write(&script, SCRIPT).unwrap();
+    assert_eq!(run_number(&script), Outcome::Ok);
+    let bak = dir.path().join("t.bak");
+    let mtime = |p: &std::path::Path| fs::metadata(p).unwrap().modified().unwrap();
+    let (script_m, bak_m) = (mtime(&script), mtime(&bak));
+    let script_bytes = fs::read(&script).unwrap();
+    std::thread::sleep(std::time::Duration::from_millis(50));
+    assert_eq!(run_number(&script), Outcome::Ok);
+    assert_eq!(fs::read(&script).unwrap(), script_bytes);
+    assert_eq!(fs::read(&bak).unwrap(), SCRIPT.as_bytes());
+    assert_eq!(mtime(&script), script_m);
+    assert_eq!(mtime(&bak), bak_m);
+}
+
+#[test]
+fn ids_high_water_is_continued() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("h.txt");
+    fs::write(&script, SCRIPT).unwrap();
+    fs::write(dir.path().join("h.ids"), "max_line=10\nmax_scene=4\n").unwrap();
+    assert_eq!(run_number(&script), Outcome::Ok);
+    let text = fs::read_to_string(&script).unwrap();
+    assert!(
+        text.contains("#paragraph[S05] 朝\n[S05-L011] A:おはよう\n[S05-L012] B:おはよう\n"),
+        "{text}"
+    );
+
+    // 最後の行を削除して新しい行を足しても、番号は高水位から続く
+    let edited = text.replace("[S05-L012] B:おはよう\n", "A:新しい\n");
+    fs::write(&script, edited).unwrap();
+    assert_eq!(run_number(&script), Outcome::Ok);
+    let text = fs::read_to_string(&script).unwrap();
+    assert!(text.contains("[S05-L013] A:新しい"), "{text}");
+    assert!(!text.contains("L012"), "{text}");
+}
+
+#[test]
+fn html_escapes_dialogue_through_whole_command() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("e.txt");
+    let src = "@scene 居間\n@cast\nA:田中\n\n@script\n#paragraph 朝\nA:\"やあ\" <script>alert(1)</script>\n";
+    fs::write(&script, src).unwrap();
+    assert_eq!(run_number(&script), Outcome::Ok);
+    let html = fs::read_to_string(dir.path().join("e.html")).unwrap();
+    assert!(!html.contains("<script>"), "{html}");
+    assert!(html.contains("&lt;script&gt;alert(1)&lt;/script&gt;"));
+    assert!(html.contains("&quot;やあ&quot;"));
+}
+
+#[test]
+fn silent_scene_is_rendered_without_crashing() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("q.txt");
+    fs::write(
+        &script,
+        "@scene 無音\n@cast\nA:田中\n\n@script\n#pause 1.0\n",
+    )
+    .unwrap();
+    assert_ne!(run_number(&script), Outcome::Failed);
+    assert!(dir.path().join("q.html").exists());
+}
