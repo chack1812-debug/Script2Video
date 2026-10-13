@@ -6,8 +6,8 @@ pub mod types;
 
 pub use cast::Cast;
 pub use config::{
-    AudioConfig, BgmConfig, ConcurrencyConfig, Config, EarlyConfig, EngineUrl, ExportConfig,
-    HttpConfig, MaterialConfig,
+    AudioConfig, BgmConfig, Config, EarlyConfig, ExportConfig, MaterialConfig, MixConfig,
+    NormalizeConfig, VoiceConfig,
 };
 pub use parser::{ParseWarning, ScriptParser};
 pub use timeline::{EventType, TimelineEvent, TimelineProcessor};

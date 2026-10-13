@@ -3,78 +3,36 @@ use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
+/// Script2Video の設定(`config.toml`)。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Config {
-    pub voicevox: EngineUrl,
-    pub aivis: EngineUrl,
-    pub xtts: EngineUrl,
     pub audio: AudioConfig,
-    pub concurrency: ConcurrencyConfig,
     pub bgm: BgmConfig,
-    /// HTTPエンジン呼び出し(version/speakers/音声合成)のタイムアウト設定（省略可、既定値あり）。
-    #[serde(default)]
-    pub http: HttpConfig,
-    /// エクスポート形式の設定（省略可、既定値あり）。
+    /// エクスポート形式の設定(省略可)。
     #[serde(default)]
     pub export: ExportConfig,
+    /// 収録音声の取り込みと無音削除(省略可。設計書 5.3、5.6)。
+    #[serde(default)]
+    pub voice: VoiceConfig,
+    /// ラウドネス正規化(省略可。設計書 5.10)。
+    #[serde(default)]
+    pub normalize: NormalizeConfig,
+    /// ミックス(省略可。設計書 5.4)。
+    #[serde(default)]
+    pub mix: MixConfig,
 }
 
-/// エクスポート（FCPXML等）に関する設定。
+/// エクスポート(FCPXML等)に関する設定。
 #[derive(Debug, Clone, Deserialize, Serialize, Default)]
 pub struct ExportConfig {
-    /// FCPXMLを29.97fps(NTSCドロップフレーム相当)で出力するか（既定 false = 30fps）。
-    /// 字幕ズレ調査(Obsidian記録)により、SRT/WAVとの時間基準を合わせるには30fpsが正しいことが
-    /// 確定している。29.97fps前提の案件でのみ true にする。
+    /// FCPXMLを29.97fps(NTSCドロップフレーム相当)で出力するか(既定 false = 30fps)。
     #[serde(default)]
     pub fcpxml_2997fps: bool,
 }
 
-/// エンジンへのHTTPリクエストのタイムアウト設定。
-/// 未設定の場合、エンジンが応答を返さないまま接続だけ握り続けると
-/// 1台詞の処理が無期限に待機してしまう（バッチ全体も終了しない）ため、既定値を必ず持つ。
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct HttpConfig {
-    #[serde(default = "default_connect_timeout_s")]
-    pub connect_timeout_s: u64,
-    #[serde(default = "default_request_timeout_s")]
-    pub request_timeout_s: u64,
-}
-
-fn default_connect_timeout_s() -> u64 {
-    10
-}
-fn default_request_timeout_s() -> u64 {
-    180
-}
-
-impl Default for HttpConfig {
-    fn default() -> Self {
-        Self {
-            connect_timeout_s: default_connect_timeout_s(),
-            request_timeout_s: default_request_timeout_s(),
-        }
-    }
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct EngineUrl {
-    pub url: String,
-    /// 未起動時に自動起動する実行ファイルのパス（省略可）。
-    /// 絶対パス（例: "C:/VOICEVOX/run.exe"）と、PATH上のコマンド名（例: "python"）の両方を指定できる。
-    #[serde(default)]
-    pub exe_path: Option<String>,
-    /// `exe_path` に渡す引数（省略可、既定は空）。
-    /// 例: XTTS を `python -m xtts_api_server --port 8020` で起動する場合、
-    /// `exe_path = "python"`、`args = ["-m", "xtts_api_server", "--port", "8020"]` のように分離する。
-    #[serde(default)]
-    pub args: Vec<String>,
-    /// 自動起動の待機秒数（省略時は既定 60 秒）。モデルロードが遅い場合に増やす。
-    #[serde(default)]
-    pub startup_timeout_s: Option<u64>,
-}
-
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct AudioConfig {
+    /// 48000 固定(検証で 48000 以外を拒否する)。
     pub sample_rate: u32,
     pub microphone_spacing: f64,
     pub sound_speed: f64,
@@ -82,13 +40,26 @@ pub struct AudioConfig {
     pub room_size: f64,
     pub reverb_wet: f64,
     pub reference_dist: f64,
+    /// Task 12 で削除する(基準ゲインの再較正に置き換える)。
+    #[serde(default = "legacy_reference_gain_db")]
     pub reference_gain_db: f64,
+    /// Task 12 で削除する(台詞ごとのリミッタを廃止する)。
+    #[serde(default = "legacy_max_gain_db")]
     pub max_gain_db: f64,
     pub mic_directivity: f64,
     pub mic_angle: f64,
+    /// Task 12 で削除する(音声合成エンジンごとの補正。Script2Video では使わない)。
+    #[serde(default)]
     pub engine_volume_offsets: HashMap<String, f64>,
     #[serde(default)]
     pub early_reflections: EarlyConfig,
+}
+
+fn legacy_reference_gain_db() -> f64 {
+    -5.0
+}
+fn legacy_max_gain_db() -> f64 {
+    -1.0
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
@@ -191,17 +162,109 @@ impl Default for EarlyConfig {
 }
 
 #[derive(Debug, Clone, Deserialize, Serialize)]
-pub struct ConcurrencyConfig {
-    pub voicevox: usize,
-    pub aivis: usize,
-    pub xtts: usize,
-    pub audio_process: usize,
-}
-
-#[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct BgmConfig {
     pub crossfade_s: f64,
     pub se_fade_out_s: f64,
+}
+
+/// 収録音声の取り込みと無音削除の設定。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct VoiceConfig {
+    /// 無音削除のしきい値[dBFS]。10ms 窓の RMS がこれを超えると「音がある」。
+    #[serde(default = "d_trim_threshold_db")]
+    pub trim_threshold_db: f64,
+    /// 最初の音の手前に残す長さ[ms]。
+    #[serde(default = "d_trim_head_margin_ms")]
+    pub trim_head_margin_ms: u32,
+    /// 最後の音の後に残す長さ[ms]。
+    #[serde(default = "d_trim_tail_margin_ms")]
+    pub trim_tail_margin_ms: u32,
+    /// 不足した台詞の仮の長さ[ms/文字]。
+    #[serde(default = "d_placeholder_ms_per_char")]
+    pub placeholder_ms_per_char: u32,
+    /// `.flac` の収録ファイルを許可するか。
+    #[serde(default)]
+    pub allow_flac: bool,
+}
+
+fn d_trim_threshold_db() -> f64 {
+    -50.0
+}
+fn d_trim_head_margin_ms() -> u32 {
+    30
+}
+fn d_trim_tail_margin_ms() -> u32 {
+    80
+}
+fn d_placeholder_ms_per_char() -> u32 {
+    200
+}
+
+impl Default for VoiceConfig {
+    fn default() -> Self {
+        Self {
+            trim_threshold_db: d_trim_threshold_db(),
+            trim_head_margin_ms: d_trim_head_margin_ms(),
+            trim_tail_margin_ms: d_trim_tail_margin_ms(),
+            placeholder_ms_per_char: d_placeholder_ms_per_char(),
+            allow_flac: false,
+        }
+    }
+}
+
+/// ラウドネス正規化の設定(設計書 5.10 E)。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct NormalizeConfig {
+    /// 台詞の目標ラウドネス[LUFS](-40〜-10)。
+    #[serde(default = "d_target_lufs")]
+    pub target_lufs: f64,
+    /// ゲインの上限[dB](0〜48)。
+    #[serde(default = "d_gain_limit_db")]
+    pub max_boost_db: f64,
+    /// ゲインの下限の絶対値[dB](0〜48)。
+    #[serde(default = "d_gain_limit_db")]
+    pub max_cut_db: f64,
+    /// フェード前の音声を `work/lines_prefade/` にも書く(①a 完了条件の検証用)。
+    #[serde(default)]
+    pub dump_prefade: bool,
+}
+
+fn d_target_lufs() -> f64 {
+    -23.0
+}
+fn d_gain_limit_db() -> f64 {
+    24.0
+}
+
+impl Default for NormalizeConfig {
+    fn default() -> Self {
+        Self {
+            target_lufs: d_target_lufs(),
+            max_boost_db: d_gain_limit_db(),
+            max_cut_db: d_gain_limit_db(),
+            dump_prefade: false,
+        }
+    }
+}
+
+/// ミックスの設定。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct MixConfig {
+    /// マスターのソフトリミッタの上限[dBFS](-6〜0)。
+    #[serde(default = "d_master_ceiling_db")]
+    pub master_ceiling_db: f64,
+}
+
+fn d_master_ceiling_db() -> f64 {
+    -1.0
+}
+
+impl Default for MixConfig {
+    fn default() -> Self {
+        Self {
+            master_ceiling_db: d_master_ceiling_db(),
+        }
+    }
 }
 
 impl Config {
@@ -213,45 +276,66 @@ impl Config {
         let s = std::fs::read_to_string(path)?;
         Self::from_toml(&s)
     }
+
+    /// リポジトリ同梱の既定設定(`config.toml`)。
+    pub fn builtin() -> Self {
+        Self::from_toml(include_str!("../../../config.toml"))
+            .expect("同梱の config.toml が不正です")
+    }
+
+    /// 値の範囲を検査する(設計書 5.10 E)。範囲外の項目ごとに1つのメッセージを返す。
+    pub fn validate(&self) -> Vec<String> {
+        let mut e = Vec::new();
+        let n = &self.normalize;
+        if !(-40.0..=-10.0).contains(&n.target_lufs) {
+            e.push(format!(
+                "[normalize] target_lufs は -40〜-10 の範囲で指定してください: {}",
+                n.target_lufs
+            ));
+        }
+        if !(0.0..=48.0).contains(&n.max_boost_db) {
+            e.push(format!(
+                "[normalize] max_boost_db は 0〜48 の範囲で指定してください: {}",
+                n.max_boost_db
+            ));
+        }
+        if !(0.0..=48.0).contains(&n.max_cut_db) {
+            e.push(format!(
+                "[normalize] max_cut_db は 0〜48 の範囲で指定してください: {}",
+                n.max_cut_db
+            ));
+        }
+        if !(-6.0..=0.0).contains(&self.mix.master_ceiling_db) {
+            e.push(format!(
+                "[mix] master_ceiling_db は -6〜0 の範囲で指定してください: {}",
+                self.mix.master_ceiling_db
+            ));
+        }
+        if self.audio.sample_rate != 48_000 {
+            e.push(format!(
+                "[audio] sample_rate は 48000 固定です: {}",
+                self.audio.sample_rate
+            ));
+        }
+        e
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    const SAMPLE_TOML: &str = r#"
-[voicevox]
-url = "http://127.0.0.1:50021"
-
-[aivis]
-url = "http://127.0.0.1:10101"
-
-[xtts]
-url = "http://localhost:8020"
-
+    const MINIMAL: &str = r#"
 [audio]
 sample_rate = 48000
 microphone_spacing = 0.2
 sound_speed = 340.0
 air_absorption_coeff = 0.05
 room_size = 0.1
-reverb_wet = 0.7
+reverb_wet = 1.0
 reference_dist = 1.0
-reference_gain_db = -5.0
-max_gain_db = -1.0
-mic_directivity = 0.5
-mic_angle = 45.0
-
-[audio.engine_volume_offsets]
-voicevox = 1.2
-aivis = 0.9
-xtts = 1.0
-
-[concurrency]
-voicevox = 3
-aivis = 3
-xtts = 2
-audio_process = 0
+mic_directivity = 0.2
+mic_angle = 30.0
 
 [bgm]
 crossfade_s = 3.0
@@ -259,184 +343,56 @@ se_fade_out_s = 0.05
 "#;
 
     #[test]
-    fn parses_engine_urls() {
-        let cfg = Config::from_toml(SAMPLE_TOML).unwrap();
-        assert_eq!(cfg.voicevox.url, "http://127.0.0.1:50021");
-        assert_eq!(cfg.aivis.url, "http://127.0.0.1:10101");
-        assert_eq!(cfg.xtts.url, "http://localhost:8020");
+    fn builtin_config_loads_and_is_valid() {
+        let c = Config::builtin();
+        assert!(c.validate().is_empty(), "{:?}", c.validate());
+        assert_eq!(c.audio.sample_rate, 48_000);
     }
 
     #[test]
-    fn exe_path_is_optional_and_defaults_to_none() {
-        let cfg = Config::from_toml(SAMPLE_TOML).unwrap();
-        assert_eq!(cfg.voicevox.exe_path, None);
+    fn omitted_sections_use_defaults() {
+        let c = Config::from_toml(MINIMAL).unwrap();
+        assert_eq!(c.voice.trim_threshold_db, -50.0);
+        assert_eq!(c.voice.trim_head_margin_ms, 30);
+        assert_eq!(c.voice.trim_tail_margin_ms, 80);
+        assert_eq!(c.voice.placeholder_ms_per_char, 200);
+        assert!(!c.voice.allow_flac);
+        assert_eq!(c.normalize.target_lufs, -23.0);
+        assert_eq!(c.normalize.max_boost_db, 24.0);
+        assert_eq!(c.normalize.max_cut_db, 24.0);
+        assert!(!c.normalize.dump_prefade);
+        assert_eq!(c.mix.master_ceiling_db, -1.0);
+        assert!(c.validate().is_empty());
     }
 
     #[test]
-    fn parses_exe_path_when_present() {
-        let toml_with_exe = SAMPLE_TOML.replacen(
-            r#"url = "http://127.0.0.1:50021""#,
-            "url = \"http://127.0.0.1:50021\"\nexe_path = \"C:\\\\VOICEVOX\\\\run.exe\"",
-            1,
-        );
-        let cfg = Config::from_toml(&toml_with_exe).unwrap();
-        assert_eq!(
-            cfg.voicevox.exe_path.as_deref(),
-            Some("C:\\VOICEVOX\\run.exe")
-        );
+    fn validate_reports_each_out_of_range_value() {
+        let mut c = Config::from_toml(MINIMAL).unwrap();
+        c.normalize.target_lufs = -5.0;
+        c.normalize.max_boost_db = 60.0;
+        c.normalize.max_cut_db = -1.0;
+        c.mix.master_ceiling_db = 0.5;
+        let errors = c.validate();
+        assert_eq!(errors.len(), 4, "{errors:?}");
+        assert!(errors[0].contains("target_lufs"));
     }
 
     #[test]
-    fn args_is_optional_and_defaults_to_empty() {
-        let cfg = Config::from_toml(SAMPLE_TOML).unwrap();
-        assert!(cfg.voicevox.args.is_empty());
+    fn validate_rejects_non_48k_sample_rate() {
+        let mut c = Config::from_toml(MINIMAL).unwrap();
+        c.audio.sample_rate = 44_100;
+        let errors = c.validate();
+        assert_eq!(errors.len(), 1);
+        assert!(errors[0].contains("48000"));
     }
 
     #[test]
-    fn parses_args_when_present() {
-        // XTTS のように exe_path を PATH 上のコマンド名にし、実引数を args に分離する形式。
-        let toml_with_args = SAMPLE_TOML.replacen(
-            r#"url = "http://localhost:8020""#,
-            "url = \"http://localhost:8020\"\nexe_path = \"python\"\nargs = [\"-m\", \"xtts_api_server\", \"--port\", \"8020\"]",
-            1,
-        );
-        let cfg = Config::from_toml(&toml_with_args).unwrap();
-        assert_eq!(cfg.xtts.exe_path.as_deref(), Some("python"));
-        assert_eq!(
-            cfg.xtts.args,
-            vec!["-m", "xtts_api_server", "--port", "8020"]
-        );
-    }
-
-    #[test]
-    fn http_config_is_optional_and_has_sane_defaults() {
-        let cfg = Config::from_toml(SAMPLE_TOML).unwrap();
-        assert_eq!(cfg.http.connect_timeout_s, 10);
-        assert_eq!(cfg.http.request_timeout_s, 180);
-    }
-
-    #[test]
-    fn http_config_can_be_overridden() {
-        let toml_with_http =
-            format!("{SAMPLE_TOML}\n[http]\nconnect_timeout_s = 3\nrequest_timeout_s = 20\n");
-        let cfg = Config::from_toml(&toml_with_http).unwrap();
-        assert_eq!(cfg.http.connect_timeout_s, 3);
-        assert_eq!(cfg.http.request_timeout_s, 20);
-    }
-
-    #[test]
-    fn export_config_defaults_to_30fps() {
-        let cfg = Config::from_toml(SAMPLE_TOML).unwrap();
-        assert!(!cfg.export.fcpxml_2997fps);
-    }
-
-    #[test]
-    fn export_config_can_opt_into_2997fps() {
-        let toml_with_export = format!("{SAMPLE_TOML}\n[export]\nfcpxml_2997fps = true\n");
-        let cfg = Config::from_toml(&toml_with_export).unwrap();
-        assert!(cfg.export.fcpxml_2997fps);
-    }
-
-    #[test]
-    fn engine_startup_timeout_parses_and_defaults() {
-        let toml_with_timeout = SAMPLE_TOML.replacen(
-            r#"url = "http://127.0.0.1:50021""#,
-            "url = \"http://127.0.0.1:50021\"\nstartup_timeout_s = 90",
-            1,
-        );
-        let cfg = Config::from_toml(&toml_with_timeout).unwrap();
-        assert_eq!(cfg.voicevox.startup_timeout_s, Some(90));
-
-        let cfg2 = Config::from_toml(SAMPLE_TOML).unwrap();
-        assert_eq!(cfg2.voicevox.startup_timeout_s, None);
-    }
-
-    #[test]
-    fn parses_audio_config() {
-        let cfg = Config::from_toml(SAMPLE_TOML).unwrap();
-        assert_eq!(cfg.audio.sample_rate, 48000);
-        assert!((cfg.audio.microphone_spacing - 0.2).abs() < 1e-10);
-        assert!((cfg.audio.sound_speed - 340.0).abs() < 1e-10);
-        assert!((cfg.audio.reverb_wet - 0.7).abs() < 1e-10);
-        assert!((cfg.audio.reference_gain_db - (-5.0)).abs() < 1e-10);
-        assert!((cfg.audio.max_gain_db - (-1.0)).abs() < 1e-10);
-    }
-
-    #[test]
-    fn parses_engine_volume_offsets() {
-        let cfg = Config::from_toml(SAMPLE_TOML).unwrap();
-        assert!((cfg.audio.engine_volume_offsets["voicevox"] - 1.2).abs() < 1e-10);
-        assert!((cfg.audio.engine_volume_offsets["aivis"] - 0.9).abs() < 1e-10);
-        assert!((cfg.audio.engine_volume_offsets["xtts"] - 1.0).abs() < 1e-10);
-    }
-
-    #[test]
-    fn parses_concurrency_config() {
-        let cfg = Config::from_toml(SAMPLE_TOML).unwrap();
-        assert_eq!(cfg.concurrency.voicevox, 3);
-        assert_eq!(cfg.concurrency.aivis, 3);
-        assert_eq!(cfg.concurrency.xtts, 2);
-        assert_eq!(cfg.concurrency.audio_process, 0);
-    }
-
-    #[test]
-    fn parses_bgm_config() {
-        let cfg = Config::from_toml(SAMPLE_TOML).unwrap();
-        assert!((cfg.bgm.crossfade_s - 3.0).abs() < 1e-10);
-        assert!((cfg.bgm.se_fade_out_s - 0.05).abs() < 1e-10);
-    }
-
-    #[test]
-    fn rejects_invalid_toml() {
-        let result = Config::from_toml("this is not valid toml [[[");
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn early_reflections_defaults_when_section_absent() {
-        let cfg = Config::from_toml(SAMPLE_TOML).unwrap();
-        let er = &cfg.audio.early_reflections;
-        assert!(er.enabled);
-        assert!((er.ear_height - 1.2).abs() < 1e-10);
-        assert_eq!(er.room_dims_min, [4.0, 5.0, 3.0]);
-        assert_eq!(er.room_dims_max, [25.0, 45.0, 18.0]);
-        assert!((er.front_wall.reflection_coeff - 0.85).abs() < 1e-10);
-        assert!((er.back_wall.absorption_cutoff_hz - 4000.0).abs() < 1e-10);
-        assert!((er.wet_distance_slope - 0.1).abs() < 1e-10);
-    }
-
-    #[test]
-    fn early_reflections_partial_section_fills_missing_fields() {
-        let toml = format!(
-            "{SAMPLE_TOML}\n[audio.early_reflections]\nenabled = false\near_height = 1.7\n"
-        );
-        let cfg = Config::from_toml(&toml).unwrap();
-        let er = &cfg.audio.early_reflections;
-        assert!(!er.enabled);
-        assert!((er.ear_height - 1.7).abs() < 1e-10);
-        assert_eq!(er.room_dims_max, [25.0, 45.0, 18.0]);
-        assert!((er.floor.reflection_coeff - 0.5).abs() < 1e-10);
-    }
-
-    #[test]
-    #[ignore = "Task 2 で config を Script2Video 用に作り直す際に置き換える"]
-    fn parses_real_config_toml_with_early_reflections() {
-        let s = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.toml"))
-            .unwrap();
-        let cfg = Config::from_toml(&s).unwrap();
-        assert!(cfg.audio.early_reflections.enabled);
-        assert!((cfg.audio.early_reflections.front_wall.reflection_coeff - 0.85).abs() < 1e-10);
-    }
-
-    #[test]
-    #[ignore = "Task 2 で config を Script2Video 用に作り直す際に置き換える"]
-    fn real_config_reverb_wet_is_scaler_default() {
-        let s = std::fs::read_to_string(concat!(env!("CARGO_MANIFEST_DIR"), "/../../config.toml"))
-            .unwrap();
-        let cfg = Config::from_toml(&s).unwrap();
-        assert!(
-            (cfg.audio.reverb_wet - 1.0).abs() < 1e-10,
-            "reverb_wet 既定はスケーラ 1.0"
-        );
+    fn boundary_values_are_accepted() {
+        let mut c = Config::from_toml(MINIMAL).unwrap();
+        c.normalize.target_lufs = -40.0;
+        c.normalize.max_boost_db = 48.0;
+        c.normalize.max_cut_db = 0.0;
+        c.mix.master_ceiling_db = -6.0;
+        assert!(c.validate().is_empty());
     }
 }
