@@ -4,7 +4,7 @@ use s2v_core::{AudioConfig, EarlyConfig, MaterialConfig};
 
 use crate::acoustics::RoomGeometry;
 use crate::geometry::{calc_geometry, directivity_pattern, image_position, Surface};
-use crate::processor::apply_air_absorption;
+use crate::processor::{apply_air_absorption, MAX_OUTPUT_SAMPLES};
 use crate::reverb::{butterworth_lowpass_sos, sosfilt_single_section};
 
 /// ステレオバッファへ加算する1つの反射タップ。
@@ -90,10 +90,9 @@ pub fn build_early_taps(
         let gain_r = (vol_factor * (audio.reference_dist / path_r.max(0.1)) * pat_r * coeff) as f32;
 
         // 相対遅延(直接音 time-zero 基準)。負にならないよう飽和。
-        let delay_l = (path_l / c * fs) as i64 - min_delay_direct as i64;
-        let delay_r = (path_r / c * fs) as i64 - min_delay_direct as i64;
-        let rel_l = delay_l.max(0) as usize;
-        let rel_r = delay_r.max(0) as usize;
+        // 非有限・巨大な値は上限(MAX_OUTPUT_SAMPLES)へ飽和させる。呼び出し側が出力長の検査で Err にする。
+        let rel_l = delay_samples_saturating(path_l / c * fs).saturating_sub(min_delay_direct);
+        let rel_r = delay_samples_saturating(path_r / c * fs).saturating_sub(min_delay_direct);
 
         // 信号: 空気吸収(平均経路) → 素材ローパス
         let avg_path = (path_l + path_r) / 2.0;
@@ -110,6 +109,15 @@ pub fn build_early_taps(
         });
     }
     taps
+}
+
+/// 遅延サンプル数(浮動小数)を [0, MAX_OUTPUT_SAMPLES] の整数へ丸める。非有限は上限扱い。
+fn delay_samples_saturating(v: f64) -> usize {
+    if v.is_finite() {
+        v.clamp(0.0, MAX_OUTPUT_SAMPLES as f64) as usize
+    } else {
+        MAX_OUTPUT_SAMPLES
+    }
 }
 
 /// 素材の吸音カットオフで2次Butterworthローパスをかける(f32入出力)。

@@ -6,6 +6,10 @@ use rand::{rngs::SmallRng, SeedableRng};
 use rand_distr::{Distribution, StandardNormal};
 use realfft::RealFftPlanner;
 
+/// wet 信号の固定ゲイン。IR は生成時に L2 エネルギー 1 へ正規化済みなので、
+/// 信号ごとの(ピーク依存の)再正規化は行わず、この定数だけを掛ける(処理を入力に対して線形に保つ)。
+pub const REVERB_WET_GAIN: f32 = 0.4;
+
 /// (rt60, pre_delay) をキーとした stereo IR キャッシュ ([ir_l, ir_r])
 pub struct IrCache {
     sample_rate: u32,
@@ -59,21 +63,8 @@ impl IrCache {
         for ch in 0..2 {
             let dry: Vec<f32> = stereo.iter().map(|s| s[ch]).collect();
             let wet = fft_convolve(&dry, &ir[ch]);
-            let dry_peak = dry.iter().cloned().map(f32::abs).fold(0.0_f32, f32::max);
-            let wet_slice = &wet[..dry.len()];
-            let wet_peak = wet_slice
-                .iter()
-                .cloned()
-                .map(f32::abs)
-                .fold(1e-6_f32, f32::max);
-            let wet_norm_factor = if dry_peak > 0.0 {
-                (dry_peak * 0.4) / wet_peak
-            } else {
-                0.0
-            };
             for (i, s) in stereo.iter_mut().enumerate() {
-                let w = wet_slice[i] * wet_norm_factor;
-                s[ch] = (1.0 - actual_wet) * s[ch] + actual_wet * w;
+                s[ch] = (1.0 - actual_wet) * s[ch] + actual_wet * REVERB_WET_GAIN * wet[i];
             }
         }
     }
@@ -173,7 +164,7 @@ fn build_ir(rt60: f64, pre_delay: usize, sample_rate: u32) -> [Vec<f32>; 2] {
         })
         .collect();
 
-    std::array::from_fn(|_| {
+    let mut irs: [Vec<f32>; 2] = std::array::from_fn(|_| {
         let noise: Vec<f64> = StandardNormal.sample_iter(&mut rng).take(n).collect();
         let filtered = sosfilt_single_section(&sos, &noise);
         let mut ir: Vec<f32> = vec![0.0; pre_delay];
@@ -184,7 +175,16 @@ fn build_ir(rt60: f64, pre_delay: usize, sample_rate: u32) -> [Vec<f32>; 2] {
                 .map(|(s, d)| (s * d) as f32),
         );
         ir
-    })
+    });
+    // 各チャンネルを L2 エネルギー 1 に正規化する(生成時に1回だけ)
+    for ir in &mut irs {
+        let energy: f64 = ir.iter().map(|&v| (v as f64) * (v as f64)).sum();
+        if energy > 0.0 {
+            let scale = (1.0 / energy.sqrt()) as f32;
+            ir.iter_mut().for_each(|v| *v *= scale);
+        }
+    }
+    irs
 }
 
 #[cfg(test)]
@@ -402,6 +402,48 @@ mod tests {
         cache.apply(&mut signal, 1.0, 240, 1.0, 0.0, 1.0, 0.1);
         for (a, b) in original.iter().zip(signal.iter()) {
             assert!((a[0] - b[0]).abs() < 1e-6);
+        }
+    }
+
+    #[test]
+    fn cached_ir_channels_have_unit_energy() {
+        let cache = IrCache::new(48000);
+        cache.prewarm(&[(0.3, 100), (1.0, 240), (2.5, 480)]);
+        let guard = cache.cache.lock().unwrap();
+        assert_eq!(guard.len(), 3);
+        for ir in guard.values() {
+            for ch in ir {
+                let e: f64 = ch.iter().map(|&v| (v as f64) * (v as f64)).sum();
+                assert!((e - 1.0).abs() < 1e-3, "IR エネルギー={e}");
+            }
+        }
+    }
+
+    #[test]
+    fn apply_is_linear_in_the_signal() {
+        let cache = IrCache::new(48000);
+        cache.compute_if_needed(0.5, 100);
+        let mk = |f: f32| -> Vec<[f32; 2]> {
+            (0..3000)
+                .map(|i| {
+                    let v = (i as f32 * f).sin() * 0.3;
+                    [v, v * 0.5]
+                })
+                .collect()
+        };
+        let (x, y) = (mk(0.05), mk(0.31));
+        let mut sum: Vec<[f32; 2]> = x
+            .iter()
+            .zip(&y)
+            .map(|(a, b)| [a[0] + b[0], a[1] + b[1]])
+            .collect();
+        let (mut rx, mut ry) = (x.clone(), y.clone());
+        cache.apply(&mut sum, 0.5, 100, 0.6, 0.8, 1.0, 0.1);
+        cache.apply(&mut rx, 0.5, 100, 0.6, 0.8, 1.0, 0.1);
+        cache.apply(&mut ry, 0.5, 100, 0.6, 0.8, 1.0, 0.1);
+        for i in 0..sum.len() {
+            assert!((sum[i][0] - rx[i][0] - ry[i][0]).abs() < 1e-4);
+            assert!((sum[i][1] - rx[i][1] - ry[i][1]).abs() < 1e-4);
         }
     }
 }

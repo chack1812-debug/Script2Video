@@ -300,6 +300,18 @@ impl Config {
                 self.audio.sample_rate
             ));
         }
+        let a = &self.audio;
+        for (name, v) in [
+            ("reference_dist", a.reference_dist),
+            ("sound_speed", a.sound_speed),
+            ("microphone_spacing", a.microphone_spacing),
+        ] {
+            if !(v.is_finite() && v > 0.0) {
+                e.push(format!(
+                    "[audio] {name} は 0 より大きい有限の値で指定してください: {v}"
+                ));
+            }
+        }
         e
     }
 }
@@ -377,5 +389,28 @@ se_fade_out_s = 0.05
         c.normalize.max_cut_db = 0.0;
         c.mix.master_ceiling_db = -6.0;
         assert!(c.validate().is_empty());
+    }
+
+    #[test]
+    fn validate_rejects_non_positive_or_non_finite_geometry_values() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            let mut c = Config::from_toml(MINIMAL).unwrap();
+            c.audio.reference_dist = bad;
+            let e = c.validate();
+            assert_eq!(e.len(), 1, "{bad}: {e:?}");
+            assert!(e[0].contains("reference_dist"));
+
+            let mut c = Config::from_toml(MINIMAL).unwrap();
+            c.audio.sound_speed = bad;
+            let e = c.validate();
+            assert_eq!(e.len(), 1, "{bad}: {e:?}");
+            assert!(e[0].contains("sound_speed"));
+
+            let mut c = Config::from_toml(MINIMAL).unwrap();
+            c.audio.microphone_spacing = bad;
+            let e = c.validate();
+            assert_eq!(e.len(), 1, "{bad}: {e:?}");
+            assert!(e[0].contains("microphone_spacing"));
+        }
     }
 }

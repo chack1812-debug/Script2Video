@@ -3,8 +3,7 @@
 
 use std::collections::HashMap;
 
-use rand::rngs::SmallRng;
-use rand::{Rng, SeedableRng};
+use anyhow::Context;
 use s2v_core::{Cast, SceneConfig};
 
 use crate::filters::Biquad;
@@ -14,17 +13,35 @@ use crate::processor::AudioProcessor;
 /// 較正に使う信号の種(固定)。
 pub const CALIBRATION_SEED: u64 = 0x5C21_7B1D;
 
+/// SplitMix64。較正信号の再現性を外部クレートの実装に依存させないための最小の乱数生成器。
+struct SplitMix64(u64);
+
+impl SplitMix64 {
+    fn next_u64(&mut self) -> u64 {
+        self.0 = self.0.wrapping_add(0x9E37_79B9_7F4A_7C15);
+        let mut z = self.0;
+        z = (z ^ (z >> 30)).wrapping_mul(0xBF58_476D_1CE4_E5B9);
+        z = (z ^ (z >> 27)).wrapping_mul(0x94D0_49BB_1331_11EB);
+        z ^ (z >> 31)
+    }
+
+    /// [-1, 1) の一様乱数。
+    fn next_signed_unit(&mut self) -> f64 {
+        (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64 * 2.0 - 1.0
+    }
+}
+
 /// 較正信号: 100Hz〜8kHz に帯域制限したピンクノイズ 5 秒、-23 LUFS。`seed` が同じなら同じ信号。
 pub fn calibration_signal(seed: u64) -> Vec<f32> {
     let n = 5 * 48_000;
-    let mut rng = SmallRng::seed_from_u64(seed);
+    let mut rng = SplitMix64(seed);
     // Paul Kellet のピンクノイズフィルタ
     let mut b = [0.0f64; 7];
     let mut hp = Biquad::highpass(100.0, std::f64::consts::FRAC_1_SQRT_2, 48_000.0);
     let mut lp = Biquad::lowpass(8_000.0, std::f64::consts::FRAC_1_SQRT_2, 48_000.0);
     let mut out: Vec<f32> = (0..n)
         .map(|_| {
-            let w: f64 = rng.gen_range(-1.0..1.0);
+            let w: f64 = rng.next_signed_unit();
             b[0] = 0.99886 * b[0] + w * 0.0555179;
             b[1] = 0.99332 * b[1] + w * 0.0750759;
             b[2] = 0.96900 * b[2] + w * 0.1538520;
@@ -65,10 +82,10 @@ pub fn reference_scene() -> SceneConfig {
     }
 }
 
-pub(crate) fn compute_calibration_gain(p: &AudioProcessor) -> f64 {
+pub(crate) fn compute_calibration_gain(p: &AudioProcessor) -> anyhow::Result<f64> {
     let input = calibration_signal(CALIBRATION_SEED);
     let Loudness::Lufs(lin) = measure_mono(&input) else {
-        return 1.0;
+        anyhow::bail!("較正信号のラウドネスを測定できませんでした");
     };
     let out = p
         .render_with_gain(
@@ -77,11 +94,26 @@ pub(crate) fn compute_calibration_gain(p: &AudioProcessor) -> f64 {
             &reference_scene(),
             1.0,
         )
-        .expect("較正信号の処理に失敗しました");
+        .with_context(|| {
+            format!(
+                "較正信号の処理に失敗しました(reference_dist={} などの設定を確認してください)",
+                p.reference_dist()
+            )
+        })?;
     let Loudness::Lufs(lout) = measure_stereo(&out) else {
-        return 1.0;
+        anyhow::bail!(
+            "較正信号の出力のラウドネスを測定できませんでした(reference_dist={} などの設定を確認してください)",
+            p.reference_dist()
+        );
     };
-    10f64.powf((lin - lout) / 20.0)
+    let gain = 10f64.powf((lin - lout) / 20.0);
+    if !(gain.is_finite() && gain > 0.0) {
+        anyhow::bail!(
+            "基準ゲインを求められませんでした(reference_dist={} などの設定を確認してください): {gain}",
+            p.reference_dist()
+        );
+    }
+    Ok(gain)
 }
 
 #[cfg(test)]
@@ -91,7 +123,7 @@ mod tests {
     use crate::processor::AudioProcessor;
 
     fn processor() -> AudioProcessor {
-        AudioProcessor::new(s2v_core::Config::builtin().audio)
+        AudioProcessor::new(s2v_core::Config::builtin().audio).unwrap()
     }
 
     fn lufs(l: Loudness) -> f64 {
@@ -108,6 +140,24 @@ mod tests {
         assert!((lufs(measure_mono(&a)) + 23.0).abs() < 0.01);
         assert_eq!(a, calibration_signal(1));
         assert_ne!(a, calibration_signal(2));
+    }
+
+    #[test]
+    fn calibration_signal_is_pinned_to_the_inline_generator() {
+        // 乱数生成器(SplitMix64)や較正信号の作り方が変わったら気づけるようにする
+        let a = calibration_signal(1);
+        let head = [
+            0.001_740_654_f32,
+            0.011_981_206,
+            0.040_222_086,
+            0.071_230_896,
+        ];
+        for (x, y) in a.iter().zip(head) {
+            assert!((x - y).abs() < 1e-6, "{x} vs {y}");
+        }
+        assert!((a[1000] - 0.099_830_09).abs() < 1e-6);
+        assert!((a[1001] - 0.098_063_365).abs() < 1e-6);
+        assert!((lufs(measure_mono(&a)) + 23.0).abs() < 0.01);
     }
 
     #[test]

@@ -28,6 +28,18 @@ fn resolve_reverb_params(
     (room_size, reverb_wet)
 }
 
+/// 1回の render が扱う音声の上限(3600 秒 @48kHz)。遅延や残響の暴走による巨大確保を防ぐ。
+pub(crate) const MAX_OUTPUT_SAMPLES: usize = 48_000 * 3_600;
+
+/// 距離から遅延サンプル数を求める。非有限や上限超過は Err。
+fn delay_samples(dist: f64, sound_speed: f64, fs: f64) -> anyhow::Result<usize> {
+    let v = dist / sound_speed * fs;
+    if !v.is_finite() || v > MAX_OUTPUT_SAMPLES as f64 {
+        anyhow::bail!("距離が大きすぎます(伝搬遅延が 3600 秒を超えます): {dist} m");
+    }
+    Ok(v.max(0.0) as usize)
+}
+
 pub struct AudioProcessor {
     config: AudioConfig,
     ir_cache: IrCache,
@@ -36,15 +48,25 @@ pub struct AudioProcessor {
 }
 
 impl AudioProcessor {
-    pub fn new(config: AudioConfig) -> Self {
+    /// 生成時に基準ゲインを較正する。設定が不正で較正できないときは Err。
+    pub fn new(config: AudioConfig) -> anyhow::Result<Self> {
+        for (name, v) in [
+            ("reference_dist", config.reference_dist),
+            ("sound_speed", config.sound_speed),
+            ("microphone_spacing", config.microphone_spacing),
+        ] {
+            if !(v.is_finite() && v > 0.0) {
+                anyhow::bail!("[audio] {name} は 0 より大きい有限の値にしてください: {v}");
+            }
+        }
         let sample_rate = config.sample_rate;
         let mut p = Self {
             config,
             ir_cache: IrCache::new(sample_rate),
             calib_gain: 1.0,
         };
-        p.calib_gain = crate::calib::compute_calibration_gain(&p);
-        p
+        p.calib_gain = crate::calib::compute_calibration_gain(&p)?;
+        Ok(p)
     }
 
     /// 較正で求めた基準ゲイン。
@@ -103,6 +125,27 @@ impl AudioProcessor {
         if mono.is_empty() {
             anyhow::bail!("音声データが空です(0サンプル)");
         }
+        if mono.len() > MAX_OUTPUT_SAMPLES {
+            anyhow::bail!("音声データが長すぎます({}サンプル)", mono.len());
+        }
+        if mono.iter().any(|s| !s.is_finite()) {
+            anyhow::bail!("音声データに NaN または無限大が含まれています");
+        }
+        let cast_values = [
+            ("pan", Some(cast.pan)),
+            ("distance", Some(cast.distance)),
+            ("volume", Some(cast.volume)),
+            ("height", cast.height),
+            ("height_offset", Some(cast.height_offset)),
+            ("基準ゲイン", Some(base_gain)),
+        ];
+        for (name, v) in cast_values {
+            if let Some(v) = v {
+                if !v.is_finite() {
+                    anyhow::bail!("{name} が有限の値ではありません: {v}");
+                }
+            }
+        }
 
         // --- パラメータ決定 (Cast > Scene > AudioConfig デフォルト) ---
         let (room_size, reverb_wet) =
@@ -116,13 +159,21 @@ impl AudioProcessor {
             self.config.sample_rate,
         );
         let reverb_active = reverb_wet > 0.0 && rp.wet_base > 0.0;
+        let fs = self.config.sample_rate as f64;
         if reverb_active {
+            if !(rp.rt60.is_finite() && rp.rt60 >= 0.0 && rp.rt60 * fs <= MAX_OUTPUT_SAMPLES as f64)
+                || rp.pre_delay > MAX_OUTPUT_SAMPLES
+            {
+                anyhow::bail!("残響の長さが範囲外です(rt60={})", rp.rt60);
+            }
             self.ir_cache.compute_if_needed(rp.rt60, rp.pre_delay);
         }
 
         // --- 幾何学計算 ---
         let pan_rad = cast.pan.to_radians();
         let geo = calc_geometry(self.config.microphone_spacing, cast.distance, pan_rad);
+        let delay_l = delay_samples(geo.dist_l, self.config.sound_speed, fs)?;
+        let delay_r = delay_samples(geo.dist_r, self.config.sound_speed, fs)?;
 
         // 空気吸収フィルター
         let data_l = apply_air_absorption(
@@ -139,10 +190,6 @@ impl AudioProcessor {
         );
 
         // ITD
-        let delay_l =
-            ((geo.dist_l / self.config.sound_speed) * self.config.sample_rate as f64) as usize;
-        let delay_r =
-            ((geo.dist_r / self.config.sound_speed) * self.config.sample_rate as f64) as usize;
         let min_delay = delay_l.min(delay_r);
         let rel_l = delay_l - min_delay;
         let rel_r = delay_r - min_delay;
@@ -191,7 +238,14 @@ impl AudioProcessor {
         } else {
             0
         };
-        let out_len = mono.len() + rel_l.max(rel_r).max(early_max_rel) + rv_samples;
+        let out_len = mono
+            .len()
+            .checked_add(rel_l.max(rel_r).max(early_max_rel))
+            .and_then(|n| n.checked_add(rv_samples))
+            .filter(|&n| n <= MAX_OUTPUT_SAMPLES)
+            .ok_or_else(|| {
+                anyhow::anyhow!("出力が長すぎます(上限 {MAX_OUTPUT_SAMPLES} サンプル = 3600 秒)")
+            })?;
         let mut stereo: Vec<[f32; 2]> = vec![[0.0, 0.0]; out_len];
 
         for (i, (&sl, &sr)) in data_l.iter().zip(data_r.iter()).enumerate() {
@@ -355,7 +409,7 @@ mod tests {
         // pan は + で右、- で左から聞こえる仕様 (台本仕様.txt) なので、
         // 左パン(pan=-45)では音源がLマイクに近く・正面に来てLchが大きくなり、
         // 右パン(pan=+45)では音源がRマイクに近く・正面に来てRchが大きくなる。
-        let proc = AudioProcessor::new(default_audio_config());
+        let proc = AudioProcessor::new(default_audio_config()).unwrap();
         let input = tone(9_600, 0.5);
 
         let rms = |out: &[[f32; 2]], ch: usize| -> f64 {
@@ -422,28 +476,57 @@ mod tests {
         assert_eq!(out.len(), samples.len());
     }
 
+    fn energy_of(out: &[[f32; 2]]) -> f64 {
+        out.iter()
+            .map(|f| (f[0] as f64).powi(2) + (f[1] as f64).powi(2))
+            .sum()
+    }
+
     #[test]
     fn early_reflections_disabled_matches_no_early_output() {
-        let mut cfg = default_audio_config();
-        cfg.early_reflections.enabled = false;
-        cfg.reverb_wet = 0.0;
-        let proc = AudioProcessor::new(cfg);
-        let out = proc
-            .render(
-                &tone(4_800, 0.5),
-                &dummy_cast(20.0, 2.0),
-                &SceneConfig {
-                    room_size: Some(0.1),
-                    reverb_wet: Some(0.0),
-                    ..SceneConfig::new("s")
-                },
-            )
-            .unwrap();
-        let energy: f64 = out
-            .iter()
-            .map(|f| (f[0] as f64).powi(2) + (f[1] as f64).powi(2))
-            .sum();
-        assert!(energy > 0.0, "出力が生成されること");
+        let input = noise(4_800, 0.5);
+        let scene = SceneConfig {
+            room_size: Some(0.1),
+            reverb_wet: Some(0.0),
+            ..SceneConfig::new("s")
+        };
+        let build = |enabled: bool| {
+            let mut cfg = default_audio_config();
+            cfg.early_reflections.enabled = enabled;
+            cfg.reverb_wet = 0.0;
+            AudioProcessor::new(cfg).unwrap()
+        };
+        let off = build(false);
+        let on = build(true);
+
+        // pan=0: 左右対称(同じ信号・同じゲイン)で、長さは入力そのまま
+        let off_center = off.render(&input, &dummy_cast(0.0, 2.0), &scene).unwrap();
+        assert_eq!(
+            off_center.len(),
+            input.len(),
+            "早期反射なし・残響なしでは尾が出ない"
+        );
+        for f in &off_center {
+            assert!((f[0] - f[1]).abs() <= 1e-6 * f[0].abs().max(1.0));
+        }
+
+        // pan=20°: 長さ = 入力 + 両耳間遅延のみ
+        let cast = dummy_cast(20.0, 2.0);
+        let off_out = off.render(&input, &cast, &scene).unwrap();
+        let geo = calc_geometry(0.2, 2.0, 20.0_f64.to_radians());
+        let dl = ((geo.dist_l / 340.0) * 48_000.0) as usize;
+        let dr = ((geo.dist_r / 340.0) * 48_000.0) as usize;
+        assert_eq!(off_out.len(), input.len() + dl.abs_diff(dr));
+
+        // 早期反射ありは、長く、エネルギーも大きい
+        let on_out = on.render(&input, &cast, &scene).unwrap();
+        assert!(on_out.len() > off_out.len());
+        assert!(
+            energy_of(&on_out) > energy_of(&off_out) * 1.01,
+            "off={}, on={}",
+            energy_of(&off_out),
+            energy_of(&on_out)
+        );
     }
 
     #[test]
@@ -463,7 +546,7 @@ mod tests {
             let mut cfg = default_audio_config();
             cfg.reverb_wet = 0.0;
             cfg.early_reflections.enabled = enabled;
-            let proc = AudioProcessor::new(cfg);
+            let proc = AudioProcessor::new(cfg).unwrap();
             let out = proc.render(&input, &dummy_cast(20.0, 2.0), &scene).unwrap();
             out.iter()
                 .map(|f| (f[0] as f64).powi(2) + (f[1] as f64).powi(2))
@@ -480,6 +563,7 @@ mod tests {
 
     #[test]
     fn outdoor_scene_processes_with_near_dry_reverb() {
+        let input = noise(4_800, 0.5);
         let mut cfg = default_audio_config();
         cfg.early_reflections.enabled = false;
         cfg.early_reflections.ceiling.reflection_coeff = 0.0;
@@ -487,26 +571,41 @@ mod tests {
         cfg.early_reflections.back_wall.reflection_coeff = 0.0;
         cfg.early_reflections.side_walls.reflection_coeff = 0.0;
         cfg.early_reflections.floor.reflection_coeff = 0.5;
-        let proc = AudioProcessor::new(cfg);
-        let scene = SceneConfig {
+        let outdoor_proc = AudioProcessor::new(cfg).unwrap();
+        let outdoor = SceneConfig {
             room_w: Some(30.0),
             room_d: Some(30.0),
             room_h: Some(15.0),
             reverb_wet: Some(1.0),
             ..SceneConfig::new("屋外")
         };
-        let out = proc
-            .render(&noise(4_800, 0.5), &dummy_cast(0.0, 1.0), &scene)
-            .unwrap();
+        let indoor_proc = AudioProcessor::new(default_audio_config()).unwrap();
+        let indoor = SceneConfig {
+            room_w: Some(4.0),
+            room_d: Some(5.0),
+            room_h: Some(3.0),
+            reverb_wet: Some(1.0),
+            ..SceneConfig::new("屋内")
+        };
+        // 入力長を超える部分(残響の尾)と本体のエネルギー比
+        let tail_ratio = |p: &AudioProcessor, scene: &SceneConfig| -> f64 {
+            let out = p.render(&input, &dummy_cast(0.0, 1.0), scene).unwrap();
+            assert!(out.len() > input.len());
+            energy_of(&out[input.len()..]) / energy_of(&out[..input.len()])
+        };
+        let t_out = tail_ratio(&outdoor_proc, &outdoor);
+        let t_in = tail_ratio(&indoor_proc, &indoor);
+        eprintln!("tail ratios: outdoor={t_out} indoor={t_in}");
+        assert!(t_out < 0.01, "屋外は残響がほぼ無いこと: {t_out}");
         assert!(
-            !out.is_empty(),
-            "屋外 scene でも処理が成功し出力が生成されること"
+            t_out < t_in / 5.0,
+            "屋外 {t_out} は屋内 {t_in} より十分小さいこと"
         );
     }
 
     #[test]
     fn scene_room_dims_affect_reverb_params() {
-        let proc = AudioProcessor::new(default_audio_config());
+        let proc = AudioProcessor::new(default_audio_config()).unwrap();
         let small = SceneConfig {
             room_w: Some(4.0),
             room_d: Some(5.0),
@@ -532,7 +631,7 @@ mod tests {
         // 大きい部屋ほど rt60 が長く、残響テール分だけ出力サンプル数が増える。
         // render() が scene 寸法を実際に残響へ反映していることを end-to-end で検証する。
         let input = noise(4_800, 0.5);
-        let proc = AudioProcessor::new(default_audio_config());
+        let proc = AudioProcessor::new(default_audio_config()).unwrap();
 
         let small = SceneConfig {
             room_w: Some(4.0),
@@ -570,7 +669,7 @@ mod tests {
         let input = noise(4_800, 0.5);
         let mut cfg = default_audio_config();
         cfg.reverb_wet = 0.0; // 残響を切り早期反射のみ比較
-        let proc = AudioProcessor::new(cfg);
+        let proc = AudioProcessor::new(cfg).unwrap();
         let scene = SceneConfig {
             room_w: Some(8.0),
             room_d: Some(8.0),
@@ -595,7 +694,7 @@ mod tests {
         let input = noise(4_800, 0.5);
         let mut cfg = default_audio_config();
         cfg.reverb_wet = 0.0;
-        let proc = AudioProcessor::new(cfg);
+        let proc = AudioProcessor::new(cfg).unwrap();
         let scene = SceneConfig {
             room_w: Some(8.0),
             room_d: Some(8.0),
@@ -625,7 +724,7 @@ mod tests {
 
     #[test]
     fn render_rejects_empty_input() {
-        let p = AudioProcessor::new(default_audio_config());
+        let p = AudioProcessor::new(default_audio_config()).unwrap();
         assert!(p
             .render(&[], &dummy_cast(0.0, 1.0), &default_scene())
             .is_err());
@@ -633,7 +732,7 @@ mod tests {
 
     #[test]
     fn render_is_linear_without_per_line_normalization_or_limiter() {
-        let p = AudioProcessor::new(default_audio_config());
+        let p = AudioProcessor::new(default_audio_config()).unwrap();
         let x = tone(4_800, 0.2);
         let x4: Vec<f32> = x.iter().map(|v| v * 4.0).collect();
         let cast = dummy_cast(0.0, 0.3);
@@ -648,7 +747,7 @@ mod tests {
 
     #[test]
     fn volume_half_lowers_output_by_6_db() {
-        let p = AudioProcessor::new(default_audio_config());
+        let p = AudioProcessor::new(default_audio_config()).unwrap();
         let x = tone(9_600, 0.2);
         let full = dummy_cast(0.0, 1.0);
         let mut half = full.clone();
@@ -662,5 +761,130 @@ mod tests {
         };
         let db = 10.0 * (energy(&b) / energy(&a)).log10();
         assert!((db + 6.02).abs() < 0.1, "{db}");
+    }
+
+    fn reverb_scene() -> SceneConfig {
+        SceneConfig {
+            room_w: Some(6.0),
+            room_d: Some(7.0),
+            room_h: Some(3.0),
+            reverb_wet: Some(0.8),
+            ..SceneConfig::new("残響あり")
+        }
+    }
+
+    #[test]
+    fn render_is_additive_with_reverb_and_early_reflections() {
+        let p = AudioProcessor::new(default_audio_config()).unwrap();
+        let x = tone(3_000, 0.2);
+        let y = noise(3_000, 0.3);
+        let xy: Vec<f32> = x.iter().zip(&y).map(|(a, b)| a + b).collect();
+        let cast = dummy_cast(25.0, 1.5);
+        let scene = reverb_scene();
+        let (rx, ry, rxy) = (
+            p.render(&x, &cast, &scene).unwrap(),
+            p.render(&y, &cast, &scene).unwrap(),
+            p.render(&xy, &cast, &scene).unwrap(),
+        );
+        assert_eq!(rx.len(), rxy.len());
+        assert!(rxy.len() > xy.len() + 1_000, "残響の尾があること");
+        for i in 0..rxy.len() {
+            assert!((rxy[i][0] - rx[i][0] - ry[i][0]).abs() < 1e-4);
+            assert!((rxy[i][1] - rx[i][1] - ry[i][1]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn render_scales_linearly_with_reverb_on() {
+        let p = AudioProcessor::new(default_audio_config()).unwrap();
+        let x = noise(3_000, 0.1);
+        let x4: Vec<f32> = x.iter().map(|v| v * 4.0).collect();
+        let cast = dummy_cast(-30.0, 1.2);
+        let a = p.render(&x, &cast, &reverb_scene()).unwrap();
+        let b = p.render(&x4, &cast, &reverb_scene()).unwrap();
+        assert_eq!(a.len(), b.len());
+        for (fa, fb) in a.iter().zip(&b) {
+            assert!((fb[0] - 4.0 * fa[0]).abs() < 1e-4);
+            assert!((fb[1] - 4.0 * fa[1]).abs() < 1e-4);
+        }
+    }
+
+    #[test]
+    fn render_rejects_non_finite_values() {
+        let p = AudioProcessor::new(default_audio_config()).unwrap();
+        let scene = default_scene();
+        let x = tone(1_000, 0.2);
+        let mut bad = x.clone();
+        bad[10] = f32::NAN;
+        assert!(p.render(&bad, &dummy_cast(0.0, 1.0), &scene).is_err());
+        bad[10] = f32::INFINITY;
+        assert!(p.render(&bad, &dummy_cast(0.0, 1.0), &scene).is_err());
+        for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
+            assert!(
+                p.render(&x, &dummy_cast(v, 1.0), &scene).is_err(),
+                "pan {v}"
+            );
+            assert!(
+                p.render(&x, &dummy_cast(0.0, v), &scene).is_err(),
+                "distance {v}"
+            );
+            let mut c = dummy_cast(0.0, 1.0);
+            c.volume = v;
+            assert!(p.render(&x, &c, &scene).is_err(), "volume {v}");
+            let mut c = dummy_cast(0.0, 1.0);
+            c.height = Some(v);
+            assert!(p.render(&x, &c, &scene).is_err(), "height {v}");
+            let mut c = dummy_cast(0.0, 1.0);
+            c.height_offset = v;
+            assert!(p.render(&x, &c, &scene).is_err(), "height_offset {v}");
+        }
+    }
+
+    #[test]
+    fn render_handles_unusual_but_finite_values() {
+        let p = AudioProcessor::new(default_audio_config()).unwrap();
+        let scene = default_scene();
+        let x = tone(2_000, 0.2);
+        let mut neg_vol = dummy_cast(0.0, 1.0);
+        neg_vol.volume = -1.0;
+        let casts = [
+            dummy_cast(0.0, 0.0),
+            dummy_cast(0.0, -2.0),
+            dummy_cast(200.0, 1.0),
+            dummy_cast(-135.0, 3.0),
+            neg_vol,
+        ];
+        for c in &casts {
+            let out = p.render(&x, c, &scene).unwrap();
+            assert!(!out.is_empty());
+            assert!(out.iter().all(|f| f[0].is_finite() && f[1].is_finite()));
+        }
+    }
+
+    #[test]
+    fn render_rejects_absurd_distance_instead_of_allocating() {
+        let p = AudioProcessor::new(default_audio_config()).unwrap();
+        let x = tone(1_000, 0.2);
+        assert!(p
+            .render(&x, &dummy_cast(0.0, 1e12), &default_scene())
+            .is_err());
+        assert!(p
+            .render(&x, &dummy_cast(45.0, 1e300), &default_scene())
+            .is_err());
+    }
+
+    #[test]
+    fn new_fails_when_calibration_is_impossible() {
+        for bad in [0.0, -1.0, f64::NAN, f64::INFINITY, 1e12] {
+            let mut cfg = default_audio_config();
+            cfg.reference_dist = bad;
+            let err = AudioProcessor::new(cfg)
+                .err()
+                .unwrap_or_else(|| panic!("{bad}"));
+            assert!(
+                format!("{err:#}").contains("reference_dist"),
+                "{bad}: {err:#}"
+            );
+        }
     }
 }
