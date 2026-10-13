@@ -5,6 +5,7 @@ pub mod early;
 pub(crate) mod filters;
 pub mod geometry;
 pub mod input;
+pub mod limiter;
 pub mod loudness;
 pub mod processor;
 pub mod resampler;
