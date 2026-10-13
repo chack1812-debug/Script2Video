@@ -241,39 +241,59 @@ impl ScriptParser {
         }
     }
 
-    /// 収集中のキャストがある状態で読んだ行が、キャスト定義行の書式
-    /// (`役名:話者名:style,engine,...`、コロン2つ以上・3番目の要素にカンマを含む)に
-    /// 一致するかどうかを判定する。一致する場合、空行区切りの付け忘れによって
-    /// 定義行が自由記述に誤って飲み込まれた可能性が高いため、呼び出し側で
-    /// 警告を出す判定に使う(この判定自体は自由記述として収集する挙動を変えない)。
+    /// 収集中のキャストがある状態で読んだ行が、キャスト定義行(`役名:話者名,パラメータ=値`)に
+    /// 見えるかを判定する。空行区切りの付け忘れで定義行が自由記述に飲み込まれた可能性を警告するために使う。
     fn looks_like_cast_definition(line: &str) -> bool {
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
-        parts.len() == 3 && parts[2].contains(',')
+        match line.split_once(':') {
+            Some((role, rest)) => {
+                !role.trim().is_empty()
+                    && !role.contains(char::is_whitespace)
+                    && rest.contains('=')
+                    && !rest.contains(':')
+            }
+            None => false,
+        }
     }
 
     fn parse_cast_line(&mut self, line: &str, line_no: usize) {
-        let parts: Vec<&str> = line.splitn(3, ':').collect();
-        if parts.len() < 3 {
+        let Some((name, remain)) = line.split_once(':') else {
             self.warnings.push(ParseWarning {
                 line_no,
                 message: format!(
-                    "キャスト定義行の書式（役名:話者名:style,エンジン名,...）になっていません（この行は無視されます）: {line}"
+                    "キャスト定義行の書式（役名:話者名,パラメータ...）になっていません（この行は無視されます）: {line}"
+                ),
+            });
+            return;
+        };
+        let name = name.trim().to_string();
+        if name.is_empty() {
+            self.warnings.push(ParseWarning {
+                line_no,
+                message: format!(
+                    "キャスト定義行に役名がありません（この行は無視されます）: {line}"
                 ),
             });
             return;
         }
-        let name = parts[0].trim().to_string();
-        let speaker_name = parts[1].trim().to_string();
-        let remain = parts[2].trim();
-
-        let sub: Vec<&str> = remain.splitn(3, ',').collect();
-        let style = sub.first().map(|s| s.trim()).unwrap_or("").to_string();
-        let engine_type = sub.get(1).map(|s| s.trim()).unwrap_or("").to_string();
-        let params_str = sub.get(2).copied().unwrap_or("");
+        if remain.contains(':') {
+            self.warnings.push(ParseWarning {
+                line_no,
+                message: format!(
+                    "Script2Voice 形式(役名:話者名:style,エンジン名,...)のキャスト定義です。Script2Video では「役名:話者名,パラメータ...」で書いてください（この行は無視されます）: {line}"
+                ),
+            });
+            return;
+        }
+        let mut parts = remain.splitn(2, ',');
+        let first = parts.next().unwrap_or("").trim();
+        let (speaker_name, params_str) = if first.contains('=') {
+            (String::new(), remain.trim())
+        } else {
+            (first.to_string(), parts.next().unwrap_or(""))
+        };
 
         let (mut params, rejected) = extract_cast_params(params_str);
         self.warn_non_finite(line_no, &rejected);
-        // 音響パラメータは数値でなければ意味をなさない。文字列なら警告して既定値を使う。
         let mut take_number = |key: &str| -> Option<f64> {
             let v = params.remove(key)?;
             match v.as_f64() {
@@ -293,7 +313,27 @@ impl ScriptParser {
         let distance = take_number("distance").unwrap_or(1.0);
         let volume = take_number("volume").unwrap_or(1.0);
         let height = take_number("height");
-        params.insert("style".to_string(), Value::String(style));
+
+        // room_size / reverb_wet は役ごとの残響の上書きとして残す(流用元と同じ優先順 Cast > Scene > 設定)
+        let mut kept = HashMap::new();
+        let mut unknown: Vec<String> = Vec::new();
+        for (k, v) in params {
+            match k.as_str() {
+                "room_size" | "reverb_wet" if v.as_f64().is_some() => {
+                    kept.insert(k, v);
+                }
+                _ => unknown.push(k),
+            }
+        }
+        unknown.sort();
+        for k in unknown {
+            self.warnings.push(ParseWarning {
+                line_no,
+                message: format!(
+                    "キャストのパラメータ「{k}」は使えません（無視します）。使えるのは pan、distance、height、volume です"
+                ),
+            });
+        }
 
         let cast_key = name.clone();
         self.casts.insert(
@@ -301,11 +341,10 @@ impl ScriptParser {
             Cast {
                 name,
                 speaker_name,
-                engine_type,
                 pan,
                 distance,
                 volume,
-                params,
+                params: kept,
                 height,
                 height_offset: 0.0,
                 appearance: None,
@@ -545,9 +584,9 @@ cast 500
 paragraph 1000
 
 @cast
-ずんだもん:ずんだもん:ノーマル,voicevox,pan=-30,distance=1.0
+ずんだもん:ずんだもん,pan=-30,distance=1.0
 
-四国めたん:四国めたん:ノーマル,voicevox,pan=30
+四国めたん:四国めたん,pan=30
 
 @script
 ずんだもん:こんにちは！
@@ -577,7 +616,7 @@ paragraph 1000
         // produce() は Speech アイテム埋め込みの scene_config を音響処理に渡すため、
         // パーサがシーン確定時に Scene.config をアイテムへ転写していることを保証する。
         let src = "@scene 一 room_size=0.8 reverb_wet=0.3\n\
-                   @cast\nA:話者:ノーマル,voicevox,pan=0\n\
+                   @cast\nA:話者,pan=0\n\
                    @script\nA:こんにちは\n\
                    @scene 二 room_w=20 room_d=30 room_h=10 listener_z=1.5\n\
                    @script\nA:こんばんは\n";
@@ -607,7 +646,6 @@ paragraph 1000
         let casts = &scenes[0].casts;
         assert!(casts.contains_key("ずんだもん"));
         let c = &casts["ずんだもん"];
-        assert_eq!(c.engine_type, "voicevox");
         assert!((c.pan - (-30.0)).abs() < 1e-6);
         assert!((c.distance - 1.0).abs() < 1e-6);
     }
@@ -661,7 +699,7 @@ paragraph 1000
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
+A:A
 
 @script
 A:こんにちは
@@ -682,7 +720,7 @@ A:さようなら
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
+A:A
 
 @script
 A:こんにちは
@@ -704,7 +742,7 @@ A:こんにちは
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
+A:A
 
 @script
 A:こんにちは
@@ -729,7 +767,7 @@ A:こんにちは
 @scene 居間 room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
+A:A
 
 @script
 A:こんにちは
@@ -752,7 +790,7 @@ A:さようなら
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
+A:A
 
 @script
 A:セリフ
@@ -774,8 +812,8 @@ A:続き
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
-B:B:スタイル,voicevox
+A:A
+B:B
 
 @script
 2
@@ -799,7 +837,7 @@ B:セリフB
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
+A:A
 
 @script
 A:'東京|とうきょう'に行く
@@ -822,7 +860,7 @@ A:'東京|とうきょう'に行く
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
+A:A
 
 @script
 A:'13:00|じゅうさんじ'に始めます
@@ -845,7 +883,7 @@ A:'13:00|じゅうさんじ'に始めます
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
+A:A
 
 @script
 A:'東京:とうきょう'に行く
@@ -868,7 +906,7 @@ A:'東京:とうきょう'に行く
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
+A:A
 
 @script
 A:'東京｜とうきょう'に行く
@@ -926,7 +964,7 @@ A:'東京｜とうきょう'に行く
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox,pan=0
+A:A,pan=0
 
 @script
 A(pan=15,distance=2):セリフ
@@ -1026,7 +1064,7 @@ A(pan=15,distance=2):セリフ
     #[test]
     fn unknown_cast_produces_warning_with_line_number() {
         let mut p = ScriptParser::new();
-        let src = "@scene テスト room_size=0.1\n@cast\nA:話者:ノーマル,voicevox,pan=0\n@script\nA:こんにちは\n誰か:こんばんは\n";
+        let src = "@scene テスト room_size=0.1\n@cast\nA:話者,pan=0\n@script\nA:こんにちは\n誰か:こんばんは\n";
         let scenes = p.parse_str(src).unwrap();
         // 未定義キャスト行は従来どおり無視される
         let n = scenes[0]
@@ -1045,7 +1083,7 @@ A(pan=15,distance=2):セリフ
     #[test]
     fn warnings_are_reset_per_parse() {
         let mut p = ScriptParser::new();
-        let src = "@scene テスト room_size=0.1\n@cast\nA:話者:ノーマル,voicevox,pan=0\n@script\n誰か:こんばんは\n";
+        let src = "@scene テスト room_size=0.1\n@cast\nA:話者,pan=0\n@script\n誰か:こんばんは\n";
         p.parse_str(src).unwrap();
         assert_eq!(p.warnings().len(), 1);
         p.parse_str(src).unwrap();
@@ -1055,7 +1093,7 @@ A(pan=15,distance=2):セリフ
     #[test]
     fn cast_line_parses_height_into_field() {
         let scenes = ScriptParser::new()
-            .parse_str("@scene テスト room_size=0.1\n@cast\nA:話者:ノーマル,voicevox,pan=0,height=1.7\n@script\nA: こんにちは\n")
+            .parse_str("@scene テスト room_size=0.1\n@cast\nA:話者,pan=0,height=1.7\n@script\nA: こんにちは\n")
             .unwrap();
         let cast = scenes[0].casts.get("A").unwrap();
         assert_eq!(cast.height, Some(1.7));
@@ -1066,7 +1104,7 @@ A(pan=15,distance=2):セリフ
     fn cast_appearance_collected_until_blank_line() {
         let src = "@scene テスト room_size=0.1\n\
                    @cast\n\
-                   ずんだもん:ずんだもん:ノーマル,voicevox,pan=0\n\
+                   ずんだもん:ずんだもん,pan=0\n\
                    小柄で緑髪の元気なキャラクター。\n\
                    ずんだ餅のイメージカラーの服を着ている。\n\
                    \n\
@@ -1092,8 +1130,8 @@ A(pan=15,distance=2):セリフ
         // 空行を挟まないと、次のキャスト定義行が前のキャストの自由記述として飲み込まれる(仕様どおりの制約)
         let src = "@scene テスト room_size=0.1\n\
                    @cast\n\
-                   A:話者A:ノーマル,voicevox,pan=0\n\
-                   B:話者B:ノーマル,voicevox,pan=10\n\
+                   A:話者A,pan=0\n\
+                   B:話者B,pan=10\n\
                    \n\
                    @script\n\
                    A:こんにちは\n";
@@ -1101,17 +1139,14 @@ A(pan=15,distance=2):セリフ
         assert!(scenes[0].casts.contains_key("A"));
         assert!(!scenes[0].casts.contains_key("B"));
         let cast_a = scenes[0].casts.get("A").unwrap();
-        assert_eq!(
-            cast_a.appearance.as_deref(),
-            Some("B:話者B:ノーマル,voicevox,pan=10")
-        );
+        assert_eq!(cast_a.appearance.as_deref(), Some("B:話者B,pan=10"));
     }
 
     #[test]
     fn swallowed_cast_definition_line_produces_warning() {
         let src = "@cast\n\
-                   A:話者A:ノーマル,voicevox,pan=0\n\
-                   B:話者B:ノーマル,voicevox,pan=10\n\
+                   A:話者A,pan=0\n\
+                   B:話者B,pan=10\n\
                    \n\
                    @script\n\
                    A:こんにちは\n";
@@ -1121,7 +1156,7 @@ A(pan=15,distance=2):セリフ
             parser
                 .warnings()
                 .iter()
-                .any(|w| w.message.contains("B:話者B:ノーマル,voicevox,pan=10")),
+                .any(|w| w.message.contains("B:話者B,pan=10")),
             "expected a warning about the swallowed B definition, got: {:?}",
             parser.warnings()
         );
@@ -1130,7 +1165,7 @@ A(pan=15,distance=2):セリフ
     #[test]
     fn genuine_free_text_does_not_produce_swallow_warning() {
         let src = "@cast\n\
-                   A:話者A:ノーマル,voicevox,pan=0\n\
+                   A:話者A,pan=0\n\
                    小柄で緑髪の元気なキャラクター。\n\
                    \n\
                    @script\n\
@@ -1148,7 +1183,7 @@ A(pan=15,distance=2):セリフ
     fn cast_appearance_flushes_without_trailing_blank_line_before_next_section() {
         let src = "@scene テスト room_size=0.1\n\
                    @cast\n\
-                   A:話者A:ノーマル,voicevox,pan=0\n\
+                   A:話者A,pan=0\n\
                    眼鏡をかけた青年。\n\
                    @script\n\
                    A:こんにちは\n";
@@ -1165,7 +1200,7 @@ A(pan=15,distance=2):セリフ
                    @pause\n\
                    sentence 200\n\
                    @cast\n\
-                   A:A:ノーマル,voicevox\n\
+                   A:A\n\
                    @script\n\
                    A:こんにちは\n";
         let scenes = ScriptParser::new().parse_str(src).unwrap();
@@ -1188,7 +1223,7 @@ A(pan=15,distance=2):セリフ
                    \n\
                    二行目の描写。\n\
                    @cast\n\
-                   A:A:ノーマル,voicevox\n\
+                   A:A\n\
                    @script\n\
                    A:こんにちは\n";
         let scenes = ScriptParser::new().parse_str(src).unwrap();
@@ -1204,7 +1239,7 @@ A(pan=15,distance=2):セリフ
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
+A:A
 
 @script
 A：こんにちは
@@ -1225,7 +1260,7 @@ A：こんにちは
 @scene テスト room_size=0.1
 
 @cast
-A:A:スタイル,voicevox
+A:A
 
 @script
 A:開始は'13:00|じゅうさんじ'です
@@ -1245,29 +1280,8 @@ A:開始は'13:00|じゅうさんじ'です
     // ---- s2v-18b.2: @cast の文字列パラメータ ----
 
     #[test]
-    fn cast_string_param_is_kept_as_string() {
-        let src = "@scene s\n@cast\nE:Ana:default,xtts,language=en,pan=10\n@script\nE:Hello\n";
-        let mut parser = ScriptParser::new();
-        let scenes = parser.parse_str(src).unwrap();
-        let c = &scenes[0].casts["E"];
-        assert_eq!(c.params["language"].as_str(), Some("en"));
-        assert!((c.pan - 10.0).abs() < 1e-9);
-        assert!(parser.warnings().is_empty(), "{:?}", parser.warnings());
-    }
-
-    #[test]
-    fn cast_numeric_param_stays_numeric() {
-        let src = "@scene s\n@cast\nA:A:ノーマル,voicevox,speedScale=1.2\n@script\nA:x\n";
-        let scenes = ScriptParser::new().parse_str(src).unwrap();
-        assert_eq!(
-            scenes[0].casts["A"].params["speedScale"].as_f64(),
-            Some(1.2)
-        );
-    }
-
-    #[test]
     fn cast_non_numeric_acoustic_param_warns_and_uses_default() {
-        let src = "@scene s\n@cast\nA:A:ノーマル,voicevox,pan=left\n@script\nA:x\n";
+        let src = "@scene s\n@cast\nA:A,pan=left\n@script\nA:x\n";
         let mut parser = ScriptParser::new();
         let scenes = parser.parse_str(src).unwrap();
         let c = &scenes[0].casts["A"];
@@ -1283,7 +1297,7 @@ A:開始は'13:00|じゅうさんじ'です
 
     #[test]
     fn malformed_cast_definition_line_warns_with_line_number() {
-        let src = "@scene s\n@cast\nA:話者のみ\n@script\nA:x\n";
+        let src = "@scene s\n@cast\n話者のみ\n@script\nA:x\n";
         let mut parser = ScriptParser::new();
         let scenes = parser.parse_str(src).unwrap();
         assert!(scenes[0].casts.is_empty());
@@ -1299,7 +1313,7 @@ A:開始は'13:00|じゅうさんじ'です
 
     #[test]
     fn non_finite_cast_param_is_rejected_with_warning() {
-        let src = "@scene s\n@cast\nA:A:ノーマル,voicevox,pan=nan,volume=inf,speedScale=-infinity\n@script\nA:x\n";
+        let src = "@scene s\n@cast\nA:A,pan=nan,volume=inf,speedScale=-infinity\n@script\nA:x\n";
         let mut parser = ScriptParser::new();
         let scenes = parser.parse_str(src).unwrap();
         let c = &scenes[0].casts["A"];
@@ -1312,7 +1326,7 @@ A:開始は'13:00|じゅうさんじ'です
 
     #[test]
     fn non_finite_inline_param_is_rejected_with_warning() {
-        let src = "@scene s\n@cast\nA:A:ノーマル,voicevox\n@script\nA(pan=inf,volume=0.1):x\n";
+        let src = "@scene s\n@cast\nA:A\n@script\nA(pan=inf,volume=0.1):x\n";
         let mut parser = ScriptParser::new();
         let scenes = parser.parse_str(src).unwrap();
         let ScriptItem::Speech { offset_params, .. } = &scenes[0].items[0] else {
@@ -1327,8 +1341,7 @@ A:開始は'13:00|じゅうさんじ'です
 
     #[test]
     fn non_finite_scene_param_is_rejected_with_warning() {
-        let src =
-            "@scene s room_size=NaN reverb_wet=0.5\n@cast\nA:A:ノーマル,voicevox\n@script\nA:x\n";
+        let src = "@scene s room_size=NaN reverb_wet=0.5\n@cast\nA:A\n@script\nA:x\n";
         let mut parser = ScriptParser::new();
         let scenes = parser.parse_str(src).unwrap();
         assert_eq!(scenes[0].config.room_size, None);
@@ -1340,7 +1353,7 @@ A:開始は'13:00|じゅうさんじ'です
 
     #[test]
     fn non_finite_pause_value_is_ignored_with_warning() {
-        let src = "@pause\nsentence inf\ncast 300\n@scene s\n@cast\nA:A:ノーマル,voicevox\n@script\nA:x\n";
+        let src = "@pause\nsentence inf\ncast 300\n@scene s\n@cast\nA:A\n@script\nA:x\n";
         let mut parser = ScriptParser::new();
         let scenes = parser.parse_str(src).unwrap();
         assert_eq!(
@@ -1379,7 +1392,7 @@ A:開始は'13:00|じゅうさんじ'です
         std::fs::write(se_dir.join("b.wav"), b"").unwrap();
 
         let src = format!(
-            "@scene s\n@asset\nbgm_dir = {}\nse_dir = {}\n@cast\nA:A:ノーマル,voicevox\n@script\n#bgm_start a.wav\n#se b.wav\nA:x\n",
+            "@scene s\n@asset\nbgm_dir = {}\nse_dir = {}\n@cast\nA:A\n@script\n#bgm_start a.wav\n#se b.wav\nA:x\n",
             bgm_dir.display(),
             se_dir.display()
         );
@@ -1403,7 +1416,7 @@ A:開始は'13:00|じゅうさんじ'です
         let abs = dir.path().join("abs.wav");
         std::fs::write(&abs, b"").unwrap();
         let src = format!(
-            "@scene s\n@asset\nbgm_dir = D:\\no\\such\\dir\n@cast\nA:A:ノーマル,voicevox\n@script\n#bgm_start {}\nA:x\n",
+            "@scene s\n@asset\nbgm_dir = D:\\no\\such\\dir\n@cast\nA:A\n@script\n#bgm_start {}\nA:x\n",
             abs.display()
         );
         let mut parser = ScriptParser::new();
@@ -1417,7 +1430,7 @@ A:開始は'13:00|じゅうさんじ'です
     fn missing_bgm_or_se_file_produces_warning() {
         let dir = tempfile::tempdir().unwrap();
         let src = format!(
-            "@scene s\n@asset\nbgm_dir = {0}\nse_dir = {0}\n@cast\nA:A:ノーマル,voicevox\n@script\n#bgm_start none.wav\n#se none2.wav\nA:x\n",
+            "@scene s\n@asset\nbgm_dir = {0}\nse_dir = {0}\n@cast\nA:A\n@script\n#bgm_start none.wav\n#se none2.wav\nA:x\n",
             dir.path().display()
         );
         let mut parser = ScriptParser::new();
@@ -1427,5 +1440,51 @@ A:開始は'13:00|じゅうさんじ'です
         assert_eq!(w[0].line_no, 8);
         assert!(w[0].message.contains("none.wav"), "{}", w[0].message);
         assert_eq!(w[1].line_no, 9);
+    }
+
+    #[test]
+    fn cast_line_new_format_with_speaker_and_params() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str("@scene 居間\n@cast\nA:田中,pan=-30,distance=1.5,height=1.6,volume=0.8\n\n@script\nA:こんにちは\n")
+            .unwrap();
+        let a = &scenes[0].casts["A"];
+        assert_eq!(a.speaker_name, "田中");
+        assert_eq!(a.pan, -30.0);
+        assert_eq!(a.distance, 1.5);
+        assert_eq!(a.height, Some(1.6));
+        assert_eq!(a.volume, 0.8);
+        assert!(p.warnings().is_empty(), "{:?}", p.warnings());
+    }
+
+    #[test]
+    fn cast_line_speaker_is_optional() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str("@scene 居間\n@cast\nA:pan=10\n\nB:\n\n@script\nA:やあ\n")
+            .unwrap();
+        assert_eq!(scenes[0].casts["A"].speaker_name, "");
+        assert_eq!(scenes[0].casts["A"].pan, 10.0);
+        assert_eq!(scenes[0].casts["B"].speaker_name, "");
+    }
+
+    #[test]
+    fn legacy_script2voice_cast_line_is_rejected_with_warning() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str("@scene 居間\n@cast\nA:ずんだもん:ノーマル,voicevox,pan=-30\n\n@script\n")
+            .unwrap();
+        assert!(!scenes[0].casts.contains_key("A"));
+        assert_eq!(p.warnings().len(), 1);
+        assert!(p.warnings()[0].message.contains("Script2Voice 形式"));
+    }
+
+    #[test]
+    fn unknown_cast_param_warns() {
+        let mut p = ScriptParser::new();
+        p.parse_str("@scene 居間\n@cast\nA:田中,speedScale=1.2\n\n@script\n")
+            .unwrap();
+        assert_eq!(p.warnings().len(), 1);
+        assert!(p.warnings()[0].message.contains("speedScale"));
     }
 }

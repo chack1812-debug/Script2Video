@@ -170,16 +170,7 @@ impl AudioProcessor {
         let max_gain_linear = 10.0_f64.powf(self.config.max_gain_db / 20.0);
         let base_norm = max_gain_linear / nominal_pat.max(1e-6);
 
-        let engine_vol = self
-            .config
-            .engine_volume_offsets
-            .get(&cast.engine_type)
-            .copied()
-            .unwrap_or(1.0);
-        // Python版 (core/audio_processor.py) は config.REFERENCE_GAIN_DB を
-        // 定義しているがゲイン計算には使用していない (未使用の設定値)。
-        // 移植時に誤って乗算していたため、Python版に合わせて除外する。
-        let vol_factor = base_norm * cast.volume * engine_vol;
+        let vol_factor = base_norm * cast.volume;
 
         let dist_gain_l = self.config.reference_dist / geo.dist_l.max(0.1);
         let dist_gain_r = self.config.reference_dist / geo.dist_r.max(0.1);
@@ -336,7 +327,6 @@ mod tests {
         Cast {
             name: "テスト".to_string(),
             speaker_name: "ずんだもん".to_string(),
-            engine_type: "voicevox".to_string(),
             pan,
             distance,
             volume: 1.0,

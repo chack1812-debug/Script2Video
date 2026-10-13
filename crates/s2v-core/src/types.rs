@@ -201,7 +201,6 @@ mod tests {
         let cast = Cast {
             name: "主人公".to_string(),
             speaker_name: "ずんだもん".to_string(),
-            engine_type: "voicevox".to_string(),
             pan: -15.0,
             distance: 1.5,
             volume: 1.0,
