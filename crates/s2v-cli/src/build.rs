@@ -22,6 +22,7 @@ use s2v_export::timeline_json::{
 use s2v_export::wavio::{write_f32_stereo, write_i24_stereo};
 use s2v_export::{mix, MixRequest};
 
+use crate::layout::check_layout;
 use crate::proclog::ProcLog;
 use crate::work::{line_key, resampled_key, sha256_hex, LineKeyParams, NormMeta, WorkDir};
 use crate::Outcome;
@@ -60,7 +61,7 @@ fn file_name(p: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 台本のあるフォルダ(出力先)。
+/// 台本のあるフォルダ(出力先)。相対の台本名だけなら現在のフォルダ。
 fn script_dir(script: &Path) -> PathBuf {
     match script.parent() {
         Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
@@ -68,62 +69,14 @@ fn script_dir(script: &Path) -> PathBuf {
     }
 }
 
-/// `.` と `..` を字面で畳む(存在しないパスの比較用)。
-fn lexical_normalize(p: &Path) -> PathBuf {
-    use std::path::Component;
-    let mut out = PathBuf::new();
-    for c in p.components() {
-        match c {
-            Component::CurDir => {}
-            Component::ParentDir => {
-                if !out.pop() {
-                    out.push("..");
-                }
-            }
-            other => out.push(other.as_os_str()),
-        }
-    }
-    out
-}
-
-fn same_dir(a: &Path, b: &Path) -> bool {
-    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
-        (Ok(x), Ok(y)) => x == y,
-        _ => lexical_normalize(a) == lexical_normalize(b),
-    }
-}
-
-/// 出力の配置と食い違わないか(何かを書く前に確かめる)。
-fn check_layout(script: &Path, voice_dir: &Path, root: &Path) -> anyhow::Result<()> {
-    let name = file_name(script);
-    if RESERVED_NAMES.contains(&name.as_str()) {
-        anyhow::bail!(
-            "台本のファイル名 {name} は出力ファイルと同じ名前です。台本の名前を変えてください"
-        );
-    }
-    for sub in OUTPUT_DIRS {
-        if same_dir(voice_dir, &root.join(sub)) {
-            anyhow::bail!(
-                "収録フォルダ {} が出力用の {sub}/ と同じ場所です。収録フォルダを別にしてください",
-                voice_dir.display()
-            );
-        }
-    }
-    Ok(())
-}
-
-/// 台本のファイル名にできない、出力側の名前。
-const RESERVED_NAMES: [&str; 3] = ["full_dialogue.wav", "Process.log", "output.mp4"];
-/// 収録フォルダにできない、出力側のフォルダ名。
-const OUTPUT_DIRS: [&str; 3] = ["work", "tracks", "timeline"];
-
 fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
     let out_dir = script_dir(&args.script);
     let voice_dir = args
         .voice_dir
         .clone()
         .unwrap_or_else(|| out_dir.join("voices"));
-    if let Err(e) = check_layout(&args.script, &voice_dir, &out_dir) {
+    let cwd = std::env::current_dir().context("現在のフォルダを取得できません")?;
+    if let Err(e) = check_layout(&args.script, args.voice_dir.as_deref(), &cwd) {
         eprintln!("[ERROR] {e:#}");
         eprintln!("[ERROR] 出力していません");
         return Ok(Outcome::Failed);
@@ -299,7 +252,10 @@ fn produce(
             _ => None,
         })
         .collect();
-    if !voice_dir.exists() {
+    let is_dir = std::fs::metadata(voice_dir)
+        .map(|m| m.is_dir())
+        .unwrap_or(false);
+    if !is_dir && (args.voice_dir.is_none() || !voice_dir.exists()) {
         if args.voice_dir.is_none() {
             anyhow::bail!(
                 "収録フォルダがありません: {}(台本と同じ場所に voices フォルダを作るか、--voice-dir で指定してください)",

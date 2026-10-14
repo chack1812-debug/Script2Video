@@ -853,3 +853,117 @@ fn verify_loudness_reads_the_script_folder_layout() {
     assert_eq!(code, 0, "{text}");
     assert!(text.contains("S01-L001"), "{text}");
 }
+
+#[test]
+fn reserved_script_names_are_rejected_case_insensitively() {
+    for name in [
+        "PROCESS.LOG",
+        "Process.Log",
+        "FULL_DIALOGUE.WAV",
+        "Full_Dialogue.wav",
+        "Output.MP4",
+        "OUTPUT.mp4",
+    ] {
+        let f = fixture(ONE_LINE);
+        let script = f.dir.join(name);
+        fs::write(&script, ONE_LINE).unwrap();
+        let mut a = no_voice_args(&f);
+        a.script = script.clone();
+        assert_eq!(run_build(&a), Outcome::Failed, "{name}");
+        assert_eq!(fs::read_to_string(&script).unwrap(), ONE_LINE, "{name}");
+        assert!(!f.dir.join("work").exists(), "{name}");
+        assert!(!f.dir.join("timeline").exists(), "{name}");
+    }
+}
+
+#[test]
+fn relative_and_case_variant_voice_dirs_are_rejected_before_any_write() {
+    let cases: Vec<(&str, PathBuf)> = vec![
+        ("WORK", PathBuf::from("WORK")),
+        ("Tracks/", PathBuf::from("Tracks").join("")),
+        ("./timeline", PathBuf::from(".").join("timeline")),
+        (
+            "work/../work",
+            PathBuf::from("work").join("..").join("work"),
+        ),
+    ];
+    for (label, rel) in cases {
+        let f = fixture(ONE_LINE);
+        // 相対パスはカレントディレクトリ基準。テストではカレントを変えず、絶対パスに直して渡す純粋関数のテストは layout.rs にある。
+        // ここでは絶対パスの大文字違いだけを確かめる。
+        let abs = f.dir.join(&rel);
+        let mut a = no_voice_args(&f);
+        a.voice_dir = Some(abs);
+        assert_eq!(run_build(&a), Outcome::Failed, "{label}");
+        assert!(!f.dir.join("Process.log").exists(), "{label}");
+        assert!(!f.dir.join("work").exists(), "{label}");
+    }
+}
+
+#[test]
+fn default_voices_that_is_a_file_gives_the_same_guidance_as_missing() {
+    let f = fixture(ONE_LINE);
+    fs::remove_dir_all(&f.voices).unwrap();
+    fs::write(&f.voices, b"x").unwrap();
+    assert_eq!(run_build(&no_voice_args(&f)), Outcome::Failed);
+    let log = fs::read_to_string(f.dir.join("Process.log")).unwrap();
+    assert!(
+        log.contains("voices") && log.contains("--voice-dir"),
+        "{log}"
+    );
+}
+
+/// ディレクトリのリンクを作る(権限などで作れなければ None)。
+fn make_dir_link(link: &Path, target: &Path) -> Option<()> {
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+            return Some(());
+        }
+        let ok = std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        ok.then_some(())
+    }
+    #[cfg(not(windows))]
+    {
+        std::os::unix::fs::symlink(target, link).ok()
+    }
+}
+
+#[test]
+fn linked_output_folders_pointing_outside_are_refused_without_deleting() {
+    for sub in ["tracks", "timeline", "work"] {
+        let f = fixture(ONE_LINE);
+        let foreign = f._tmp.path().join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        for n in [
+            "dialogue.wav",
+            "bgm.wav",
+            "se.wav",
+            "timeline.json",
+            "keep.txt",
+        ] {
+            fs::write(foreign.join(n), b"precious").unwrap();
+        }
+        if make_dir_link(&f.dir.join(sub), &foreign).is_none() {
+            eprintln!("リンクを作れないため {sub} のテストを省略します");
+            return;
+        }
+        assert_eq!(run_build(&no_voice_args(&f)), Outcome::Failed, "{sub}");
+        for n in [
+            "dialogue.wav",
+            "bgm.wav",
+            "se.wav",
+            "timeline.json",
+            "keep.txt",
+        ] {
+            assert_eq!(fs::read(foreign.join(n)).unwrap(), b"precious", "{sub}/{n}");
+        }
+        assert!(!f.dir.join("Process.log").exists(), "{sub}");
+    }
+}
