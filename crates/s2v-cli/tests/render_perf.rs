@@ -10,6 +10,7 @@ use std::process::Command;
 use std::time::{Duration, Instant};
 
 use s2v_cli::{run_build, run_render, BuildArgs, Outcome, RenderArgs};
+use s2v_video::frames::total_frames;
 
 const LINES: usize = 1000;
 const LIMIT: Duration = Duration::from_secs(30 * 60);
@@ -101,6 +102,11 @@ fn dir_size(dir: &Path) -> u64 {
         .sum()
 }
 
+/// 全体のコマ数(既定の 30fps)が目標のコマ数と 1 コマ以内か。
+fn frames_close(d: i64, target_ms: i64) -> bool {
+    (total_frames(d, 30) - total_frames(target_ms, 30)).abs() <= 1
+}
+
 struct Project {
     _tmp: tempfile::TempDir,
     dir: PathBuf,
@@ -108,7 +114,7 @@ struct Project {
     config: PathBuf,
 }
 
-/// 台本・収録・設定を書いて build を通す。台本の長さは、末尾の `#pause` で `target_ms` ちょうど(±1 コマ以内)にする。素材は呼び出し側が `tracks/` に置く(`make_assets`)。
+/// 台本・収録・設定を書いて build を通す。台本の長さは、末尾の `#pause` で `target_ms` ちょうど(1 コマ以内)にする。素材は呼び出し側が `tracks/` に置く(`make_assets`)。
 fn project(body: &str, lines: usize, target_ms: i64, make_assets: impl FnOnce(&Path)) -> Project {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("台本 性能");
@@ -158,7 +164,7 @@ fn project(body: &str, lines: usize, target_ms: i64, make_assets: impl FnOnce(&P
         )
         .unwrap();
         d = build();
-        if (d - target_ms).abs() <= 34 {
+        if frames_close(d, target_ms) {
             break;
         }
         pause += target_ms - d;
@@ -168,7 +174,7 @@ fn project(body: &str, lines: usize, target_ms: i64, make_assets: impl FnOnce(&P
         t.elapsed().as_secs_f64()
     );
     assert!(
-        (d - target_ms).abs() <= 34,
+        frames_close(d, target_ms),
         "台本の長さ {d} ms が目標 {target_ms} ms と 1 コマ以上ずれています"
     );
     Project {
