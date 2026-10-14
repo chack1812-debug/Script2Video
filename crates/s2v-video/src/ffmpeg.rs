@@ -58,13 +58,10 @@ fn parse_release(s: &str) -> Option<u32> {
     parts[0].parse().ok()
 }
 
-/// `YYYY-MM-DD-git-…` なら年を返す(MM は 01〜12、DD は 01〜31)。
+/// `YYYY-MM-DD-git-…`(`-git-` の後ろに1文字以上、実在する日付)なら年を返す。
 fn parse_git_date(s: &str) -> Option<u32> {
     let b = s.as_bytes();
-    if b.len() < 14 || b[4] != b'-' || b[7] != b'-' || b[10] != b'-' || &s[11..14] != "git" {
-        return None;
-    }
-    if b.len() > 14 && b[14] != b'-' {
+    if b.len() < 16 || b[4] != b'-' || b[7] != b'-' || !s[10..].starts_with("-git-") {
         return None;
     }
     let num = |r: std::ops::Range<usize>| {
@@ -76,7 +73,15 @@ fn parse_git_date(s: &str) -> Option<u32> {
         }
     };
     let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
-    ((1..=12).contains(&m) && (1..=31).contains(&d)).then_some(y)
+    let leap = (y % 4 == 0 && y % 100 != 0) || y % 400 == 0;
+    let days = match m {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return None,
+    };
+    (1..=days).contains(&d).then_some(y)
 }
 
 /// 背景の収め方。
@@ -313,6 +318,27 @@ mod tests {
             check_version("something else"),
             VersionCheck::Unknown(_)
         ));
+        // "-git-" の後ろが無い・実在しない日付は判定できない
+        for v in [
+            "2026-03-26-git",
+            "2026-03-26-git-",
+            "2026-02-31-git-x",
+            "2025-02-29-git-x",
+            "2026-04-31-git-x",
+        ] {
+            assert!(
+                matches!(
+                    check_version(&format!("ffmpeg version {v} Copyright")),
+                    VersionCheck::Unknown(_)
+                ),
+                "{v}"
+            );
+        }
+        // 閏年の 2 月 29 日は受ける
+        assert_eq!(
+            check_version("ffmpeg version 2024-02-29-git-x Copyright"),
+            VersionCheck::Ok
+        );
     }
 
     #[test]
