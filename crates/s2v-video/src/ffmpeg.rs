@@ -21,27 +21,62 @@ pub fn check_version(first_line: &str) -> VersionCheck {
         return unknown();
     };
     let token = rest.split_whitespace().next().unwrap_or("");
-    let bytes = token.as_bytes();
-    // 日付版: 4桁の年 + '-'
-    if bytes.len() > 4 && bytes[..4].iter().all(u8::is_ascii_digit) && bytes[4] == b'-' {
-        let year: u32 = token[..4].parse().unwrap_or(0);
+    let too_old = |need: String| {
+        VersionCheck::TooOld(format!("ffmpeg が古すぎます({token})。{need}が必要です"))
+    };
+    // (c) 日付の git 版 YYYY-MM-DD-git-…
+    if let Some(year) = parse_git_date(token) {
         return if year >= MIN_GIT_YEAR {
             VersionCheck::Ok
         } else {
-            VersionCheck::TooOld(format!(
-                "ffmpeg が古すぎます({token})。{MIN_GIT_YEAR} 年以降のビルドが必要です"
-            ))
+            too_old(format!("{MIN_GIT_YEAR} 年以降のビルド"))
         };
     }
+    // (a) X.Y / X.Y.Z、(b) nX.Y(直後は終わりか '-')
     let num = token.strip_prefix('n').unwrap_or(token);
-    let digits: String = num.chars().take_while(char::is_ascii_digit).collect();
-    match digits.parse::<u32>() {
-        Ok(major) if major >= MIN_MAJOR => VersionCheck::Ok,
-        Ok(_) => VersionCheck::TooOld(format!(
-            "ffmpeg が古すぎます({token})。{MIN_MAJOR} 以上が必要です"
-        )),
-        Err(_) => unknown(),
+    if let Some(major) = parse_release(num) {
+        return if major >= MIN_MAJOR {
+            VersionCheck::Ok
+        } else {
+            too_old(format!("{MIN_MAJOR} 以上の版"))
+        };
     }
+    unknown()
+}
+
+/// `X.Y` または `X.Y.Z`(直後は終わりか '-')なら主版を返す。
+fn parse_release(s: &str) -> Option<u32> {
+    let end = s.find('-').unwrap_or(s.len());
+    let parts: Vec<&str> = s[..end].split('.').collect();
+    if !(2..=3).contains(&parts.len())
+        || parts
+            .iter()
+            .any(|p| p.is_empty() || !p.bytes().all(|b| b.is_ascii_digit()))
+    {
+        return None;
+    }
+    parts[0].parse().ok()
+}
+
+/// `YYYY-MM-DD-git-…` なら年を返す(MM は 01〜12、DD は 01〜31)。
+fn parse_git_date(s: &str) -> Option<u32> {
+    let b = s.as_bytes();
+    if b.len() < 14 || b[4] != b'-' || b[7] != b'-' || b[10] != b'-' || &s[11..14] != "git" {
+        return None;
+    }
+    if b.len() > 14 && b[14] != b'-' {
+        return None;
+    }
+    let num = |r: std::ops::Range<usize>| {
+        let t = &s[r];
+        if t.bytes().all(|c| c.is_ascii_digit()) {
+            t.parse::<u32>().ok()
+        } else {
+            None
+        }
+    };
+    let (y, m, d) = (num(0..4)?, num(5..7)?, num(8..10)?);
+    ((1..=12).contains(&m) && (1..=31).contains(&d)).then_some(y)
 }
 
 /// 背景の収め方。
@@ -430,5 +465,123 @@ mod tests {
             "192k",
         );
         assert_eq!(m.join(" "), "-nostdin -hide_banner -n -i video.mp4 -i D:/台本/full_dialogue.wav -map 0:v -map 1:a -c:v copy -c:a aac -profile:a aac_low -b:a 192k -ar 48000 -ac 2 -movflags +faststart output.tmp.mp4");
+    }
+}
+
+#[cfg(test)]
+mod version_boundary_tests {
+    use super::*;
+
+    fn chk(v: &str) -> VersionCheck {
+        check_version(&format!("ffmpeg version {v} Copyright"))
+    }
+
+    #[test]
+    fn broken_versions_are_unknown() {
+        for v in [
+            "2026-not-a-version",
+            "2026-x",
+            "n7broken",
+            "7",
+            "6.x",
+            "6.1.1.1",
+            "6.1a",
+            "2026-13-01-git-x",
+            "2026-03-32-git-x",
+            "2026-03-26-foo",
+            "2026-03-26",
+            "n",
+            "6..1",
+        ] {
+            assert!(
+                matches!(chk(v), VersionCheck::Unknown(_)),
+                "{v}: {:?}",
+                chk(v)
+            );
+        }
+    }
+
+    #[test]
+    fn valid_boundaries() {
+        assert_eq!(chk("6.0"), VersionCheck::Ok);
+        assert_eq!(chk("n7.1.2-1-gabc"), VersionCheck::Ok);
+        assert_eq!(chk("2023-01-01-git-abc"), VersionCheck::Ok);
+        assert!(matches!(chk("2022-12-31-git-abc"), VersionCheck::TooOld(_)));
+        assert!(matches!(chk("5.1"), VersionCheck::TooOld(_)));
+        assert!(matches!(chk("n4.4.2"), VersionCheck::TooOld(_)));
+    }
+}
+
+#[cfg(test)]
+mod cut_args_golden_tests {
+    use super::*;
+
+    fn st(fit: Fit) -> EncodeSettings {
+        EncodeSettings {
+            width: 1920,
+            height: 1080,
+            fps: 30,
+            crf: 20,
+            preset: "medium".into(),
+            threads: 4,
+            fit,
+            background: [0, 0, 0],
+        }
+    }
+
+    fn expect(input: &[&str], bg: &Background, fit: Fit) -> Vec<String> {
+        let s = st(fit);
+        let mut v: Vec<String> = ["-nostdin", "-hide_banner", "-n"]
+            .iter()
+            .map(|x| x.to_string())
+            .collect();
+        v.extend(input.iter().map(|x| x.to_string()));
+        v.extend(
+            [
+                "-f",
+                "concat",
+                "-safe",
+                "0",
+                "-i",
+                "ovl.txt",
+                "-filter_complex",
+            ]
+            .iter()
+            .map(|x| x.to_string()),
+        );
+        v.push(cut_filter(bg, 60, &s));
+        v.extend(
+            "-map [v] -an -frames:v 60 -fps_mode cfr -threads 4 -c:v libx264 -preset medium -crf 20 -profile:v high -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -video_track_timescale 30000 cut.mp4"
+                .split(' ')
+                .map(|x| x.to_string()),
+        );
+        v
+    }
+
+    fn vid(looped: bool) -> Background {
+        Background::Video {
+            path: "v.mp4".into(),
+            looped,
+            matrix: "bt601".into(),
+            range: "pc".into(),
+        }
+    }
+
+    #[test]
+    fn full_vectors() {
+        let cases: Vec<(Background, Fit, Vec<&str>, &str)> = vec![
+            (vid(true), Fit::Contain, vec!["-stream_loop", "-1", "-i", "v.mp4"], "scale=1920:1080:force_original_aspect_ratio=decrease:in_color_matrix=bt601:in_range=pc:out_color_matrix=bt709:out_range=tv,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x000000,setsar=1,format=yuv420p,trim=end_frame=60"),
+            (vid(false), Fit::Cover, vec!["-i", "v.mp4"], "scale=1920:1080:force_original_aspect_ratio=increase:in_color_matrix=bt601:in_range=pc:out_color_matrix=bt709:out_range=tv,crop=1920:1080,setsar=1,format=yuv420p,tpad=stop_mode=clone:stop=-1,trim=end_frame=60"),
+            (Background::Png { path: "a.png".into() }, Fit::Contain, vec!["-loop", "1", "-framerate", "30", "-i", "a.png"], "scale=1920:1080:force_original_aspect_ratio=decrease:out_color_matrix=bt709:out_range=tv,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x000000,setsar=1,format=yuv420p,trim=end_frame=60"),
+            (Background::Jpeg { path: "a.jpg".into() }, Fit::Cover, vec!["-loop", "1", "-framerate", "30", "-i", "a.jpg"], "scale=1920:1080:force_original_aspect_ratio=increase:in_color_matrix=bt601:in_range=pc:out_color_matrix=bt709:out_range=tv,crop=1920:1080,setsar=1,format=yuv420p,trim=end_frame=60"),
+        ];
+        for (bg, fit, input, scale_part) in cases {
+            let got = cut_args(&bg, "ovl.txt", 60, "cut.mp4", &st(fit));
+            assert_eq!(got, expect(&input, &bg, fit));
+            // フィルタ全体も固定(収め方の部分は独立に書いた文字列で確認)
+            let f = &got[got.iter().position(|x| x == "-filter_complex").unwrap() + 1];
+            let want = format!("[0:v]setpts=PTS-STARTPTS,fps=30,{scale_part},setpts=PTS-STARTPTS[bg];[1:v]setpts=PTS-STARTPTS,format=rgba,scale=out_color_matrix=bt709:out_range=tv,format=yuva420p[o];[bg][o]overlay=x=0:y=0:format=yuv420:alpha=straight:eof_action=repeat:repeatlast=1:shortest=0,format=yuv420p[v]");
+            assert_eq!(f, &want);
+        }
     }
 }
