@@ -1,8 +1,11 @@
 //! ①a の完了条件(設計書 §12 項目8)の確認。`dump_prefade = true` で build した出力を調べる。
+//! 引数は台本フォルダ(`timeline/timeline.json` と `work/` がある場所)。
 //! `work/lines_prefade/` の正規化後・フェード前の音声を、`cache.json` に記録した測定範囲で再測定する
 //! (測定範囲は再検出しない)。何も書き換えない。
 
 use std::path::Path;
+
+use anyhow::Context;
 
 use s2v_audio::loudness::{measure_mono, Loudness};
 
@@ -27,11 +30,19 @@ pub struct LineCheck {
 }
 
 pub fn verify_loudness(out_dir: &Path) -> anyhow::Result<Vec<LineCheck>> {
+    let tl_path = out_dir.join("timeline").join("timeline.json");
     let timeline: serde_json::Value =
-        serde_json::from_str(&std::fs::read_to_string(out_dir.join("timeline.json"))?)?;
+        serde_json::from_str(&std::fs::read_to_string(&tl_path).with_context(|| {
+            format!(
+                "{} を読めません(台本フォルダを指定してください)",
+                tl_path.display()
+            )
+        })?)?;
     let target = timeline["normalize"]["target_lufs"]
         .as_f64()
-        .ok_or_else(|| anyhow::anyhow!("timeline.json に normalize.target_lufs がありません"))?;
+        .ok_or_else(|| {
+            anyhow::anyhow!("timeline/timeline.json に normalize.target_lufs がありません")
+        })?;
     let work = out_dir.join("work");
     let entries = load_cache(&work)?;
 
@@ -127,7 +138,7 @@ pub fn run_cli(args: &[String]) -> (u8, String) {
     let Some(dir) = args.first() else {
         return (
             2,
-            "使い方: verify_loudness <出力フォルダ>
+            "使い方: verify_loudness <台本フォルダ>
 "
             .to_string(),
         );
@@ -162,5 +173,25 @@ pub fn run_cli(args: &[String]) -> (u8, String) {
 "
             ),
         ),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn usage_names_the_script_folder() {
+        let (code, text) = run_cli(&[]);
+        assert_eq!(code, 2);
+        assert!(text.contains("台本フォルダ"), "{text}");
+    }
+
+    #[test]
+    fn reads_timeline_under_timeline_folder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let (code, text) = run_cli(&[tmp.path().to_string_lossy().into_owned()]);
+        assert_eq!(code, 2);
+        assert!(text.contains("timeline"), "{text}");
     }
 }

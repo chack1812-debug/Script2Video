@@ -28,7 +28,8 @@ use crate::Outcome;
 
 pub struct BuildArgs {
     pub script: PathBuf,
-    pub voice_dir: PathBuf,
+    /// 収録フォルダ。省略時は `<台本フォルダ>/voices`。
+    pub voice_dir: Option<PathBuf>,
     pub config: Option<PathBuf>,
     pub no_cache: bool,
 }
@@ -59,7 +60,74 @@ fn file_name(p: &Path) -> String {
         .unwrap_or_default()
 }
 
+/// 台本のあるフォルダ(出力先)。
+fn script_dir(script: &Path) -> PathBuf {
+    match script.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
+/// `.` と `..` を字面で畳む(存在しないパスの比較用)。
+fn lexical_normalize(p: &Path) -> PathBuf {
+    use std::path::Component;
+    let mut out = PathBuf::new();
+    for c in p.components() {
+        match c {
+            Component::CurDir => {}
+            Component::ParentDir => {
+                if !out.pop() {
+                    out.push("..");
+                }
+            }
+            other => out.push(other.as_os_str()),
+        }
+    }
+    out
+}
+
+fn same_dir(a: &Path, b: &Path) -> bool {
+    match (std::fs::canonicalize(a), std::fs::canonicalize(b)) {
+        (Ok(x), Ok(y)) => x == y,
+        _ => lexical_normalize(a) == lexical_normalize(b),
+    }
+}
+
+/// 出力の配置と食い違わないか(何かを書く前に確かめる)。
+fn check_layout(script: &Path, voice_dir: &Path, root: &Path) -> anyhow::Result<()> {
+    let name = file_name(script);
+    if RESERVED_NAMES.contains(&name.as_str()) {
+        anyhow::bail!(
+            "台本のファイル名 {name} は出力ファイルと同じ名前です。台本の名前を変えてください"
+        );
+    }
+    for sub in OUTPUT_DIRS {
+        if same_dir(voice_dir, &root.join(sub)) {
+            anyhow::bail!(
+                "収録フォルダ {} が出力用の {sub}/ と同じ場所です。収録フォルダを別にしてください",
+                voice_dir.display()
+            );
+        }
+    }
+    Ok(())
+}
+
+/// 台本のファイル名にできない、出力側の名前。
+const RESERVED_NAMES: [&str; 3] = ["full_dialogue.wav", "Process.log", "output.mp4"];
+/// 収録フォルダにできない、出力側のフォルダ名。
+const OUTPUT_DIRS: [&str; 3] = ["work", "tracks", "timeline"];
+
 fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
+    let out_dir = script_dir(&args.script);
+    let voice_dir = args
+        .voice_dir
+        .clone()
+        .unwrap_or_else(|| out_dir.join("voices"));
+    if let Err(e) = check_layout(&args.script, &voice_dir, &out_dir) {
+        eprintln!("[ERROR] {e:#}");
+        eprintln!("[ERROR] 出力していません");
+        return Ok(Outcome::Failed);
+    }
     // 1. 設定
     let config = match &args.config {
         Some(p) => Config::from_file(p)
@@ -100,9 +168,6 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "script".to_string());
-    let out_dir = args.script.parent().unwrap_or(Path::new(".")).join(&stem);
-    std::fs::create_dir_all(&out_dir)
-        .with_context(|| format!("出力フォルダを作れません: {}", out_dir.display()))?;
     let mut log = ProcLog::create(&out_dir.join("Process.log"))?;
     let script_warnings: Vec<String> = parser
         .warnings()
@@ -111,15 +176,22 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
         .map(|w| format!("{} 行目: {}", w.line_no, w.message))
         .collect();
     // ここから先の失敗は Process.log に記録する
+    let job = Job {
+        scenes: &scenes,
+        script_warnings: &script_warnings,
+        stem: &stem,
+    };
     Ok(run_after_commit(
-        args,
-        &config,
-        &scenes,
-        &script_warnings,
-        &stem,
-        &out_dir,
-        &mut log,
+        args, &config, &job, &out_dir, &voice_dir, &mut log,
     ))
+}
+
+/// 検証済みの台本まわりの入力。
+struct Job<'a> {
+    scenes: &'a [Scene],
+    script_warnings: &'a [String],
+    /// 台本のファイル名(拡張子なし。FCPXML のプロジェクト名)
+    stem: &'a str,
 }
 
 /// コミットポイント以降を実行する。失敗(Process.log に書けない場合を含む)は
@@ -127,14 +199,13 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
 fn run_after_commit(
     args: &BuildArgs,
     config: &Config,
-    scenes: &[Scene],
-    script_warnings: &[String],
-    stem: &str,
+    job: &Job<'_>,
     out_dir: &Path,
+    voice_dir: &Path,
     log: &mut ProcLog,
 ) -> Outcome {
-    let result = produce(args, config, scenes, script_warnings, stem, out_dir, log)
-        .and_then(|o| log.check().map(|()| o));
+    let result =
+        produce(args, config, job, out_dir, voice_dir, log).and_then(|o| log.check().map(|()| o));
     match result {
         Ok(o) => o,
         Err(e) => {
@@ -155,9 +226,9 @@ fn remove_final_artifacts(out_dir: &Path) -> std::io::Result<()> {
         "tracks/dialogue.wav",
         "tracks/bgm.wav",
         "tracks/se.wav",
-        "timeline.json",
-        "subtitles.srt",
-        "timeline.fcpxml",
+        "timeline/timeline.json",
+        "timeline/subtitles.srt",
+        "timeline/timeline.fcpxml",
     ];
     let mut first_err = None;
     for rel in finals {
@@ -173,19 +244,21 @@ fn remove_final_artifacts(out_dir: &Path) -> std::io::Result<()> {
             }
         }
     }
-    // 空になったときだけ tracks/ を消す(他のファイルがあれば、それごと残す)
-    let tracks = out_dir.join("tracks");
-    match std::fs::remove_dir(&tracks) {
-        Ok(()) => {}
-        Err(e)
-            if e.kind() == std::io::ErrorKind::NotFound
-                || e.kind() == std::io::ErrorKind::DirectoryNotEmpty
-                || matches!(e.raw_os_error(), Some(145 | 39 | 66)) => {}
-        Err(e) => {
-            first_err.get_or_insert(std::io::Error::new(
-                e.kind(),
-                format!("{}: {e}", tracks.display()),
-            ));
+    // 空になったときだけ tracks/ と timeline/ を消す(他のファイルがあれば、それごと残す)
+    for sub in ["tracks", "timeline"] {
+        let dir = out_dir.join(sub);
+        match std::fs::remove_dir(&dir) {
+            Ok(()) => {}
+            Err(e)
+                if e.kind() == std::io::ErrorKind::NotFound
+                    || e.kind() == std::io::ErrorKind::DirectoryNotEmpty
+                    || matches!(e.raw_os_error(), Some(145 | 39 | 66)) => {}
+            Err(e) => {
+                first_err.get_or_insert(std::io::Error::new(
+                    e.kind(),
+                    format!("{}: {e}", dir.display()),
+                ));
+            }
         }
     }
     first_err.map_or(Ok(()), Err)
@@ -195,12 +268,16 @@ fn remove_final_artifacts(out_dir: &Path) -> std::io::Result<()> {
 fn produce(
     args: &BuildArgs,
     config: &Config,
-    scenes: &[Scene],
-    script_warnings: &[String],
-    stem: &str,
+    job: &Job<'_>,
     out_dir: &Path,
+    voice_dir: &Path,
     log: &mut ProcLog,
 ) -> anyhow::Result<Outcome> {
+    let Job {
+        scenes,
+        script_warnings,
+        stem,
+    } = *job;
     // コミットポイント: 前回の成果物が古いまま残らないよう、新しく作る前に消す
     remove_final_artifacts(out_dir)
         .with_context(|| format!("前回の出力を消せません: {}", out_dir.display()))?;
@@ -222,8 +299,17 @@ fn produce(
             _ => None,
         })
         .collect();
-    let voices = match_voice_files(&args.voice_dir, &ids, config.voice.allow_flac)
-        .with_context(|| format!("収録フォルダを読めません: {}", args.voice_dir.display()))?;
+    if !voice_dir.exists() {
+        if args.voice_dir.is_none() {
+            anyhow::bail!(
+                "収録フォルダがありません: {}(台本と同じ場所に voices フォルダを作るか、--voice-dir で指定してください)",
+                voice_dir.display()
+            );
+        }
+        anyhow::bail!("収録フォルダがありません: {}", voice_dir.display());
+    }
+    let voices = match_voice_files(voice_dir, &ids, config.voice.allow_flac)
+        .with_context(|| format!("収録フォルダを読めません: {}", voice_dir.display()))?;
     for w in &voices.warnings {
         log.warn(w);
     }
@@ -376,8 +462,11 @@ fn produce(
             )
         })
         .collect();
+    let timeline_dir = out_dir.join("timeline");
+    std::fs::create_dir_all(&timeline_dir)
+        .with_context(|| format!("timeline/ を作れません: {}", timeline_dir.display()))?;
     write_timeline_json(
-        &out_dir.join("timeline.json"),
+        &timeline_dir.join("timeline.json"),
         &TimelineInput {
             script: file_name(&args.script),
             duration_samples: total,
@@ -388,14 +477,17 @@ fn produce(
             line_audio: &line_audio,
         },
     )?;
-    std::fs::write(out_dir.join("subtitles.srt"), render_srt(&placement.lines))?;
+    std::fs::write(
+        timeline_dir.join("subtitles.srt"),
+        render_srt(&placement.lines),
+    )?;
     let track_paths = [
         ("dialogue", tracks_dir.join("dialogue.wav")),
         ("bgm", tracks_dir.join("bgm.wav")),
         ("se", tracks_dir.join("se.wav")),
     ];
     std::fs::write(
-        out_dir.join("timeline.fcpxml"),
+        timeline_dir.join("timeline.fcpxml"),
         render_fcpxml(stem, total, &track_paths, config.export.fcpxml_2997fps),
     )?;
     work.finish()?;
@@ -594,7 +686,7 @@ A:田中
         let scenes = parser.parse_str(text).unwrap();
         let args = BuildArgs {
             script,
-            voice_dir: voices,
+            voice_dir: Some(voices.clone()),
             config: None,
             no_cache: false,
         };
@@ -602,19 +694,23 @@ A:田中
         let o = run_after_commit(
             &args,
             &Config::builtin(),
-            &scenes,
-            &[],
-            "ep",
+            &Job {
+                scenes: &scenes,
+                script_warnings: &[],
+                stem: "ep",
+            },
             &out,
+            &voices,
             &mut log,
         );
         assert_eq!(o, Outcome::Failed);
         assert!(!out.join("tracks").exists(), "tracks/");
+        assert!(!out.join("timeline").exists(), "timeline/");
         for n in [
             "full_dialogue.wav",
-            "timeline.json",
-            "subtitles.srt",
-            "timeline.fcpxml",
+            "timeline/timeline.json",
+            "timeline/subtitles.srt",
+            "timeline/timeline.fcpxml",
             "tracks/dialogue.wav",
             "tracks/bgm.wav",
             "tracks/se.wav",
@@ -624,18 +720,37 @@ A:田中
     }
 
     #[test]
-    fn foreign_file_in_tracks_survives_cleanup() {
+    fn foreign_files_in_tracks_and_timeline_survive_cleanup() {
         let tmp = tempfile::tempdir().unwrap();
         let out = tmp.path();
         std::fs::create_dir_all(out.join("tracks")).unwrap();
+        std::fs::create_dir_all(out.join("timeline")).unwrap();
         for n in ["dialogue", "bgm", "se"] {
             std::fs::write(out.join("tracks").join(format!("{n}.wav")), b"x").unwrap();
         }
+        for n in ["timeline.json", "subtitles.srt", "timeline.fcpxml"] {
+            std::fs::write(out.join("timeline").join(n), b"x").unwrap();
+        }
         std::fs::write(out.join("tracks").join("keep.txt"), b"keep").unwrap();
+        std::fs::write(out.join("timeline").join("keep.txt"), b"keep").unwrap();
+        // 触れてはいけないもの
+        std::fs::write(out.join("output.mp4"), b"mp4").unwrap();
+        std::fs::write(out.join("Process.log"), b"log").unwrap();
+        std::fs::create_dir_all(out.join("voices")).unwrap();
+        std::fs::write(out.join("voices").join("a.wav"), b"v").unwrap();
+        std::fs::create_dir_all(out.join("work")).unwrap();
         remove_final_artifacts(out).unwrap();
         assert!(out.join("tracks").join("keep.txt").exists());
+        assert!(out.join("timeline").join("keep.txt").exists());
         for n in ["dialogue", "bgm", "se"] {
             assert!(!out.join("tracks").join(format!("{n}.wav")).exists());
         }
+        for n in ["timeline.json", "subtitles.srt", "timeline.fcpxml"] {
+            assert!(!out.join("timeline").join(n).exists());
+        }
+        assert_eq!(std::fs::read(out.join("output.mp4")).unwrap(), b"mp4");
+        assert!(out.join("Process.log").exists());
+        assert!(out.join("voices").join("a.wav").exists());
+        assert!(out.join("work").exists());
     }
 }
