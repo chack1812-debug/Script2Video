@@ -37,6 +37,11 @@ def main():
     build(src, ["vert", "vrt2", "kern", "palt"], "test-vrt2.ttf")
     build(src, ["vert"], "test-vert.ttf")
     build(src, [], "test-novert.ttf")
+    # 縦書きの寸法テーブルが片方だけ無いフォント(test-vrt2.ttf から作る)
+    for table, name in (("vhea", "test-novhea.ttf"), ("vmtx", "test-novmtx.ttf")):
+        font = TTFont(OUT / "test-vrt2.ttf")
+        del font[table]
+        font.save(OUT / name)
 
 if __name__ == "__main__":
     main()

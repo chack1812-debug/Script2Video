@@ -232,6 +232,22 @@ mod tests {
     }
 
     #[test]
+    fn font_without_vhea_is_rejected() {
+        assert_eq!(
+            FontFace::load(&font_path("test-novhea.ttf"), 0).err(),
+            Some(FontError::NoVerticalMetrics)
+        );
+    }
+
+    #[test]
+    fn font_without_vmtx_is_rejected() {
+        assert_eq!(
+            FontFace::load(&font_path("test-novmtx.ttf"), 0).err(),
+            Some(FontError::NoVerticalMetrics)
+        );
+    }
+
+    #[test]
     fn bad_index_and_missing_file() {
         let e = FontFace::load(&font_path("test-vrt2.ttf"), 3)
             .err()

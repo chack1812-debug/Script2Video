@@ -17,3 +17,5 @@ python -I scripts/make_test_fonts.py "C:\Windows\Fonts\NotoSansJP-VF.ttf"
 | `test-vrt2.ttf` | `vert`、`vrt2` | あり |
 | `test-vert.ttf` | `vert` のみ | あり |
 | `test-novert.ttf` | なし(縦書きの機能が無いので拒否される) | あり |
+| `test-novhea.ttf` | `vert`、`vrt2`(`test-vrt2.ttf` から `vhea` だけを消した) | vmtx のみ(拒否される) |
+| `test-novmtx.ttf` | `vert`、`vrt2`(`test-vrt2.ttf` から `vmtx` だけを消した) | vhea のみ(拒否される) |
