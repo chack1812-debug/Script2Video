@@ -1072,6 +1072,80 @@ mod tests {
     }
 
     #[test]
+    fn write_overlays_passes_the_clipped_set_to_drawing() {
+        let face = FontFace::load(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../s2v-render/tests/fonts/test-vrt2.ttf"),
+            0,
+        )
+        .unwrap();
+        let cfg = RenderConfig {
+            width: 320,
+            height: 180,
+            note_padding: 20,
+            ..RenderConfig::default()
+        };
+        let items = vec![Item {
+            id: "S01-N01".into(),
+            kind: ItemKind::Note,
+            text: "一二三四五".into(),
+            start_ms: 0,
+            end_ms: 1000,
+            order: 0,
+        }];
+        // 文字が収まらない小さな枠
+        let placed: BTreeMap<String, Placed> = [(
+            "S01-N01".to_string(),
+            Placed {
+                kind: ItemKind::Note,
+                x: 100,
+                y: 50,
+                w: 60,
+                h: 60,
+                tail: None,
+                start_offset_ms: 0,
+                end_offset_ms: 0,
+            },
+        )]
+        .into();
+        let files: BTreeMap<Vec<String>, String> =
+            [(vec!["S01-N01".to_string()], "ov_0001.png".to_string())].into();
+
+        // 切り詰めた印が無い項目は、収まらなければ失敗
+        let d = tempfile::tempdir().unwrap();
+        let e = write_overlays(
+            d.path(),
+            &files,
+            &items,
+            &placed,
+            &BTreeSet::new(),
+            &cfg,
+            &face,
+        )
+        .unwrap_err();
+        assert!(e.contains("S01-N01") && e.contains("収まりません"), "{e}");
+        assert!(!d.path().join("ov_0001.png").exists());
+
+        // 印がある項目は PNG が書かれ、枠(100..160, 50..110)の外は透明のまま
+        let clipped: BTreeSet<String> = ["S01-N01".to_string()].into();
+        write_overlays(d.path(), &files, &items, &placed, &clipped, &cfg, &face).unwrap();
+        let pm = tiny_skia::Pixmap::load_png(d.path().join("ov_0001.png")).unwrap();
+        assert_eq!((pm.width(), pm.height()), (320, 180));
+        let mut inside = 0;
+        for y in 0..180u32 {
+            for x in 0..320u32 {
+                let a = pm.pixel(x, y).unwrap().alpha();
+                if (100..160).contains(&x) && (50..110).contains(&y) {
+                    inside += u32::from(a > 0);
+                } else {
+                    assert_eq!(a, 0, "枠の外に描かれています: ({x}, {y})");
+                }
+            }
+        }
+        assert!(inside > 0);
+    }
+
+    #[test]
     fn place_items_marks_only_items_shrunk_to_the_screen() {
         let face = FontFace::load(
             &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
