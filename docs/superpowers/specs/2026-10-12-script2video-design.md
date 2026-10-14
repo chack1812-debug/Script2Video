@@ -21,6 +21,8 @@ Script2Voice-Rust版から音声合成を外し、**収録した肉声**を起�
 
 サブプロジェクト間の契約は、①が出力する `timeline.json`(§6)、③が出力する `bubbles.json`、②/④が使う素材フォルダである。
 
+**②③④の設計は [映像工程の設計書(2026-10-14)](2026-10-14-script2video-video-design.md) で確定した。** 本書の §4 のうち映像関係のクレート、§6 の `timeline.json`(v3 への拡張)、§7〜§9 は、その設計書が優先する。
+
 ## 3. 前提と決定事項
 
 - 実装言語は **Rust**。Script2Voice-Rust版(`D:\UDS\宇摩コードワークス\Script2Voice-Rust版`)のクレートをコピーして改造する。リポジトリは `D:\UDS\宇摩コードワークス\Script2Video`、Script2Voice は現状維持とする。
@@ -37,9 +39,10 @@ Cargo ワークスペース。
 | `s2v-core` | Rust版を改造 | 台本パーサ、採番、タイムライン、型。エンジン関連を除去 |
 | `s2v-audio` | Rust版を流用 | リサンプル、定位、残響。無音削除、入力の変換、ラウドネス正規化を追加(ピーク正規化と台詞ごとのリミッタは廃止) |
 | `s2v-export` | Rust版を流用 | SRT、FCPXML、`timeline.json`、台本HTML |
-| `s2v-video` | Rust版を流用 | ffmpeg による合成(④) |
+| `s2v-render` | 新規 | 縦書きの組版と吹き出し・ト書きの描画(③④共用)。映像工程の設計書 §6 |
+| `s2v-video` | 新規(Rust版を参考) | ffmpeg による合成(④) |
 | `s2v-bubbles` | 新規 | ブラウザGUI用のローカルサーバ(③) |
-| `s2v-cli` | Rust版 `src/main.rs` を改造 | コマンド `number` / `build` / `bubbles` / `compose` |
+| `s2v-cli` | Rust版 `src/main.rs` を改造 | コマンド `number` / `build` / `prompts` / `bubbles` / `render` |
 
 流用元の移植は、元のコミットを記録した上でコピーし、元のテストも一緒に移す。以後は独立して進化させる。
 
@@ -264,6 +267,8 @@ Cargo ワークスペース。
 
 置き場所は `台本フォルダ/timeline/timeline.json`(§5.2 の出力の配置)。
 
+> 以下は v2。v3(カット `scenes[].cuts[]`、ト書き `scenes[].notes[]`、シーンの映像区間、`script_sha256`・`audio_sha256`。`scenes[].visual` は `cuts[].visual` へ移動)は[映像工程の設計書](2026-10-14-script2video-video-design.md) §3.5 による。
+
 ```jsonc
 {
   "schema_version": 2,
@@ -333,6 +338,8 @@ Cargo ワークスペース。
 - **シーンの時間**: `scenes[].start_ms` はシーンに属する全台詞の開始時刻の最小値(配置の完了後に確定。§5.5)、`end_ms` は最も遅い台詞の終了とする(無言のシーンは `silent: true` で、`start_ms` と `end_ms` は§5.5 のとおり)。複数のシーンにまたがるテイクでは、隣り合うシーンの範囲が重なり得る。シーンの開始時刻は台本の並びで単調非減少(後退すれば①がエラーにする。§5.5)。同じ時刻に始まるシーンが並ぶときは、台本の並びで後ろのシーンを採用する。④は、素材の切り替えを次のシーンの `start_ms` で行う。前のシーンの台詞が次のシーンの開始後も続く場合、その吹き出しをどの素材に重ねるかは④で決める(①の契約は、台詞が属する `scene` を示すだけ)。
 - 後方互換: `schema_version` を上げるときは、後続工程が拒否できるようにする。後続工程は未知のバージョンを拒否する。
 - この契約の変更は、後続のサブプロジェクトに影響するため High Risk として扱う。
+
+> **§7〜§9 は[映像工程の設計書(2026-10-14)](2026-10-14-script2video-video-design.md)で置き換えた。** 以下は当初の契約の記録として残す(素材の置き場所は `assets/` ではなく `tracks/`、コマンドは `compose` ではなく `render`、字幕・立ち絵は使わない)。
 
 ## 7. ②指示書生成(契約のみ)
 
