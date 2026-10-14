@@ -138,6 +138,11 @@ pub(crate) fn check(t: &Timeline) -> Vec<String> {
         if tk.tracks.is_empty() || distinct.len() != tk.tracks.len() {
             e.push(format!("{}: tracks が空か重複しています", tk.id));
         }
+        for (i, tr) in tk.trims.iter().flatten().enumerate() {
+            if tr.head_ms < 0 || tr.tail_ms < 0 {
+                e.push(format!("{}: trims[{i}] の長さが負です", tk.id));
+            }
+        }
         if !tk.missing {
             if tk.reason.is_some() {
                 e.push(format!("{}: 正常なテイクに reason があります", tk.id));
@@ -272,6 +277,21 @@ pub(crate) fn check(t: &Timeline) -> Vec<String> {
     }
     if !t.normalize.target_lufs.is_finite() {
         e.push("normalize.target_lufs が有限ではありません".to_string());
+    }
+    if t.sample_rate != 48_000 {
+        e.push(format!(
+            "sample_rate は 48000 のはずです({})",
+            t.sample_rate
+        ));
+    }
+    for (name, v) in [
+        ("script_sha256", &t.script_sha256),
+        ("audio_sha256", &t.audio_sha256),
+    ] {
+        let ok = v.len() == 64 && v.bytes().all(|b| matches!(b, b'0'..=b'9' | b'a'..=b'f'));
+        if !ok {
+            e.push(format!("{name} は 64 文字の小文字の16進のはずです"));
+        }
     }
     if t.schema_version != crate::SCHEMA_VERSION {
         e.push(format!("schema_version が {} です", t.schema_version));
@@ -594,6 +614,29 @@ mod tests {
             t.lines[0].track = Some("A".into());
         })
         .is_empty());
+    }
+
+    #[test]
+    fn sample_rate_must_be_48000() {
+        assert!(!broken(|t| t.sample_rate = 44_100).is_empty());
+        assert!(!broken(|t| t.sample_rate = 0).is_empty());
+    }
+
+    #[test]
+    fn sha256_must_be_64_lowercase_hex() {
+        assert!(broken(|t| t.script_sha256 = "0123456789abcdef".repeat(4)).is_empty());
+        assert!(!broken(|t| t.script_sha256 = String::new()).is_empty());
+        assert!(!broken(|t| t.script_sha256 = "A".repeat(64)).is_empty());
+        assert!(!broken(|t| t.script_sha256 = "g".repeat(64)).is_empty());
+        assert!(!broken(|t| t.script_sha256 = "a".repeat(63)).is_empty());
+        assert!(!broken(|t| t.audio_sha256 = "b".repeat(65)).is_empty());
+        assert!(!broken(|t| t.audio_sha256 = "B".repeat(64)).is_empty());
+    }
+
+    #[test]
+    fn trims_must_be_non_negative() {
+        assert!(!broken(|t| t.takes[0].trims.as_mut().unwrap()[0].head_ms = -1).is_empty());
+        assert!(!broken(|t| t.takes[0].trims.as_mut().unwrap()[0].tail_ms = -1).is_empty());
     }
 
     #[test]
