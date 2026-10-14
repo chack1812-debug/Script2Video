@@ -47,3 +47,39 @@ dump_prefade = false
 
 [mix]
 master_ceiling_db = -1.0
+
+[render]
+width = 1920                 # 出力の幅(16〜7680 の偶数)
+height = 1080                # 出力の高さ(16〜4320 の偶数)
+fps = 30                     # フレームレート
+crf = 20                     # x264 の品質(小さいほど高画質)
+preset = "medium"            # x264 のプリセット
+audio_bitrate = "192k"       # AAC のビットレート
+fit = "contain"              # 素材の収め方(contain / cover)
+background = "#000000"       # 背景色
+# default_image = ""         # 画像が無い区間の既定画像
+# ffmpeg = ""                # ffmpeg の場所(省略時は PATH)
+# ffprobe = ""               # ffprobe の場所(省略時は PATH)
+jobs = 1                     # 並列数
+font_path = 'C:\Windows\Fonts\YuGothM.ttc'  # 縦書きに使うフォント
+font_index = 0               # フォントコレクションの番号
+font_size = 44.0             # 文字の大きさ(px)
+line_spacing = 0.4           # 行間(文字サイズの比)
+bubble_fill = "#FFFFFF"      # 吹き出しの塗り
+bubble_stroke = "#000000"    # 吹き出しの枠線の色
+bubble_stroke_width = 4.0    # 吹き出しの枠線の太さ
+bubble_padding = 28          # 吹き出しの内側の余白
+note_fill = "#FFFBE6"        # ト書きの塗り
+note_stroke = "#000000"      # ト書きの枠線の色
+note_stroke_width = 3.0      # ト書きの枠線の太さ
+note_padding = 20            # ト書きの内側の余白
+text_color = "#000000"       # 文字色
+margin = 40                  # 画面の端からの余白
+bubble_gap = 24              # 吹き出し同士の間隔
+tail_length = 80             # 吹き出しの尻尾の長さ
+bubble_max_height_ratio = 0.55  # 吹き出しの高さの上限(画面の高さの比)
+note_max_height_ratio = 0.6     # ト書きの高さの上限(画面の高さの比)
+
+[prompts]
+style = ""                   # 画像生成プロンプトの画風
+suffix = "縦横比 16:9。画像の中に文字・吹き出しを入れない。"
