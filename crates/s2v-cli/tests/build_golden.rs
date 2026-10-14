@@ -1103,6 +1103,9 @@ fn stale_rename_failure_keeps_previous_outputs() {
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
     assert_all_final_artifacts(&f.dir);
     assert_eq!(fs::read(f.dir.join("output.mp4")).unwrap(), b"mp4");
+    // 失敗の原因が改名であること
+    let log = fs::read_to_string(f.dir.join("Process.log")).unwrap();
+    assert!(log.contains("output.stale.mp4 に改名できません"), "{log}");
 }
 
 #[test]
@@ -1164,5 +1167,18 @@ fn cuts_and_notes_reach_timeline_v3() {
 #[test]
 fn unnumbered_cut_fails_build() {
     let f = fixture(&SCRIPT.replace("#visual (image) 朝の居間。\n", "#cut\n"));
-    assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
+    // 出力を始める前の失敗なので、前回の output.mp4 には触れない
+    fs::write(f.dir.join("output.mp4"), b"keep").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_script2video"))
+        .arg("build")
+        .arg(&f.script)
+        .arg("--voice-dir")
+        .arg(&f.voices)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("カットの番号がありません"), "{stderr}");
+    assert_eq!(fs::read(f.dir.join("output.mp4")).unwrap(), b"keep");
+    assert!(!f.dir.join("output.stale.mp4").exists());
 }
