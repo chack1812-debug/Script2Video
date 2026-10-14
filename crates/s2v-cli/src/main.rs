@@ -21,9 +21,9 @@ enum Command {
     /// 収録音声から音声・字幕・タイムラインを作る
     Build {
         script: PathBuf,
-        /// 収録ファイルのフォルダ
+        /// 収録ファイルのフォルダ(省略時は台本と同じフォルダの voices)
         #[arg(long)]
-        voice_dir: PathBuf,
+        voice_dir: Option<PathBuf>,
         /// 設定ファイル(省略時は同梱の既定設定)
         #[arg(long)]
         config: Option<PathBuf>,

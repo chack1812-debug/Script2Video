@@ -1,6 +1,7 @@
 //! Script2Video のコマンド実装。`main.rs` は引数の解析だけを行い、ここを呼ぶ。
 
 pub mod build;
+pub mod layout;
 pub mod number;
 pub mod proclog;
 pub mod verify;

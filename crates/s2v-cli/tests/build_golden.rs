@@ -51,7 +51,7 @@ struct Fixture {
 fn fixture(script: &str) -> Fixture {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("台本 テスト");
-    let voices = dir.join("収録 音声");
+    let voices = dir.join("voices");
     fs::create_dir_all(&voices).unwrap();
     let script_path = dir.join("第1話.txt");
     fs::write(&script_path, script).unwrap();
@@ -66,7 +66,7 @@ fn fixture(script: &str) -> Fixture {
 fn args(f: &Fixture, config: Option<PathBuf>, no_cache: bool) -> BuildArgs {
     BuildArgs {
         script: f.script.clone(),
-        voice_dir: f.voices.clone(),
+        voice_dir: Some(f.voices.clone()),
         config,
         no_cache,
     }
@@ -92,8 +92,8 @@ fn golden_timeline_and_outputs() {
         "L003 が不足"
     );
 
-    let out = f.dir.join("第1話");
-    let v = read_json(&out.join("timeline.json"));
+    let out = f.dir.clone();
+    let v = read_json(&out.join("timeline").join("timeline.json"));
     assert_eq!(v["schema_version"], 2);
     assert_eq!(v["script"], "第1話.txt");
     let ms = |i: usize, k: &str| v["lines"][i][k].as_i64().unwrap();
@@ -142,16 +142,18 @@ fn golden_timeline_and_outputs() {
             frames
         );
     }
-    let srt = fs::read_to_string(out.join("subtitles.srt")).unwrap();
+    let srt = fs::read_to_string(out.join("timeline").join("subtitles.srt")).unwrap();
     assert!(
         srt.starts_with("1\n00:00:00,000 --> 00:00:01,110\nおはよう。\n"),
         "{srt}"
     );
     assert!(srt.contains("00:00:02,320 --> 00:00:03,720\n今日は早いね。"));
     let ticks = (frames * 5 + 7) / 8;
-    assert!(fs::read_to_string(out.join("timeline.fcpxml"))
-        .unwrap()
-        .contains(&format!("duration=\"{ticks}/30000s\"")));
+    assert!(
+        fs::read_to_string(out.join("timeline").join("timeline.fcpxml"))
+            .unwrap()
+            .contains(&format!("duration=\"{ticks}/30000s\""))
+    );
     assert!(fs::read_to_string(out.join("Process.log"))
         .unwrap()
         .contains("S01-L003"));
@@ -163,15 +165,15 @@ fn golden_timeline_and_outputs() {
     );
 
     // キャッシュあり・なしで同じ結果
-    let first = fs::read_to_string(out.join("timeline.json")).unwrap();
+    let first = fs::read_to_string(out.join("timeline").join("timeline.json")).unwrap();
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Warnings);
     assert_eq!(
-        fs::read_to_string(out.join("timeline.json")).unwrap(),
+        fs::read_to_string(out.join("timeline").join("timeline.json")).unwrap(),
         first
     );
     assert_eq!(run_build(&args(&f, None, true)), Outcome::Warnings);
     assert_eq!(
-        fs::read_to_string(out.join("timeline.json")).unwrap(),
+        fs::read_to_string(out.join("timeline").join("timeline.json")).unwrap(),
         first
     );
 
@@ -188,17 +190,19 @@ fn golden_timeline_and_outputs() {
 fn empty_voice_dir_produces_placeholders() {
     let f = fixture(SCRIPT);
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Warnings);
-    let out = f.dir.join("第1話");
-    let v = read_json(&out.join("timeline.json"));
+    let out = f.dir.clone();
+    let v = read_json(&out.join("timeline").join("timeline.json"));
     assert!(v["lines"]
         .as_array()
         .unwrap()
         .iter()
         .all(|l| l["missing"] == true));
     assert!(out.join("full_dialogue.wav").exists());
-    assert!(fs::read_to_string(out.join("subtitles.srt"))
-        .unwrap()
-        .contains("おやすみ。"));
+    assert!(
+        fs::read_to_string(out.join("timeline").join("subtitles.srt"))
+            .unwrap()
+            .contains("おやすみ。")
+    );
 }
 
 #[test]
@@ -210,7 +214,7 @@ fn loud_click_is_limited_only_at_master() {
         &voice_samples(0.01, Some(30_000)),
     );
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Ok);
-    let out = f.dir.join("第1話");
+    let out = f.dir.clone();
     let mut d = hound::WavReader::open(out.join("tracks").join("dialogue.wav")).unwrap();
     let peak_track = d
         .samples::<f32>()
@@ -239,7 +243,7 @@ fn out_of_range_config_fails_without_output() {
     )
     .unwrap();
     assert_eq!(run_build(&args(&f, Some(cfg), false)), Outcome::Failed);
-    assert!(!f.dir.join("第1話").exists());
+    assert_untouched(&f.dir);
 }
 
 #[test]
@@ -247,7 +251,7 @@ fn syntax_error_fails_without_output() {
     let f =
         fixture("@scene 居間\n@cast\nA:田中\n\n@script\n#paragraph[S01]\n[S01-L001] C:だれ？\n");
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
-    assert!(!f.dir.join("第1話").exists());
+    assert_untouched(&f.dir);
 }
 
 const ONE_LINE: &str = "@scene 居間\n@cast\nA:田中\n\n@script\n#paragraph[S01]\n[S01-L001] A:あ\n";
@@ -278,10 +282,10 @@ fn stereo_silent_and_duplicate_recordings_become_missing_without_panic() {
     // 範囲を示す名前は無視される
     write_voice(&f.voices.join("S01_L001-L003.wav"));
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Warnings);
-    let v = read_json(&f.dir.join("第1話").join("timeline.json"));
+    let v = read_json(&f.dir.clone().join("timeline").join("timeline.json"));
     assert_eq!(v["lines"][0]["reason"], "bad_format");
     assert_eq!(v["lines"][1]["reason"], "silent");
-    assert!(fs::read_to_string(f.dir.join("第1話").join("Process.log"))
+    assert!(fs::read_to_string(f.dir.clone().join("Process.log"))
         .unwrap()
         .contains("[WARN]"));
 }
@@ -291,7 +295,7 @@ fn silent_scene_without_speech_lines_does_not_panic() {
     let f = fixture("@scene 居間\n@cast\nA:田中\n\n@script\n#paragraph[S01]\n#pause 1000\n");
     let r = run_build(&args(&f, None, false));
     assert_ne!(r, Outcome::Failed);
-    assert!(f.dir.join("第1話").join("full_dialogue.wav").exists());
+    assert!(f.dir.clone().join("full_dialogue.wav").exists());
 }
 
 #[test]
@@ -313,7 +317,7 @@ fn work_files_of_lines_that_became_missing_are_removed_and_warnings_replay() {
     let a = args(&f, Some(cfg), false);
     let first = run_build(&a);
     assert_eq!(first, Outcome::Warnings);
-    let out = f.dir.join("第1話");
+    let out = f.dir.clone();
     let log1 = fs::read_to_string(out.join("Process.log")).unwrap();
     assert!(log1.contains("制限に掛かりました"), "{log1}");
     assert_eq!(run_build(&a), first, "キャッシュ命中でも同じ終了コード");
@@ -349,11 +353,24 @@ fn work_files_of_lines_that_became_missing_are_removed_and_warnings_replay() {
     );
 }
 
+/// 失敗しても何も作らない(Process.log・work・出力フォルダを含む)。
+fn assert_untouched(dir: &Path) {
+    for n in [
+        "Process.log",
+        "work",
+        "tracks",
+        "timeline",
+        "full_dialogue.wav",
+    ] {
+        assert!(!dir.join(n).exists(), "{n} が作られています");
+    }
+}
+
 const FINAL_FILES: [&str; 7] = [
     "full_dialogue.wav",
-    "timeline.json",
-    "subtitles.srt",
-    "timeline.fcpxml",
+    "timeline/timeline.json",
+    "timeline/subtitles.srt",
+    "timeline/timeline.fcpxml",
     "tracks/dialogue.wav",
     "tracks/bgm.wav",
     "tracks/se.wav",
@@ -379,7 +396,7 @@ const REGRESSION_OK_SCRIPT: &str = "@scene 居間\n@cast\nA:田中\n\nB:佐藤\n
 fn placement_error_after_good_build_removes_stale_artifacts() {
     let f = fixture(REGRESSION_OK_SCRIPT);
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Warnings);
-    let out = f.dir.join("第1話");
+    let out = f.dir.clone();
     assert_all_final_artifacts(&out);
     fs::write(&f.script, REGRESSION_SCRIPT).unwrap();
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
@@ -393,15 +410,12 @@ fn placement_error_after_good_build_removes_stale_artifacts() {
 fn io_failure_after_output_starts_leaves_no_stale_artifacts() {
     let f = fixture(SCRIPT);
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Warnings);
-    let out = f.dir.join("第1話");
+    let out = f.dir.clone();
     // tracks を「ファイル」にして、トラックの書き込みを失敗させる
     fs::remove_dir_all(out.join("tracks")).unwrap();
     fs::write(out.join("tracks"), b"x").unwrap();
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
-    assert!(!out.join("timeline.json").exists());
-    assert!(!out.join("full_dialogue.wav").exists());
-    assert!(!out.join("subtitles.srt").exists());
-    assert!(!out.join("timeline.fcpxml").exists());
+    assert_no_final_artifacts(&out);
     let log = fs::read_to_string(out.join("Process.log")).unwrap();
     assert!(log.contains("[ERROR]"), "{log}");
 }
@@ -411,7 +425,7 @@ fn syntax_error_rerun_leaves_previous_outputs_untouched() {
     let f = fixture(ONE_LINE);
     write_voice(&f.voices.join("S01_L001.wav"));
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Ok);
-    let out = f.dir.join("第1話");
+    let out = f.dir.clone();
     let before: Vec<Vec<u8>> = FINAL_FILES
         .iter()
         .map(|n| fs::read(out.join(n)).unwrap())
@@ -446,14 +460,14 @@ fn syntax_error_rerun_leaves_previous_outputs_untouched() {
 fn missing_voice_dir_is_failed_and_logged() {
     let f = fixture(ONE_LINE);
     let mut a = args(&f, None, false);
-    a.voice_dir = f.dir.join("無い フォルダ");
+    a.voice_dir = Some(f.dir.join("無い フォルダ"));
     assert_eq!(run_build(&a), Outcome::Failed);
-    let log = fs::read_to_string(f.dir.join("第1話").join("Process.log")).unwrap();
+    let log = fs::read_to_string(f.dir.clone().join("Process.log")).unwrap();
     assert!(
         log.contains("[ERROR]") && log.contains("無い フォルダ"),
         "{log}"
     );
-    assert_no_final_artifacts(&f.dir.join("第1話"));
+    assert_no_final_artifacts(&f.dir.clone());
 }
 
 #[test]
@@ -462,9 +476,9 @@ fn voice_dir_that_is_a_file_is_failed_and_logged() {
     let file = f.dir.join("収録.txt");
     fs::write(&file, b"x").unwrap();
     let mut a = args(&f, None, false);
-    a.voice_dir = file;
+    a.voice_dir = Some(file);
     assert_eq!(run_build(&a), Outcome::Failed);
-    let log = fs::read_to_string(f.dir.join("第1話").join("Process.log")).unwrap();
+    let log = fs::read_to_string(f.dir.clone().join("Process.log")).unwrap();
     assert!(log.contains("[ERROR]") && log.contains("収録.txt"), "{log}");
 }
 
@@ -484,8 +498,8 @@ fn duplicate_wav_and_flac_is_missing_duplicate() {
     write_voice(&f.voices.join("S01_L001.wav"));
     fs::write(f.voices.join("S01_L001.flac"), b"not a flac").unwrap();
     assert_eq!(run_build(&args(&f, Some(cfg), false)), Outcome::Warnings);
-    let out = f.dir.join("第1話");
-    let v = read_json(&out.join("timeline.json"));
+    let out = f.dir.clone();
+    let v = read_json(&out.join("timeline").join("timeline.json"));
     assert_eq!(v["lines"][0]["missing"], true);
     assert_eq!(v["lines"][0]["reason"], "duplicate");
     let take = &v["takes"][0];
@@ -521,8 +535,8 @@ fn bom_and_crlf_script_gives_same_timeline_as_lf() {
     fs::write(&crlf.script, converted).unwrap();
     assert_eq!(run_build(&args(&lf, None, false)), Outcome::Warnings);
     assert_eq!(run_build(&args(&crlf, None, false)), Outcome::Warnings);
-    let a = read_json(&lf.dir.join("第1話").join("timeline.json"));
-    let b = read_json(&crlf.dir.join("第1話").join("timeline.json"));
+    let a = read_json(&lf.dir.clone().join("timeline").join("timeline.json"));
+    let b = read_json(&crlf.dir.clone().join("timeline").join("timeline.json"));
     assert_eq!(a["lines"], b["lines"]);
     assert_eq!(a["scenes"], b["scenes"]);
     assert_eq!(a["duration_ms"], b["duration_ms"]);
@@ -544,7 +558,7 @@ fn prefade_build() -> (Fixture, PathBuf) {
     )
     .unwrap();
     assert_eq!(run_build(&args(&f, Some(cfg), false)), Outcome::Warnings);
-    let out = f.dir.join("第1話");
+    let out = f.dir.clone();
     (f, out)
 }
 
@@ -719,4 +733,280 @@ fn verify_cli_exit_codes() {
     let (code, text) = cli(&[out.to_str().unwrap()]);
     assert_eq!(code, 1, "{text}");
     assert!(text.contains("NG "), "{text}");
+}
+
+fn no_voice_args(f: &Fixture) -> BuildArgs {
+    BuildArgs {
+        script: f.script.clone(),
+        voice_dir: None,
+        config: None,
+        no_cache: false,
+    }
+}
+
+#[test]
+fn default_voices_folder_is_used_when_voice_dir_is_omitted() {
+    let f = fixture(ONE_LINE);
+    write_voice(&f.dir.join("voices").join("S01_L001.wav"));
+    assert_eq!(run_build(&no_voice_args(&f)), Outcome::Ok);
+    let v = read_json(&f.dir.join("timeline").join("timeline.json"));
+    assert_eq!(v["lines"][0]["missing"], false);
+}
+
+#[test]
+fn explicit_voice_dir_overrides_default() {
+    let f = fixture(ONE_LINE);
+    let other = f.dir.join("別の 収録");
+    fs::create_dir_all(&other).unwrap();
+    write_voice(&other.join("S01_L001.wav"));
+    // 既定の voices/ は空: 明示した方が使われる
+    let mut a = no_voice_args(&f);
+    a.voice_dir = Some(other);
+    assert_eq!(run_build(&a), Outcome::Ok);
+    // 明示しなければ空の voices/ を見て不足になる
+    assert_eq!(run_build(&no_voice_args(&f)), Outcome::Warnings);
+}
+
+#[test]
+fn missing_default_voices_folder_is_failed_with_clear_message() {
+    let f = fixture(ONE_LINE);
+    fs::remove_dir_all(&f.voices).unwrap();
+    assert_eq!(run_build(&no_voice_args(&f)), Outcome::Failed);
+    let log = fs::read_to_string(f.dir.join("Process.log")).unwrap();
+    assert!(
+        log.contains("voices") && log.contains("--voice-dir") && log.contains("ありません"),
+        "{log}"
+    );
+    assert_no_final_artifacts(&f.dir);
+}
+
+#[test]
+fn failed_rerun_keeps_output_mp4_and_voices() {
+    let f = fixture(REGRESSION_OK_SCRIPT);
+    write_voice(&f.voices.join("S01_L001.wav"));
+    fs::write(f.dir.join("output.mp4"), b"mp4").unwrap();
+    assert_eq!(run_build(&no_voice_args(&f)), Outcome::Warnings);
+    fs::write(&f.script, REGRESSION_SCRIPT).unwrap();
+    assert_eq!(run_build(&no_voice_args(&f)), Outcome::Failed);
+    assert_no_final_artifacts(&f.dir);
+    assert_eq!(fs::read(f.dir.join("output.mp4")).unwrap(), b"mp4");
+    assert!(f.voices.join("S01_L001.wav").exists());
+    assert!(f.dir.join("work").exists());
+}
+
+#[test]
+fn voice_dir_clashing_with_output_folders_is_rejected_before_any_write() {
+    for name in ["work", "tracks", "timeline"] {
+        let f = fixture(ONE_LINE);
+        let clash = f.dir.join(name);
+        fs::create_dir_all(&clash).unwrap();
+        let mut a = no_voice_args(&f);
+        a.voice_dir = Some(clash.clone());
+        assert_eq!(run_build(&a), Outcome::Failed, "{name}");
+        assert!(!f.dir.join("Process.log").exists(), "{name}");
+        assert_eq!(fs::read_dir(&clash).unwrap().count(), 0, "{name}");
+        // 別の書き方(末尾の ./ など)でも同じ場所は拒否する
+        a.voice_dir = Some(f.dir.join("voices").join("..").join(name));
+        assert_eq!(run_build(&a), Outcome::Failed, "{name} (..)");
+        assert!(!f.dir.join("Process.log").exists(), "{name}");
+    }
+}
+
+#[test]
+fn script_named_like_an_artifact_is_rejected_before_any_write() {
+    for name in ["full_dialogue.wav", "Process.log", "output.mp4"] {
+        let f = fixture(ONE_LINE);
+        let script = f.dir.join(name);
+        fs::write(&script, ONE_LINE).unwrap();
+        let mut a = no_voice_args(&f);
+        a.script = script.clone();
+        assert_eq!(run_build(&a), Outcome::Failed, "{name}");
+        assert_eq!(fs::read_to_string(&script).unwrap(), ONE_LINE, "{name}");
+        assert!(!f.dir.join("work").exists(), "{name}");
+        assert!(!f.dir.join("timeline").exists(), "{name}");
+    }
+    // voices.txt などは問題ない
+    let f = fixture(ONE_LINE);
+    let script = f.dir.join("voices.txt");
+    fs::write(&script, ONE_LINE).unwrap();
+    let mut a = no_voice_args(&f);
+    a.script = script;
+    assert_eq!(run_build(&a), Outcome::Warnings);
+}
+
+#[test]
+fn verify_loudness_reads_the_script_folder_layout() {
+    let f = fixture(ONE_LINE);
+    write_voice(&f.voices.join("S01_L001.wav"));
+    let cfg = f.dir.join("prefade.toml");
+    let builtin =
+        fs::read_to_string(Path::new(env!("CARGO_MANIFEST_DIR")).join("../../config.toml"))
+            .unwrap();
+    assert!(builtin.contains("dump_prefade = false"));
+    fs::write(
+        &cfg,
+        builtin.replace("dump_prefade = false", "dump_prefade = true"),
+    )
+    .unwrap();
+    assert_eq!(run_build(&args(&f, Some(cfg), false)), Outcome::Ok);
+    let (code, text) = s2v_cli::verify::run_cli(&[f.dir.to_string_lossy().into_owned()]);
+    assert_eq!(code, 0, "{text}");
+    assert!(text.contains("S01-L001"), "{text}");
+}
+
+#[test]
+fn reserved_script_names_are_rejected_case_insensitively() {
+    for name in [
+        "PROCESS.LOG",
+        "Process.Log",
+        "FULL_DIALOGUE.WAV",
+        "Full_Dialogue.wav",
+        "Output.MP4",
+        "OUTPUT.mp4",
+    ] {
+        let f = fixture(ONE_LINE);
+        let script = f.dir.join(name);
+        fs::write(&script, ONE_LINE).unwrap();
+        let mut a = no_voice_args(&f);
+        a.script = script.clone();
+        assert_eq!(run_build(&a), Outcome::Failed, "{name}");
+        assert_eq!(fs::read_to_string(&script).unwrap(), ONE_LINE, "{name}");
+        assert!(!f.dir.join("work").exists(), "{name}");
+        assert!(!f.dir.join("timeline").exists(), "{name}");
+    }
+}
+
+#[test]
+fn relative_and_case_variant_voice_dirs_are_rejected_before_any_write() {
+    let cases: Vec<(&str, PathBuf)> = vec![
+        ("WORK", PathBuf::from("WORK")),
+        ("Tracks/", PathBuf::from("Tracks").join("")),
+        ("./timeline", PathBuf::from(".").join("timeline")),
+        (
+            "work/../work",
+            PathBuf::from("work").join("..").join("work"),
+        ),
+    ];
+    for (label, rel) in cases {
+        let f = fixture(ONE_LINE);
+        // 相対パスはカレントディレクトリ基準。テストではカレントを変えず、絶対パスに直して渡す純粋関数のテストは layout.rs にある。
+        // ここでは絶対パスの大文字違いだけを確かめる。
+        let abs = f.dir.join(&rel);
+        let mut a = no_voice_args(&f);
+        a.voice_dir = Some(abs);
+        assert_eq!(run_build(&a), Outcome::Failed, "{label}");
+        assert!(!f.dir.join("Process.log").exists(), "{label}");
+        assert!(!f.dir.join("work").exists(), "{label}");
+    }
+}
+
+#[test]
+fn default_voices_that_is_a_file_gives_the_same_guidance_as_missing() {
+    let f = fixture(ONE_LINE);
+    fs::remove_dir_all(&f.voices).unwrap();
+    fs::write(&f.voices, b"x").unwrap();
+    assert_eq!(run_build(&no_voice_args(&f)), Outcome::Failed);
+    let log = fs::read_to_string(f.dir.join("Process.log")).unwrap();
+    assert!(
+        log.contains("voices") && log.contains("--voice-dir"),
+        "{log}"
+    );
+}
+
+/// ディレクトリのリンクを作る。作れなければ false。
+fn try_dir_link(link: &Path, target: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        if std::os::windows::fs::symlink_dir(target, link).is_ok() {
+            return true;
+        }
+        std::process::Command::new("cmd")
+            .args(["/C", "mklink", "/J"])
+            .arg(link)
+            .arg(target)
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false)
+    }
+    #[cfg(not(windows))]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+}
+
+/// リンクを作る。Windows では mklink /J に権限は要らないので、作れなければテストの準備の不具合として止める。
+/// それ以外の OS では作れなければ false(テストを省略する)。
+fn make_dir_link(link: &Path, target: &Path) -> bool {
+    if try_dir_link(link, target) {
+        return true;
+    }
+    if cfg!(windows) {
+        panic!(
+            "ディレクトリのリンク(シンボリックリンクとジャンクション)を作れません: {}。テストの準備に失敗しました",
+            link.display()
+        );
+    }
+    eprintln!("リンクを作れないためテストを省略します: {}", link.display());
+    false
+}
+
+#[test]
+fn linked_output_folders_pointing_outside_are_refused_without_deleting() {
+    for sub in ["tracks", "timeline", "work"] {
+        let f = fixture(ONE_LINE);
+        let foreign = f._tmp.path().join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        for n in [
+            "dialogue.wav",
+            "bgm.wav",
+            "se.wav",
+            "timeline.json",
+            "keep.txt",
+        ] {
+            fs::write(foreign.join(n), b"precious").unwrap();
+        }
+        if !make_dir_link(&f.dir.join(sub), &foreign) {
+            return;
+        }
+        assert_eq!(run_build(&no_voice_args(&f)), Outcome::Failed, "{sub}");
+        for n in [
+            "dialogue.wav",
+            "bgm.wav",
+            "se.wav",
+            "timeline.json",
+            "keep.txt",
+        ] {
+            assert_eq!(fs::read(foreign.join(n)).unwrap(), b"precious", "{sub}/{n}");
+        }
+        assert!(!f.dir.join("Process.log").exists(), "{sub}");
+    }
+}
+
+#[test]
+fn linked_work_subfolders_pointing_outside_are_refused_without_writing_or_deleting() {
+    for sub in ["resampled", "lines", "lines_prefade"] {
+        let f = fixture(ONE_LINE);
+        write_voice(&f.voices.join("S01_L001.wav"));
+        let foreign = f._tmp.path().join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        let decoys = ["S01-L001.wav", "S01_L001.wav", "decoy.wav", "keep.txt"];
+        for n in decoys {
+            fs::write(foreign.join(n), b"precious").unwrap();
+        }
+        fs::create_dir_all(f.dir.join("work")).unwrap();
+        if !make_dir_link(&f.dir.join("work").join(sub), &foreign) {
+            return;
+        }
+        assert_eq!(run_build(&no_voice_args(&f)), Outcome::Failed, "{sub}");
+        for n in decoys {
+            assert_eq!(fs::read(foreign.join(n)).unwrap(), b"precious", "{sub}/{n}");
+        }
+        assert_eq!(
+            fs::read_dir(&foreign).unwrap().count(),
+            decoys.len(),
+            "{sub}"
+        );
+        assert!(!f.dir.join("Process.log").exists(), "{sub}");
+        assert!(!f.dir.join("timeline").exists(), "{sub}");
+    }
 }
