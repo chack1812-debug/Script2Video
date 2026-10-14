@@ -47,8 +47,13 @@ fn delay_samples(dist: f64, sound_speed: f64, fs: f64) -> anyhow::Result<usize> 
     Ok(v.max(0.0) as usize)
 }
 
-/// 残響の音量補償ゲインのキー: (rt60(4桁に丸め), pre_delay, actual_wet(百分率の整数。0.01 刻み))。
-type ReverbCompKey = (OrderedFloat<f64>, usize, u32);
+/// 残響の音量補償ゲインのキー: (rt60(4桁に丸め), pre_delay, actual_wet(百分率の整数。0.01 刻み),
+/// 話者距離(0.5 m 刻みの整数。0〜50 m))。
+type ReverbCompKey = (OrderedFloat<f64>, usize, u32, u32);
+
+/// 補償の測定に使う距離の刻み(m)と上限(m)。
+const COMP_DISTANCE_STEP_M: f64 = 0.5;
+const COMP_DISTANCE_MAX_M: f64 = 50.0;
 
 /// 1つのキーの補償ゲイン(単一実行: 同じキーを同時に求めても計算は1回)。失敗は文字列で保持する。
 type CompSlot = Arc<OnceLock<Result<f32, String>>>;
@@ -152,6 +157,7 @@ impl AudioProcessor {
     /// BS.1770 のステレオラウドネスを測り、その差を戻すゲインを返す。結果はパラメータごとに
     /// キャッシュする(同じキーの同時計算は1回に集約し、計算はキャッシュのロックの外で行う)。
     /// `actual_wet` は 0.01 刻みに量子化済みの値で、実際の混合に使う値と同じ。
+    /// 較正信号は、実際の経路と同じ空気吸収を量子化した距離(0.5 m 刻み、0〜50 m)で通してから測る。
     /// 実際の経路では残響の前に早期反射が加わるが、補償は素の dual-mono を基準にして求める
     /// (許容 ±0.5 LU。テストで確認)。測定不能や不正な値は Err(丸めない)。
     pub(crate) fn reverb_comp_gain(
@@ -159,7 +165,11 @@ impl AudioProcessor {
         rt60: f64,
         pre_delay: usize,
         actual_wet: f64,
+        distance: f64,
     ) -> anyhow::Result<f32> {
+        if !distance.is_finite() {
+            anyhow::bail!("距離が有限の値ではありません: {distance}");
+        }
         if !actual_wet.is_finite() || !(0.0..=0.9).contains(&actual_wet) {
             anyhow::bail!("残響の混合比が範囲外です: {actual_wet}");
         }
@@ -167,6 +177,7 @@ impl AudioProcessor {
             OrderedFloat(round4(rt60)),
             pre_delay,
             (actual_wet * 100.0).round() as u32,
+            (distance.clamp(0.0, COMP_DISTANCE_MAX_M) / COMP_DISTANCE_STEP_M).round() as u32,
         );
         let slot = {
             let mut map = self
@@ -187,10 +198,19 @@ impl AudioProcessor {
     fn compute_reverb_comp(&self, key: ReverbCompKey) -> anyhow::Result<f32> {
         let (rt60, pre_delay) = (key.0.into_inner(), key.1);
         let wet = key.2 as f32 / 100.0;
+        let distance = key.3 as f64 * COMP_DISTANCE_STEP_M;
         self.ir_cache.compute_if_needed(rt60, pre_delay)?;
         let signal = crate::calib::calibration_signal(crate::calib::CALIBRATION_SEED);
         let tail = (self.config.sample_rate as f64 * rt60) as usize + pre_delay;
-        let mut stereo: Vec<[f32; 2]> = signal
+        // 実際の経路と同じ空気吸収(距離に応じたローパス)を通す。左右とも量子化した話者距離を使う
+        // (マイク間隔による左右の距離差は無視する。pan に依存しない基準にするため)。
+        let filtered = apply_air_absorption(
+            &signal,
+            distance,
+            self.config.sample_rate,
+            self.config.air_absorption_coeff,
+        );
+        let mut stereo: Vec<[f32; 2]> = filtered
             .iter()
             .map(|&v| [v, v])
             .chain(std::iter::repeat_n([0.0, 0.0], tail))
@@ -448,7 +468,7 @@ impl AudioProcessor {
                 .apply_with_wet(&mut stereo, rt60, rp.pre_delay, aw as f32)?;
             if aw > 0.0 {
                 // 残響による音量変化を、パラメータごとの固定ゲインで戻す(信号に依存しない)
-                let g = self.reverb_comp_gain(rt60, rp.pre_delay, aw)?;
+                let g = self.reverb_comp_gain(rt60, rp.pre_delay, aw, cast.distance)?;
                 for f in &mut stereo {
                     f[0] *= g;
                     f[1] *= g;
@@ -1102,12 +1122,18 @@ mod tests {
         }
     }
 
-    /// 許容(±0.5 LU)を超えると分かっている条件。補償の基準(素の dual-mono)と実際の経路
-    /// (距離10mの空気吸収、強い早期反射)の差による。未解決のため通常のテストからは外している。
-    const KNOWN_EXCEEDING: [&str; 2] = ["dist10", "small strong-early"];
+    /// 既知の限界(Human 承認済みの残差): 早期反射が支配的な条件では、補償の基準(素の dual-mono)が
+    /// 早期反射の左右相関を捉えられず、最大約 0.5 LU の誤差が残る。
+    /// - 早期反射を極端に強めた(early_level 2.5 = 既定の2.5倍)小部屋
+    /// - 距離 10 m(既定の小さい部屋では話者が壁に押し込まれ、直接音より早期反射が支配的になる。
+    ///   早期反射を切ると距離 10〜30 m でも 0.1 LU 未満)
+    ///
+    /// 通常のテストからは外し、無視されたテストで 0.6 LU 未満であることだけ確認する。
+    const KNOWN_LIMIT: [&str; 2] = ["small strong-early", "dist10"];
 
-    /// 残響あり/なしのラウドネス差の表を作り、許容を超えた条件を返す。
-    fn lu_table_failures(only_known_exceeding: bool) -> Vec<String> {
+    /// 残響あり/なしのラウドネス差の表を作り、許容(`limit` LU)を超えた条件を返す。
+    /// `known_limit` が true なら既知の限界の条件だけ、false ならそれ以外だけを調べる。
+    fn lu_table_failures(known_limit: bool, limit: f64) -> Vec<String> {
         let base = s2v_core::Config::builtin().audio;
         let mut strong = base.clone();
         strong.early_reflections.early_level = 2.5;
@@ -1148,6 +1174,8 @@ mod tests {
             ("dist0.5", false, wet(1.0), dummy_cast(0.0, 0.5)),
             ("dist3", false, wet(1.0), dummy_cast(0.0, 3.0)),
             ("dist10", false, wet(1.0), dummy_cast(0.0, 10.0)),
+            ("dist20", false, wet(1.0), dummy_cast(0.0, 20.0)),
+            ("dist30", false, wet(1.0), dummy_cast(0.0, 30.0)),
             ("pan+60", false, wet(1.0), dummy_cast(60.0, 1.0)),
             ("pan-60", false, wet(1.0), dummy_cast(-60.0, 1.0)),
             ("pan+60 wet0.3", false, wet(0.3), dummy_cast(60.0, 3.0)),
@@ -1181,13 +1209,13 @@ mod tests {
         for seed in [7u64, 8] {
             let input = speech_like(seed);
             for (name, strong_early, scene, cast) in &cases {
-                if KNOWN_EXCEEDING.iter().any(|k| name == k) != only_known_exceeding {
+                if KNOWN_LIMIT.iter().any(|k| name == k) != known_limit {
                     continue;
                 }
                 let p = if *strong_early { &p_strong } else { &p_base };
                 let diff = reverb_loudness_diff(p, &input, cast, scene);
                 eprintln!("LOUDNESS seed {seed} {name}: {diff:.3}");
-                if diff.abs() >= 0.5 {
+                if diff.abs() >= limit {
                     failures.push(format!("seed {seed} {name}: {diff}"));
                 }
             }
@@ -1197,22 +1225,42 @@ mod tests {
 
     #[test]
     fn reverb_scenes_keep_the_reference_loudness() {
-        let failures = lu_table_failures(false);
+        let failures = lu_table_failures(false, 0.5);
         assert!(failures.is_empty(), "{failures:?}");
     }
 
     #[test]
-    #[ignore = "既知の未解決: 距離10mと強い早期反射では +0.4〜+0.9 LU になる(補償の基準が素の dual-mono のため)"]
-    fn reverb_scenes_known_exceeding_conditions_stay_within_half_lu() {
-        let failures = lu_table_failures(true);
+    fn air_absorption_aware_compensation_holds_at_long_distances_without_early_reflections() {
+        // 距離ごとの空気吸収を補償の測定に含めているため、早期反射が無ければ遠距離でも ±0.5 LU に入る
+        let mut cfg = s2v_core::Config::builtin().audio;
+        cfg.early_reflections.enabled = false;
+        let p = AudioProcessor::new(cfg).unwrap();
+        let scene = SceneConfig {
+            reverb_wet: Some(1.0),
+            ..SceneConfig::new("w")
+        };
+        for seed in [7u64, 8] {
+            let input = speech_like(seed);
+            for d in [10.0, 20.0, 30.0] {
+                let diff = reverb_loudness_diff(&p, &input, &dummy_cast(0.0, d), &scene);
+                eprintln!("LOUDNESS no-early seed {seed} dist{d}: {diff:.3}");
+                assert!(diff.abs() < 0.5, "seed {seed} dist {d}: {diff}");
+            }
+        }
+    }
+
+    #[test]
+    #[ignore = "既知の限界(Human 承認済み): 早期反射が支配的な条件(極端に強い早期反射の小部屋、距離10m)では最大約 0.5 LU の誤差が残る"]
+    fn reverb_scenes_known_limit_stays_below_0_6_lu() {
+        let failures = lu_table_failures(true, 0.6);
         assert!(failures.is_empty(), "{failures:?}");
     }
 
     #[test]
     fn reverb_comp_gain_is_above_one_for_strong_wet_and_not_applied_when_reverb_off() {
         let p = AudioProcessor::new(default_audio_config()).unwrap();
-        let strong = p.reverb_comp_gain(1.0, 480, 0.9).unwrap();
-        let weak = p.reverb_comp_gain(1.0, 480, 0.1).unwrap();
+        let strong = p.reverb_comp_gain(1.0, 480, 0.9, 1.0).unwrap();
+        let weak = p.reverb_comp_gain(1.0, 480, 0.1, 1.0).unwrap();
         assert!(strong > 1.0, "{strong}");
         assert!(strong > weak, "strong={strong} weak={weak}");
         // 残響なしでは補償を計算も参照もしない(キャッシュに入らない)
@@ -1230,18 +1278,23 @@ mod tests {
     fn reverb_comp_gain_is_cached_and_depends_on_parameters() {
         let p = AudioProcessor::new(default_audio_config()).unwrap();
         assert_eq!(p.reverb_comp_len(), 0);
-        let a = p.reverb_comp_gain(0.8, 240, 0.5).unwrap();
+        let a = p.reverb_comp_gain(0.8, 240, 0.5, 1.0).unwrap();
         assert_eq!(p.reverb_comp_len(), 1);
-        let a2 = p.reverb_comp_gain(0.8, 240, 0.5).unwrap();
+        let a2 = p.reverb_comp_gain(0.8, 240, 0.5, 1.0).unwrap();
         // 4桁に丸めた同じキーは同じゲイン(再計算しない)
-        let a3 = p.reverb_comp_gain(0.800_001, 240, 0.500_001).unwrap();
+        let a3 = p.reverb_comp_gain(0.800_001, 240, 0.500_001, 1.1).unwrap();
         assert_eq!(p.reverb_comp_len(), 1);
         assert_eq!(a, a2);
         assert_eq!(a, a3);
-        let b = p.reverb_comp_gain(0.8, 240, 0.9).unwrap();
-        let c = p.reverb_comp_gain(2.0, 240, 0.5).unwrap();
-        let d = p.reverb_comp_gain(0.8, 480, 0.5).unwrap();
-        assert_eq!(p.reverb_comp_len(), 4);
+        let b = p.reverb_comp_gain(0.8, 240, 0.9, 1.0).unwrap();
+        let c = p.reverb_comp_gain(2.0, 240, 0.5, 1.0).unwrap();
+        let d = p.reverb_comp_gain(0.8, 480, 0.5, 1.0).unwrap();
+        // 距離は 0.5 m 刻み: 10.0 と 10.2 は同じキー、1.0 とは別キー
+        let e = p.reverb_comp_gain(0.8, 240, 0.5, 10.0).unwrap();
+        let e2 = p.reverb_comp_gain(0.8, 240, 0.5, 10.2).unwrap();
+        assert_eq!(e, e2);
+        assert_ne!(a, e, "距離が違えば空気吸収が違い、補償も変わる");
+        assert_eq!(p.reverb_comp_len(), 5);
         assert!(a != b && a != c);
         assert!(d.is_finite() && d > 0.0);
     }
@@ -1396,10 +1449,7 @@ mod tests {
         use crate::reverb::actual_wet;
         let cfg = default_audio_config();
         let p = AudioProcessor::new(cfg.clone()).unwrap();
-        let scene = SceneConfig {
-            reverb_wet: Some(0.3),
-            ..reverb_scene()
-        };
+        let scene = reverb_scene(); // reverb_wet 0.8(最悪側)
         let x = noise(2_000, 0.2);
         let geo = resolve_room_geometry(&scene, &cfg.early_reflections, cfg.room_size);
         let rp = compute_reverb_params(geo.dims, &cfg.early_reflections, cfg.sound_speed, 48_000);
@@ -1408,12 +1458,12 @@ mod tests {
         for i in 0..40 {
             let d = 0.5 + (20.0 - 0.5) * i as f64 / 39.0;
             let w = actual_wet(
-                0.3,
+                0.8,
                 rp.wet_base,
                 d,
                 cfg.early_reflections.wet_distance_slope,
             );
-            distinct.insert((w * 100.0).round() as u32);
+            distinct.insert(((w * 100.0).round() as u32, (d / 0.5).round() as u32));
             p.render(&x, &dummy_cast(0.0, d), &scene).unwrap();
         }
         eprintln!(
@@ -1423,7 +1473,6 @@ mod tests {
             distinct.len()
         );
         assert_eq!(p.reverb_comp_len(), distinct.len());
-        assert!(distinct.len() <= 91);
-        assert!(distinct.len() < 40, "距離を変えても刻みごとに共有される");
+        assert!(distinct.len() <= 40);
     }
 }
