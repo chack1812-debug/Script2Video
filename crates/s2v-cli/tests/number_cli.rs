@@ -300,3 +300,28 @@ fn ids_write_failure_leaves_script_untouched() {
     assert!(!dir.path().join("r.bak").exists());
     assert!(!dir.path().join("r.html").exists());
 }
+
+#[test]
+fn number_assigns_cut_and_note_numbers_and_records_them_in_ids() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("cut.txt");
+    let src = "@scene 居間\n@cast\nA:田中\n\n@script\n#paragraph\n#note 朝\nA:一\n#cut\n#note 昼\n";
+    fs::write(&script, src).unwrap();
+
+    assert_eq!(run_number(&script), Outcome::Ok);
+
+    let text = fs::read_to_string(&script).unwrap();
+    assert!(
+        text.contains(
+            "#paragraph[S01]\n#note[N01] 朝\n[S01-L001] A:一\n#cut[C02]\n#note[N02] 昼\n"
+        ),
+        "{text}"
+    );
+    let ids = fs::read_to_string(dir.path().join("cut.ids")).unwrap();
+    assert!(ids.contains("max_cut.S01=2\n"), "{ids}");
+    assert!(ids.contains("max_note.S01=2\n"), "{ids}");
+
+    // 2回目は何も変わらない
+    assert_eq!(run_number(&script), Outcome::Ok);
+    assert_eq!(fs::read_to_string(&script).unwrap(), text);
+}

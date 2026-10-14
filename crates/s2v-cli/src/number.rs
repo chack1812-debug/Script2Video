@@ -125,8 +125,11 @@ pub fn run_number(script: &Path) -> Outcome {
     }
 
     println!(
-        "台詞 {} 行、シーン {} 個に番号を付けました",
-        numbered.assigned_lines, numbered.assigned_scenes
+        "台詞 {} 行、シーン {} 個、カット {} 個、ト書き {} 個に番号を付けました",
+        numbered.assigned_lines,
+        numbered.assigned_scenes,
+        numbered.assigned_cuts,
+        numbered.assigned_notes
     );
     outcome
 }

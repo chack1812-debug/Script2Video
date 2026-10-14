@@ -7,15 +7,22 @@ use crate::parser::ParseWarning;
 
 /// `台本名.ids`: 使用済みの最大番号(削除した番号を再利用しないための記録)。
 ///
-/// 台詞番号は各シーンの中で1から数えるので、最大番号もシーンごとに持つ。
-/// テキスト形式は `max_scene=<n>` と、シーンごとの `max_line.S01=<n>`(シーン番号は
-/// `format_scene_id` の書式)。①a の形式にあった全体で1つの `max_line=<n>` は、
-/// 台詞番号がシーン単位になったため読み捨てる(その形式の `.ids` に依存するものはない)。
+/// 台詞・カット・ト書きの番号は各シーンの中で数えるので、最大番号もシーンごとに持つ。
+/// テキスト形式は `max_scene=<n>` と、シーンごとの `max_line.S01=<n>`・`max_cut.S01=<n>`・
+/// `max_note.S01=<n>`(シーン番号は `format_scene_id` の書式)。①a の形式にあった全体で1つの
+/// `max_line=<n>` は、台詞番号がシーン単位になったため読み捨てる。
+/// `max_` で始まらないキーの行は将来の版の記録として `extra` に保存し、書き戻すときに残す。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct IdsRecord {
     pub max_scene: u32,
     /// シーン番号 -> そのシーンで使用済みの最大の台詞番号
     pub scene_max: BTreeMap<u32, u32>,
+    /// シーン番号 -> 使用済みの最大のカット番号(C01 は予約なので、記録は 2 以上)
+    pub cut_max: BTreeMap<u32, u32>,
+    /// シーン番号 -> 使用済みの最大のト書き番号
+    pub note_max: BTreeMap<u32, u32>,
+    /// 知らないキーの行(将来の版の記録)。書き戻すときにそのまま残す
+    pub extra: Vec<String>,
 }
 
 impl IdsRecord {
@@ -23,41 +30,57 @@ impl IdsRecord {
     pub fn parse(text: &str) -> Self {
         let mut r = Self::default();
         for line in text.lines() {
-            if let Some((k, v)) = line.split_once('=') {
-                // 壊れた値の行は無視する(0 で上書きすると欠番が再利用されてしまう)。
-                // 同じキーが複数回正しく読めた場合は、安全側として最大値を採る。
-                let Ok(v) = v.trim().parse::<u32>() else {
-                    continue;
-                };
-                let k = k.trim();
-                if k == "max_scene" {
-                    r.max_scene = r.max_scene.max(v);
-                } else if let Some(scene) = k.strip_prefix("max_line.").and_then(parse_scene_id) {
-                    let e = r.scene_max.entry(scene).or_insert(0);
-                    *e = (*e).max(v);
+            let Some((k, v)) = line.split_once('=') else {
+                continue;
+            };
+            let k = k.trim();
+            if !k.starts_with("max_") {
+                if !k.is_empty() && !k.starts_with('#') {
+                    r.extra.push(line.trim_end().to_string());
                 }
-                // 旧形式の `max_line=<n>`(全体で1つ)などは無視する
+                continue;
             }
+            // 壊れた値の行は無視する(0 で上書きすると欠番が再利用されてしまう)。
+            // 同じキーが複数回正しく読めた場合は、安全側として最大値を採る。
+            let Ok(v) = v.trim().parse::<u32>() else {
+                continue;
+            };
+            let per_scene = |prefix: &str| k.strip_prefix(prefix).and_then(parse_scene_id);
+            let slot = if k == "max_scene" {
+                r.max_scene = r.max_scene.max(v);
+                continue;
+            } else if let Some(s) = per_scene("max_line.") {
+                r.scene_max.entry(s).or_insert(0)
+            } else if let Some(s) = per_scene("max_cut.") {
+                r.cut_max.entry(s).or_insert(0)
+            } else if let Some(s) = per_scene("max_note.") {
+                r.note_max.entry(s).or_insert(0)
+            } else {
+                // 旧形式の `max_line=<n>` や、シーン番号の壊れたキーは捨てる
+                continue;
+            };
+            *slot = (*slot).max(v);
         }
         r
     }
 
     pub fn to_text(&self) -> String {
         let mut out = String::from(
-            "# script2video number が使用した最大番号(削除した番号を再利用しないための記録)
-",
+            "# script2video number が使用した最大番号(削除した番号を再利用しないための記録)\n",
         );
-        out.push_str(&format!(
-            "max_scene={}
-",
-            self.max_scene
-        ));
-        for (scene, max) in &self.scene_max {
-            out.push_str(&format!(
-                "max_line.{}={max}
-",
-                format_scene_id(*scene)
-            ));
+        out.push_str(&format!("max_scene={}\n", self.max_scene));
+        for (key, map) in [
+            ("max_line", &self.scene_max),
+            ("max_cut", &self.cut_max),
+            ("max_note", &self.note_max),
+        ] {
+            for (scene, max) in map {
+                out.push_str(&format!("{key}.{}={max}\n", format_scene_id(*scene)));
+            }
+        }
+        for line in &self.extra {
+            out.push_str(line);
+            out.push('\n');
         }
         out
     }
@@ -69,6 +92,8 @@ pub struct Numbered {
     pub record: IdsRecord,
     pub assigned_lines: usize,
     pub assigned_scenes: usize,
+    pub assigned_cuts: usize,
+    pub assigned_notes: usize,
     pub warnings: Vec<ParseWarning>,
 }
 
@@ -76,6 +101,14 @@ enum Kind<'a> {
     Other,
     /// `#paragraph` の直後の文字列(`[S02] 名称` など)
     Paragraph {
+        after: &'a str,
+    },
+    /// `#cut` の直後の文字列(`[C02]` など)
+    Cut {
+        after: &'a str,
+    },
+    /// `#note` の直後の文字列
+    Note {
         after: &'a str,
     },
     Speech {
@@ -96,6 +129,13 @@ pub fn number_script(text: &str, record: &IdsRecord) -> Result<Numbered, Vec<Par
     let mut errors = Vec::new();
     let mut seen_lines: HashMap<(u32, u32), usize> = HashMap::new();
     let mut seen_scenes: HashMap<u32, usize> = HashMap::new();
+    // シーン番号がまだ無い #paragraph もあるので、シーンは「#paragraph の出現順のブロック番号」
+    // (最初の #paragraph より前がブロック 0)で数える
+    let mut block = 0usize;
+    let mut seen_cuts: HashMap<(usize, u32), usize> = HashMap::new();
+    let mut seen_notes: HashMap<(usize, u32), usize> = HashMap::new();
+    let mut block_cut_max: HashMap<usize, u32> = HashMap::new();
+    let mut block_note_max: HashMap<usize, u32> = HashMap::new();
     let mut section = String::new();
     for (i, raw) in lines.iter().enumerate() {
         let line_no = i + 1;
@@ -105,7 +145,42 @@ pub fn number_script(text: &str, record: &IdsRecord) -> Result<Numbered, Vec<Par
             continue;
         }
         match classify(content) {
+            Kind::Cut { after } => {
+                if let Some(n) = existing_tag(after, 'C') {
+                    if n == 1 {
+                        errors.push(ParseWarning {
+                            line_no,
+                            message: "#cut[C01] は使えません(C01 はシーンの頭の予約です)"
+                                .to_string(),
+                        });
+                    } else if let Some(p) = seen_cuts.insert((block, n), line_no) {
+                        errors.push(ParseWarning {
+                            line_no,
+                            message: format!(
+                                "カット番号 C{n:02} が重複しています（{p} 行目と同じ）"
+                            ),
+                        });
+                    }
+                    let e = block_cut_max.entry(block).or_insert(1);
+                    *e = (*e).max(n);
+                }
+            }
+            Kind::Note { after } => {
+                if let Some(n) = existing_tag(after, 'N') {
+                    if let Some(p) = seen_notes.insert((block, n), line_no) {
+                        errors.push(ParseWarning {
+                            line_no,
+                            message: format!(
+                                "ト書き番号 N{n:02} が重複しています（{p} 行目と同じ）"
+                            ),
+                        });
+                    }
+                    let e = block_note_max.entry(block).or_insert(0);
+                    *e = (*e).max(n);
+                }
+            }
             Kind::Paragraph { after } => {
+                block += 1;
                 if let Some(n) = existing_scene(after) {
                     if let Some(p) = seen_scenes.insert(n, line_no) {
                         errors.push(ParseWarning {
@@ -150,12 +225,30 @@ pub fn number_script(text: &str, record: &IdsRecord) -> Result<Numbered, Vec<Par
         .unwrap_or(0)
         .max(record.max_scene);
 
+    // シーンごとのカット・ト書きの高水位(.ids の記録と既存の番号の大きい方)。
+    // カットは C01 が予約なので下限 1(最初は 2)、ト書きは下限 0(最初は 1)。
+    let mut cut_high_by_scene: BTreeMap<u32, u32> = record.cut_max.clone();
+    let mut note_high_by_scene: BTreeMap<u32, u32> = record.note_max.clone();
+    // ブロックのシーン番号が決まったときに、そのシーンの高水位へブロックの既存の番号を反映する
+    let raise =
+        |cut: &mut BTreeMap<u32, u32>, note: &mut BTreeMap<u32, u32>, scene: u32, blk: usize| {
+            let c = cut.entry(scene).or_insert(1);
+            *c = (*c)
+                .max(1)
+                .max(block_cut_max.get(&blk).copied().unwrap_or(1));
+            let n = note.entry(scene).or_insert(0);
+            *n = (*n).max(block_note_max.get(&blk).copied().unwrap_or(0));
+        };
+    let mut block = 0usize;
+    raise(&mut cut_high_by_scene, &mut note_high_by_scene, 0, 0);
+
     // 2回目: 番号のない行に書き込む
     let mut out = String::with_capacity(text.len() + 256);
     out.push_str(bom);
     let mut section = String::new();
     let mut current_scene = 0u32;
     let (mut assigned_lines, mut assigned_scenes) = (0usize, 0usize);
+    let (mut assigned_cuts, mut assigned_notes) = (0usize, 0usize);
     let mut warnings = Vec::new();
     let mut warned_s00 = false;
     let mut mismatches = Vec::new();
@@ -169,8 +262,10 @@ pub fn number_script(text: &str, record: &IdsRecord) -> Result<Numbered, Vec<Par
         }
         match classify(content) {
             Kind::Paragraph { after } => {
+                block += 1;
                 if let Some(n) = existing_scene(after) {
                     current_scene = n;
+                    raise(&mut cut_high_by_scene, &mut note_high_by_scene, n, block);
                     out.push_str(raw);
                 } else if after.is_empty() || after.starts_with(char::is_whitespace) {
                     let Some(n) = last_scene.checked_add(1) else {
@@ -179,6 +274,7 @@ pub fn number_script(text: &str, record: &IdsRecord) -> Result<Numbered, Vec<Par
                     last_scene = n;
                     assigned_scenes += 1;
                     current_scene = n;
+                    raise(&mut cut_high_by_scene, &mut note_high_by_scene, n, block);
                     let at = indent_len + "#paragraph".len();
                     out.push_str(&raw[..at]);
                     out.push_str(&format!("[{}]", format_scene_id(n)));
@@ -187,6 +283,46 @@ pub fn number_script(text: &str, record: &IdsRecord) -> Result<Numbered, Vec<Par
                     // `#paragraph` の直後が `[` だが `[Sxx]` として読めない(`[abc]` など): パーサが警告するので触らない。
                     // `#paragraphXYZ` のような別コマンドは classify が Other にするので、ここには来ない
                     out.push_str(raw);
+                }
+            }
+            Kind::Cut { after } => {
+                if existing_tag(after, 'C').is_some() {
+                    out.push_str(raw); // 既存の番号(重複・C01 は1回目で検出済み)
+                } else if after.is_empty() || after.starts_with(char::is_whitespace) {
+                    let high = cut_high_by_scene
+                        .get_mut(&current_scene)
+                        .expect("ブロックの開始で用意済み");
+                    let Some(n) = high.checked_add(1) else {
+                        return Err(exhausted("カット番号"));
+                    };
+                    *high = n;
+                    assigned_cuts += 1;
+                    let at = indent_len + "#cut".len();
+                    out.push_str(&raw[..at]);
+                    out.push_str(&format!("[C{n:02}]"));
+                    out.push_str(&raw[at..]);
+                } else {
+                    out.push_str(raw); // `[X]` など。パーサがエラーにする
+                }
+            }
+            Kind::Note { after } => {
+                if existing_tag(after, 'N').is_some() {
+                    out.push_str(raw); // 既存の番号(重複・C01 は1回目で検出済み)
+                } else if after.is_empty() || after.starts_with(char::is_whitespace) {
+                    let high = note_high_by_scene
+                        .get_mut(&current_scene)
+                        .expect("ブロックの開始で用意済み");
+                    let Some(n) = high.checked_add(1) else {
+                        return Err(exhausted("ト書き番号"));
+                    };
+                    *high = n;
+                    assigned_notes += 1;
+                    let at = indent_len + "#note".len();
+                    out.push_str(&raw[..at]);
+                    out.push_str(&format!("[N{n:02}]"));
+                    out.push_str(&raw[at..]);
+                } else {
+                    out.push_str(raw); // `[X]` など。パーサがエラーにする
                 }
             }
             Kind::Speech { id: Some(id) } => {
@@ -240,9 +376,21 @@ pub fn number_script(text: &str, record: &IdsRecord) -> Result<Numbered, Vec<Par
         record: IdsRecord {
             max_scene: last_scene,
             scene_max: high,
+            // 記録の無い・使っていないシーンの行を増やさない
+            cut_max: cut_high_by_scene
+                .into_iter()
+                .filter(|&(_, n)| n >= 2)
+                .collect(),
+            note_max: note_high_by_scene
+                .into_iter()
+                .filter(|&(_, n)| n >= 1)
+                .collect(),
+            extra: record.extra.clone(),
         },
         assigned_lines,
         assigned_scenes,
+        assigned_cuts,
+        assigned_notes,
         warnings,
     })
 }
@@ -273,10 +421,22 @@ fn classify(content: &str) -> Kind<'_> {
         return Kind::Other;
     }
     if let Some(rest) = content.strip_prefix('#') {
+        let starts_ok = |after: &str| {
+            after.is_empty() || after.starts_with('[') || after.starts_with(char::is_whitespace)
+        };
         if let Some(after) = rest.strip_prefix("paragraph") {
-            if after.is_empty() || after.starts_with('[') || after.starts_with(char::is_whitespace)
-            {
+            if starts_ok(after) {
                 return Kind::Paragraph { after };
+            }
+        }
+        if let Some(after) = rest.strip_prefix("cut") {
+            if starts_ok(after) {
+                return Kind::Cut { after };
+            }
+        }
+        if let Some(after) = rest.strip_prefix("note") {
+            if starts_ok(after) {
+                return Kind::Note { after };
             }
         }
         return Kind::Other;
@@ -301,6 +461,12 @@ fn existing_scene(after: &str) -> Option<u32> {
     parse_scene_id(&inner[..close])
 }
 
+/// `[C02] …` の先頭の番号(`#cut`・`#note` の直後)。
+fn existing_tag(after: &str, letter: char) -> Option<u32> {
+    let close = after.find(']')?;
+    crate::ids::parse_numbered_tag(&after[..=close], letter)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -311,6 +477,7 @@ mod tests {
         IdsRecord {
             max_scene,
             scene_max: scene_max.iter().copied().collect(),
+            ..IdsRecord::default()
         }
     }
 
@@ -669,5 +836,108 @@ mod tests {
         let n = number_script("\u{feff}", &IdsRecord::default()).unwrap();
         assert_eq!(n.text, "\u{feff}");
         assert_eq!(n.assigned_lines, 0);
+    }
+
+    #[test]
+    fn cuts_and_notes_are_numbered_per_scene() {
+        let n = run(
+            "#paragraph\n#note 朝\nA:一\n#cut\n#note 昼\n#cut\n#paragraph\n#cut\n#note 夜\n",
+            &IdsRecord::default(),
+        );
+        assert_eq!(n.text, script("#paragraph[S01]\n#note[N01] 朝\n[S01-L001] A:一\n#cut[C02]\n#note[N02] 昼\n#cut[C03]\n#paragraph[S02]\n#cut[C02]\n#note[N01] 夜\n"));
+        assert_eq!(n.assigned_cuts, 3);
+        assert_eq!(n.assigned_notes, 3);
+        assert_eq!(n.record.cut_max, [(1, 3), (2, 2)].into_iter().collect());
+        assert_eq!(n.record.note_max, [(1, 2), (2, 1)].into_iter().collect());
+        let again = number_script(&n.text, &n.record).unwrap();
+        assert_eq!(again.text, n.text);
+        assert_eq!((again.assigned_cuts, again.assigned_notes), (0, 0));
+    }
+
+    #[test]
+    fn inserted_cut_after_existing_higher_number_continues_from_max() {
+        // Review Focus 2: 旧 .ids(max_cut が無い)でも、既存の C05 の後に続ける
+        let n = run(
+            "#paragraph[S01]\n[S01-L001] A:一\n#cut\n#cut[C05]\n",
+            &IdsRecord::parse("max_scene=1\nmax_line.S01=1\n"),
+        );
+        assert!(n.text.contains("#cut[C06]\n#cut[C05]\n"), "{}", n.text);
+        assert_eq!(n.record.cut_max[&1], 6);
+    }
+
+    #[test]
+    fn record_prevents_reuse_of_deleted_cut_and_note_numbers() {
+        let mut r = IdsRecord::default();
+        r.cut_max.insert(1, 4);
+        r.note_max.insert(1, 7);
+        let n = run("#paragraph[S01]\n#cut\n#note x\n", &r);
+        assert!(n.text.contains("#cut[C05]\n#note[N08] x\n"), "{}", n.text);
+    }
+
+    #[test]
+    fn cut_and_note_duplicates_and_c01_are_errors() {
+        let errs = number_script(
+            &script("#paragraph[S01]\n#cut[C02]\n#cut[C02]\n#note[N01] a\n#note[N01] b\n"),
+            &IdsRecord::default(),
+        )
+        .unwrap_err();
+        assert_eq!(errs.len(), 2, "{errs:?}");
+        let errs = number_script(
+            &script("#paragraph[S01]\n#cut[C01]\n"),
+            &IdsRecord::default(),
+        )
+        .unwrap_err();
+        assert_eq!(errs.len(), 1, "{errs:?}");
+        // 別のシーンなら同じ番号でよい
+        assert!(number_script(
+            &script("#paragraph[S01]\n#cut[C02]\n#paragraph[S02]\n#cut[C02]\n"),
+            &IdsRecord::default()
+        )
+        .is_ok());
+    }
+
+    #[test]
+    fn cut_and_note_in_s00() {
+        let n = run(
+            "#note 前置き\nA:一\n#cut\n#paragraph\n",
+            &IdsRecord::default(),
+        );
+        assert!(
+            n.text
+                .contains("#note[N01] 前置き\n[S00-L001] A:一\n#cut[C02]\n#paragraph[S01]\n"),
+            "{}",
+            n.text
+        );
+        assert!(n.record.to_text().contains("max_cut.S00=2\n"));
+        assert!(n.record.to_text().contains("max_note.S00=1\n"));
+    }
+
+    #[test]
+    fn cut_and_note_numbering_preserves_crlf_and_bom() {
+        // Review Focus 5
+        let src = "\u{feff}@scene 居間\r\n@cast\r\nA:田中\r\n\r\n@script\r\n#paragraph[S01]\r\n  #cut\r\n\t#note  翌朝\r\n";
+        let n = number_script(src, &IdsRecord::default()).unwrap();
+        assert_eq!(n.text, "\u{feff}@scene 居間\r\n@cast\r\nA:田中\r\n\r\n@script\r\n#paragraph[S01]\r\n  #cut[C02]\r\n\t#note[N01]  翌朝\r\n");
+    }
+
+    #[test]
+    fn malformed_cut_and_note_tags_are_untouched() {
+        let src = script("#paragraph[S01]\n#cut[X]\n#note[回想] x\n#cutting\n#notes x\n");
+        let n = number_script(&src, &IdsRecord::default()).unwrap();
+        assert_eq!(n.text, src);
+    }
+
+    #[test]
+    fn ids_record_keeps_unknown_keys_and_round_trips_cut_and_note() {
+        let r = IdsRecord::parse("max_scene=2\nmax_line.S01=3\nmax_cut.S01=4\nmax_note.S02=5\nfuture.key=abc\nmax_line=9\nゴミ\n");
+        assert_eq!(r.cut_max, [(1, 4)].into_iter().collect());
+        assert_eq!(r.note_max, [(2, 5)].into_iter().collect());
+        assert_eq!(r.extra, vec!["future.key=abc".to_string()]);
+        let text = r.to_text();
+        assert!(text.contains("max_cut.S01=4\n"), "{text}");
+        assert!(text.contains("max_note.S02=5\n"), "{text}");
+        assert!(text.ends_with("future.key=abc\n"), "{text}");
+        assert!(!text.contains("max_line=9"), "{text}");
+        assert_eq!(IdsRecord::parse(&text), r);
     }
 }
