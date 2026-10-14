@@ -182,6 +182,9 @@ pub fn cut_args(
         "bt709",
         "-color_range",
         "tv",
+        // 版によっては libx264 が -color_primaries/-color_trc を無視して unknown になるので、x264 にも直接渡す
+        "-x264-params",
+        "colorprim=bt709:transfer=bt709",
         "-video_track_timescale",
     ]));
     a.push((s.fps * 1000).to_string());
@@ -429,7 +432,12 @@ mod tests {
         let tail: Vec<&str> = a.iter().rev().take(4).map(|x| x.as_str()).collect();
         assert_eq!(
             tail,
-            vec!["cut_0001.mp4", "30000", "-video_track_timescale", "tv"]
+            vec![
+                "cut_0001.mp4",
+                "30000",
+                "-video_track_timescale",
+                "colorprim=bt709:transfer=bt709"
+            ]
         );
         for must in [
             "-frames:v",
@@ -577,7 +585,7 @@ mod cut_args_golden_tests {
         );
         v.push(cut_filter(bg, 60, &s));
         v.extend(
-            "-map [v] -an -frames:v 60 -fps_mode cfr -threads 4 -c:v libx264 -preset medium -crf 20 -profile:v high -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -video_track_timescale 30000 cut.mp4"
+            "-map [v] -an -frames:v 60 -fps_mode cfr -threads 4 -c:v libx264 -preset medium -crf 20 -profile:v high -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -x264-params colorprim=bt709:transfer=bt709 -video_track_timescale 30000 cut.mp4"
                 .split(' ')
                 .map(|x| x.to_string()),
         );

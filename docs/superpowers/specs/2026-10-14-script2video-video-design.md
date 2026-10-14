@@ -291,7 +291,7 @@ option framerate 60
   - `<収め方>`: `contain` は `scale=W:H:force_original_aspect_ratio=decrease<:入力の行列・レンジ>:out_color_matrix=bt709:out_range=tv,pad=W:H:(ow-iw)/2:(oh-ih)/2:color=<background>`、`cover` は `scale=W:H:force_original_aspect_ratio=increase<:入力の行列・レンジ>:out_color_matrix=bt709:out_range=tv,crop=W:H`。`<:入力の行列・レンジ>` は、動画と JPEG の素材のときだけ `:in_color_matrix=<行列>:in_range=<レンジ>`(下の「色」の表の値)。
   - `<,tpad>`: 動画で `loop` でないときだけ `,tpad=stop_mode=clone:stop=-1` を入れる。
   - 重ね画像の流れは、一覧の `file` ごとに1フレームを持ち、その PTS は切り替えの時刻を表す。`overlay` は背景の各コマに、そのコマの時刻以前で最も新しい重ね画像を重ねる。これは FFmpeg 6.0 以上の `overlay`(framesync)の既定の選び方で、オプションでは指定しない(`ts_sync_mode` は FFmpeg 6.0〜7.1 の `overlay` に無い)。この動作は境目のコマの結合テストで固定する。
-- 出力: `-map [v] -an -frames:v N -fps_mode cfr -threads <threads> -c:v libx264 -preset <preset> -crf <crf> -profile:v high -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -video_track_timescale <fps×1000> cut_XXXX.mp4`。全カットで同じ値を使う。
+- 出力: `-map [v] -an -frames:v N -fps_mode cfr -threads <threads> -c:v libx264 -preset <preset> -crf <crf> -profile:v high -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -x264-params colorprim=bt709:transfer=bt709 -video_track_timescale <fps×1000> cut_XXXX.mp4`。全カットで同じ値を使う。
 - 引数の配列とフィルタの文字列は、関数で組み立て、ゴールデンテストで固定する。
 
 **色**: 色は、原色(primaries)・伝達関数(transfer)・行列(matrix)・レンジ(range)の4項目で決める。出力は4項目とも BT.709(レンジは tv)で、タグも同じ。

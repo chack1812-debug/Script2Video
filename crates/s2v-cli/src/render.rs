@@ -16,7 +16,9 @@ use s2v_render::autolayout::{auto_layout, AutoParams, LayoutItem};
 use s2v_render::bubbles::{
     effective_times, expand_to_min, parse_bubbles, scale_to, BubblesFile, Canvas, Placed,
 };
-use s2v_render::draw::{composite, render as render_item, ItemSpec, Overlay, Style};
+use s2v_render::draw::{
+    composite, render as render_item, render_clipped, ItemSpec, Overlay, Style,
+};
 use s2v_render::font::{FontFace, VerticalFeature};
 use s2v_render::layout::{fits, min_size, LayoutContext};
 use s2v_render::ItemKind;
@@ -217,17 +219,6 @@ fn assign_overlay_files(
     (files, per_cut)
 }
 
-/// `cut_args` の `-color_primaries`・`-color_trc` を、ffmpeg の版によっては libx264 が無視し、
-/// 出力の原色・伝達関数が unknown になる(2026-03 の git ビルドで確認)。x264 に直接渡して確実にタグを付ける。
-/// 最後の引数(出力のファイル名)の手前に差し込む。
-fn with_vui_tags(mut args: Vec<String>) -> Vec<String> {
-    let out = args.pop().expect("cut_args は出力名で終わる");
-    args.push("-x264-params".to_string());
-    args.push("colorprim=bt709:transfer=bt709".to_string());
-    args.push(out);
-    args
-}
-
 /// 標準エラーの末尾 `n` 行。
 fn tail_lines(bytes: &[u8], n: usize) -> String {
     let text = String::from_utf8_lossy(bytes);
@@ -295,7 +286,20 @@ fn tool_version(label: &str, exe: &str) -> Result<String, String> {
             "{label} が見つかりません: {exe}(PATH か config.toml の render.{label} を確かめてください)({why})"
         )
     };
-    let out = run_tool(exe, &["-version".to_string()], None).map_err(not_found)?;
+    let out = run_tool(
+        exe,
+        &if label == "ffmpeg" {
+            // ffprobe は -nostdin・-n を受け付けないので、ffmpeg だけに付ける
+            vec!["-nostdin", "-hide_banner", "-n", "-version"]
+        } else {
+            vec!["-hide_banner", "-version"]
+        }
+        .into_iter()
+        .map(String::from)
+        .collect::<Vec<_>>(),
+        None,
+    )
+    .map_err(not_found)?;
     if !out.status.success() {
         return Err(not_found(format!(
             "-version が失敗しました: {}",
@@ -509,7 +513,13 @@ fn write_overlays(
             h: p.h,
             tail: p.tail.map(|t| (t.dx, t.dy)),
         };
-        let ov = render_item(&ctx, &style, &spec).map_err(|e| format!("{id}: {e}"))?;
+        // 自動配置が画面に切り詰めた項目(警告済み)は、入る部分だけを描く
+        let ov = if fits(&ctx, &it.text, p.w, p.h) {
+            render_item(&ctx, &style, &spec)
+        } else {
+            render_clipped(&ctx, &style, &spec)
+        }
+        .map_err(|e| format!("{id}: {e}"))?;
         drawn.insert(id.as_str(), (p.x, p.y, ov));
     }
     for (set, name) in files {
@@ -735,13 +745,13 @@ fn render_main(
             overlay_list(&per_cut[i], plan.frames, cfg.fps),
         )
         .map_err(|e| format!("{list_name} を書けません: {e}"))?;
-        ffmpeg_jobs.push(with_vui_tags(cut_args(
+        ffmpeg_jobs.push(cut_args(
             &backgrounds[i],
             &list_name,
             plan.frames,
             &cut_name,
             &settings,
-        )));
+        ));
         cut_files.push(cut_name);
     }
 
@@ -1016,20 +1026,6 @@ mod tests {
             vec!["ov_empty.png", "ov_0001.png", "ov_empty.png", "ov_0001.png"]
         );
         assert_eq!(per_cut[1][1], (5, "ov_0002.png".to_string()));
-    }
-
-    #[test]
-    fn vui_tags_go_before_the_output_name() {
-        let a = with_vui_tags(vec!["-n".into(), "cut_0001.mp4".into()]);
-        assert_eq!(
-            a,
-            vec![
-                "-n",
-                "-x264-params",
-                "colorprim=bt709:transfer=bt709",
-                "cut_0001.mp4"
-            ]
-        );
     }
 
     #[test]

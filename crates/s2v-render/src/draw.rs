@@ -138,6 +138,7 @@ fn draw_text(
     ctx: &LayoutContext,
     style: &Style,
     spec: &ItemSpec,
+    clip: bool,
 ) -> Result<(), String> {
     let pad = ctx.padding as f32;
     let inner_w = spec.w as f32 - 2.0 * pad;
@@ -149,6 +150,28 @@ fn draw_text(
     // 全ての列は、最も高い列の高さで上下中央に揃えた上端から積む
     let top = origin.1 + pad + (inner_h - l.height) / 2.0;
     let text_paint = paint(style.text);
+    // 切り詰め描画では、枠の内側の矩形の外へは塗らない
+    let mask = if clip {
+        let rect = tiny_skia::Rect::from_xywh(
+            origin.0 + pad,
+            origin.1 + pad,
+            inner_w.max(0.0),
+            inner_h.max(0.0),
+        );
+        let (Some(rect), Some(mut m)) = (rect, tiny_skia::Mask::new(pm.width(), pm.height()))
+        else {
+            return Ok(()); // 内側が無いので文字は描けない
+        };
+        m.fill_path(
+            &PathBuilder::from_rect(rect),
+            FillRule::Winding,
+            false,
+            Transform::identity(),
+        );
+        Some(m)
+    } else {
+        None
+    };
     for (ci, col) in l.columns.iter().enumerate() {
         let left = origin.0 + pad + column_center_x(&l, ctx, ci, inner_w) - ctx.font_size / 2.0;
         let mut uy = top;
@@ -171,7 +194,7 @@ fn draw_text(
                             &text_paint,
                             FillRule::Winding,
                             Transform::identity(),
-                            None,
+                            mask.as_ref(),
                         );
                     }
                 }
@@ -189,6 +212,25 @@ pub fn render(ctx: &LayoutContext, style: &Style, spec: &ItemSpec) -> Result<Ove
             spec.w, spec.h, spec.text
         ));
     }
+    render_impl(ctx, style, spec, false)
+}
+
+/// 自動配置が画面の大きさに切り詰めた項目用。収まらなくても Err にせず、
+/// 枠の内側に入る部分だけを描き、はみ出す文字は内側の矩形で切り落とす。
+pub fn render_clipped(
+    ctx: &LayoutContext,
+    style: &Style,
+    spec: &ItemSpec,
+) -> Result<Overlay, String> {
+    render_impl(ctx, style, spec, true)
+}
+
+fn render_impl(
+    ctx: &LayoutContext,
+    style: &Style,
+    spec: &ItemSpec,
+    clip: bool,
+) -> Result<Overlay, String> {
     let (w, h) = (spec.w as f32, spec.h as f32);
     let sw = style.stroke_width.max(0.0);
     let tail = match spec.kind {
@@ -268,7 +310,7 @@ pub fn render(ctx: &LayoutContext, style: &Style, spec: &ItemSpec) -> Result<Ove
         }
     }
 
-    draw_text(&mut pm, (-dx as f32, -dy as f32), ctx, style, spec)?;
+    draw_text(&mut pm, (-dx as f32, -dy as f32), ctx, style, spec, clip)?;
     Ok(Overlay { dx, dy, pixmap: pm })
 }
 
@@ -429,6 +471,44 @@ mod tests {
             }
         )
         .is_err());
+    }
+
+    #[test]
+    fn clipped_render_keeps_ink_inside_the_inner_box() {
+        let f = face();
+        let c = LayoutContext {
+            face: &f,
+            font_size: 40.0,
+            line_spacing: 0.4,
+            padding: 20,
+            max_inner_h: 400,
+        };
+        let st = Style {
+            stroke_width: 0.0,
+            ..style()
+        };
+        let spec = ItemSpec {
+            kind: ItemKind::Note,
+            text: "一二三四五",
+            w: 60,
+            h: 60,
+            tail: None,
+        };
+        assert!(render(&c, &st, &spec).is_err());
+        let o = render_clipped(&c, &st, &spec).unwrap();
+        assert_eq!((o.pixmap.width(), o.pixmap.height()), (60, 60));
+        let mut inside_ink = 0;
+        for y in 0..60 {
+            for x in 0..60 {
+                let dark = px(&o.pixmap, x, y)[0] < 128;
+                if (20..40).contains(&x) && (20..40).contains(&y) {
+                    inside_ink += u32::from(dark);
+                } else {
+                    assert!(!dark, "枠の内側の外にインクがあります: ({x}, {y})");
+                }
+            }
+        }
+        assert!(inside_ink > 0, "内側にも文字が描かれるはず");
     }
 
     #[test]

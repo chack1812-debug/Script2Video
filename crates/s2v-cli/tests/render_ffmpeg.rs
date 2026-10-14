@@ -742,3 +742,23 @@ fn parallel_jobs_render_every_cut_in_order() {
     }
     assert!(p.seg().join("cut_0003.mp4").is_file());
 }
+
+#[test]
+fn overlong_auto_item_is_clipped_with_warning() {
+    if skip() {
+        return;
+    }
+    let long = "おはよう。".repeat(60);
+    let body = format!("#paragraph[S01] 朝\n#visual (image) 朝。\n[S01-L001] A:{long}\n");
+    let p = project(&body, &[("S01.png", Asset::Png(RED))], 30, "");
+    assert_eq!(p.render(), Outcome::Warnings, "{}", p.log());
+    assert!(p.output().is_file());
+    assert!(p.log().contains("画面に収まりません"), "{}", p.log());
+    // 枠(画面いっぱいの白)が出ている
+    let l = &p.timeline().lines[0];
+    let buf = frame_rgb(
+        &p.output(),
+        (frame(l.start_ms, 30) + frame(l.end_ms, 30)) / 2,
+    );
+    assert!(count_near(&buf, [255, 255, 255], 3) > 1000);
+}
