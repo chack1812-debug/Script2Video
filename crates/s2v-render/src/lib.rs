@@ -1,6 +1,7 @@
 //! 縦書きの描画部品(吹き出し・ト書き)と最終合成のための描画クレート。
 
 pub mod assets;
+pub mod bubbles;
 pub mod font;
 pub mod kinsoku;
 pub mod layout;
