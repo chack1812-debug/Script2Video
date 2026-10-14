@@ -116,7 +116,9 @@ pub fn parse_bubbles(json: &str) -> Result<BubblesFile, Vec<String>> {
                 errs.push(format!("{id}: 尻尾の先端が画面の外にはみ出しています"));
             }
         }
-        if p.start_offset_ms.abs() > MAX_OFFSET_MS || p.end_offset_ms.abs() > MAX_OFFSET_MS {
+        if p.start_offset_ms.unsigned_abs() > MAX_OFFSET_MS as u64
+            || p.end_offset_ms.unsigned_abs() > MAX_OFFSET_MS as u64
+        {
             errs.push(format!(
                 "{id}: offset の絶対値が {MAX_OFFSET_MS} ms を超えています"
             ));
@@ -140,9 +142,28 @@ fn scale_val(v: i64, new: u32, old: u32) -> i64 {
     }
 }
 
+/// 枠の両端をそれぞれ比で四捨五入して (位置, 長さ) を拡大縮小する。
+/// 元が内側なら結果も内側。長さが 0 になれば 1 にし、はみ出すなら位置を 1 戻す。
+fn scale_span(pos: i32, len: u32, new: u32, old: u32) -> (i32, u32) {
+    let a = scale_val(i64::from(pos), new, old);
+    let b = scale_val(i64::from(pos) + i64::from(len), new, old);
+    let mut l = (b - a).max(1);
+    let mut a = a;
+    if a + l > i64::from(new) {
+        a -= 1;
+    }
+    l = l.min(i64::from(new));
+    (a.max(0) as i32, l as u32)
+}
+
 /// 画面の大きさ (w, h) に合わせる。縦横比が違えば Err(エラー 2)
 pub fn scale_to(file: &BubblesFile, w: u32, h: u32) -> Result<BubblesFile, String> {
     let c = file.canvas;
+    if !canvas_ok(Canvas { w, h }) {
+        return Err(format!(
+            "画面 {w}x{h} が範囲外です(w は 16〜7680、h は 16〜4320 の偶数)"
+        ));
+    }
     if u64::from(c.w) * u64::from(h) != u64::from(w) * u64::from(c.h) {
         return Err(format!(
             "bubbles.json の canvas {}x{} と画面 {w}x{h} の縦横比が違います",
@@ -153,10 +174,8 @@ pub fn scale_to(file: &BubblesFile, w: u32, h: u32) -> Result<BubblesFile, Strin
         .items
         .iter()
         .map(|(id, p)| {
-            let nw = scale_val(i64::from(p.w), w, c.w).clamp(1, i64::from(w)) as u32;
-            let nh = scale_val(i64::from(p.h), h, c.h).clamp(1, i64::from(h)) as u32;
-            let nx = scale_val(i64::from(p.x), w, c.w).clamp(0, i64::from(w - nw)) as i32;
-            let ny = scale_val(i64::from(p.y), h, c.h).clamp(0, i64::from(h - nh)) as i32;
+            let (nx, nw) = scale_span(p.x, p.w, w, c.w);
+            let (ny, nh) = scale_span(p.y, p.h, h, c.h);
             let tail = p.tail.map(|t| Tail {
                 dx: scale_val(i64::from(t.dx), w, c.w) as i32,
                 dy: scale_val(i64::from(t.dy), h, c.h) as i32,
@@ -189,8 +208,8 @@ pub fn effective_times(
     duration_ms: i64,
 ) -> Result<(i64, i64), String> {
     let (so, eo) = p.map_or((0, 0), |p| (p.start_offset_ms, p.end_offset_ms));
-    let s = (start_ms + so).clamp(0, duration_ms);
-    let e = (end_ms + eo).clamp(0, duration_ms);
+    let s = start_ms.saturating_add(so).clamp(0, duration_ms);
+    let e = end_ms.saturating_add(eo).clamp(0, duration_ms);
     if s >= e {
         return Err(format!("表示の開始 {s} ms が終了 {e} ms 以降になります"));
     }
@@ -334,5 +353,52 @@ mod tests {
         assert_eq!((q.x, q.y), (1720, 780)); // 右下へ広げ、はみ出す分を内側へ寄せる
         let r = expand_to_min(&p, (50, 50), Canvas { w: 1920, h: 1080 });
         assert_eq!((r.w, r.h, r.x, r.y), (100, 100, 1800, 900));
+    }
+
+    #[test]
+    fn extreme_offsets_do_not_panic() {
+        let e = parse_bubbles(&OK.replace(
+            "\"start_offset_ms\":0",
+            "\"start_offset_ms\":-9223372036854775808",
+        ))
+        .unwrap_err();
+        assert!(!e.is_empty());
+        let p = Placed {
+            start_offset_ms: 1,
+            ..parse_bubbles(OK).unwrap().items["S01-L003"].clone()
+        };
+        let _ = effective_times(i64::MAX, i64::MAX, Some(&p), 5000);
+        let _ = effective_times(
+            i64::MIN,
+            i64::MIN,
+            Some(&Placed {
+                start_offset_ms: -1,
+                ..p
+            }),
+            5000,
+        );
+    }
+
+    #[test]
+    fn scaling_keeps_edges_inside_and_rejects_bad_size() {
+        let mut f = parse_bubbles(OK).unwrap();
+        f.items.insert(
+            "S01-L004".into(),
+            Placed {
+                kind: ItemKind::Bubble,
+                x: 1,
+                y: 0,
+                w: 1919,
+                h: 10,
+                tail: None,
+                start_offset_ms: 0,
+                end_offset_ms: 0,
+            },
+        );
+        let s = scale_to(&f, 960, 540).unwrap();
+        let b = &s.items["S01-L004"];
+        assert_eq!((b.x, b.w), (1, 959));
+        assert!(scale_to(&f, 0, 0).is_err());
+        assert!(scale_to(&f, 1921, 1081).is_err());
     }
 }
