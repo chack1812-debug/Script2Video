@@ -896,4 +896,35 @@ mod tests {
             e => panic!("{e:?}"),
         }
     }
+
+    #[test]
+    fn scene_zero_references_resolve_in_scene_zero() {
+        // S00-L001: 0〜1000ms、S00-L002: at=L001+100 -> 100ms から
+        // S01-L001: S00 の終了 1100ms + paragraph 1000ms = 2100ms 以降。at=S00-L001+100 -> 100ms
+        let s = scenes(
+            "[S00-L001] A:一\n#se a.wav at=L001+10\n[S00-L002] B(at=L001+100):二\n#paragraph[S01]\n[S01-L001] A:三\n[S01-L002] B(at=S00-L001+200):四\n",
+        );
+        let src = present(&[
+            (0, 1, 1000.0),
+            (0, 2, 1000.0),
+            (1, 1, 1000.0),
+            (1, 2, 1000.0),
+        ]);
+        let p = place(&flatten(&s), &src, 200);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(line_in(&p, 0, 1), (0.0, 1000.0));
+        assert_eq!(line_in(&p, 0, 2), (100.0, 1100.0));
+        // S01-L001 は cursor(1100) + paragraph(1000) = 2100ms
+        assert_eq!(line_in(&p, 1, 1), (2100.0, 3100.0));
+        assert_eq!(line_in(&p, 1, 2).0, 200.0);
+        let se = p
+            .events
+            .iter()
+            .find_map(|e| match e {
+                PlacedEvent::Se { start, .. } => Some(ms(*start)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(se, 10.0);
+    }
 }

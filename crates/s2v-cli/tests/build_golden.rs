@@ -1034,3 +1034,22 @@ fn linked_work_subfolders_pointing_outside_are_refused_without_writing_or_deleti
         assert!(!f.dir.join("timeline").exists(), "{sub}");
     }
 }
+
+#[test]
+fn scene_zero_line_before_first_paragraph_builds() {
+    let f = fixture(
+        "@scene 居間\n@cast\nA:田中\n\nB:佐藤\n\n@script\n[S00-L001] A:前置き\n#paragraph[S01]\n[S01-L001] B(at=S00-L001+100):本編\n",
+    );
+    write_voice(&f.voices.join("S00_L001.wav"));
+    write_voice(&f.voices.join("S01_L001.wav"));
+    assert_ne!(run_build(&args(&f, None, false)), Outcome::Failed);
+    let v = read_json(&f.dir.join("timeline").join("timeline.json"));
+    let lines = v["lines"].as_array().unwrap();
+    assert_eq!(lines[0]["id"], "S00-L001");
+    assert_eq!(lines[1]["id"], "S01-L001");
+    assert_eq!(lines[0]["take"], "S00_L001");
+    assert_eq!(
+        lines[1]["start_ms"].as_i64().unwrap(),
+        lines[0]["start_ms"].as_i64().unwrap() + 100
+    );
+}

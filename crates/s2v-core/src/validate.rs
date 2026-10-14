@@ -445,4 +445,26 @@ mod tests {
         assert_eq!(unknown.errors.len(), 1, "{:?}", messages(&unknown.errors));
         assert!(unknown.errors[0].message.contains("S07"));
     }
+
+    #[test]
+    fn scene_zero_lines_are_referenced_with_short_and_full_forms() {
+        // 最初の #paragraph より前の台詞は S00。短縮形はその中で解決する
+        let ok = check("[S00-L001] A:一\n[S00-L002] B(at=L001+100):二\n#paragraph[S01]\n[S01-L001] A(at=S00-L001+100):三\n");
+        assert!(ok.errors.is_empty(), "{:?}", messages(&ok.errors));
+        // S00 の短縮形は S01 の台詞を指さない
+        let bad = check("[S00-L001] A(at=L002):一\n#paragraph[S01]\n[S01-L002] B:二\n");
+        assert_eq!(bad.errors.len(), 1, "{:?}", messages(&bad.errors));
+        // S00 に台詞が無ければ S00 は存在しない
+        let none = check("#paragraph[S01]\n[S01-L001] A(at=S00-L001):一\n");
+        assert_eq!(none.errors.len(), 1, "{:?}", messages(&none.errors));
+    }
+
+    #[test]
+    fn se_before_first_paragraph_anchors_to_scene_zero() {
+        let ok = check("[S00-L001] A:一\n#se a.wav at=L001\n#paragraph[S01]\n[S01-L001] B:二\n");
+        assert!(ok.errors.is_empty(), "{:?}", messages(&ok.errors));
+        // S01 にしか無い番号は、S00 で書かれた #se の短縮形では見つからない
+        let bad = check("[S00-L001] A:一\n#se a.wav at=L002\n#paragraph[S01]\n[S01-L002] B:二\n");
+        assert_eq!(bad.errors.len(), 1, "{:?}", messages(&bad.errors));
+    }
 }

@@ -323,4 +323,17 @@ mod tests {
         assert_eq!(m.files[&want[1]], vec![tmp.path().join("S02_L001.wav")]);
         assert!(m.warnings.is_empty(), "{:?}", m.warnings);
     }
+
+    #[test]
+    fn digit_padding_does_not_matter_and_both_spellings_are_a_duplicate() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(tmp.path(), "S01_L1.wav");
+        let want = [LineId { scene: 1, line: 1 }];
+        let m = match_voice_files(tmp.path(), &want, false).unwrap();
+        assert_eq!(m.files[&want[0]], vec![tmp.path().join("S01_L1.wav")]);
+        // 桁数違いの2つは同じ台詞に対応し、既存の重複の規則(2ファイル以上)に掛かる
+        touch(tmp.path(), "S01_L0001.wav");
+        let m = match_voice_files(tmp.path(), &want, false).unwrap();
+        assert_eq!(m.files[&want[0]].len(), 2, "{:?}", m.files);
+    }
 }

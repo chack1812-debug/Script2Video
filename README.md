@@ -23,6 +23,7 @@ script2video build <台本.txt> [--voice-dir <収録フォルダ>] [--config <�
 cargo run --release -p s2v-cli -- number 第1話.txt
 
 # 2. 台詞ごとに収録する(ファイル名は台詞IDの - を _ にしたもの: S01_L003.wav。モノラル)
+#    台詞番号の桁数は問いません(S01_L1.wav も S01_L001.wav も同じ台詞)
 
 # 3. 音声・字幕・タイムラインを作る(出力は台本と同じフォルダ。収録は 台本フォルダ/voices/ に置く)
 cargo run --release -p s2v-cli -- build 第1話.txt
