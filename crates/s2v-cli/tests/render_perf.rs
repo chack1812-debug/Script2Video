@@ -18,27 +18,22 @@ const DISK_LIMIT: u64 = 2 * 1024 * 1024 * 1024;
 const HEADER: &str =
     "@scene 居間\n@pause\nsentence 0\ncast 0\nparagraph 0\n@cast\nA:田中,pan=-30\n\n@script\n";
 
-fn font_path() -> PathBuf {
-    Path::new(env!("CARGO_MANIFEST_DIR"))
-        .parent()
-        .unwrap()
-        .join("s2v-render/tests/fonts/test-vrt2.ttf")
+/// 同梱の config.toml(既定の設定)そのまま。既定のフォントが無い環境では、無いファイルを示して失敗する。
+fn config_text() -> String {
+    let text = include_str!("../../../config.toml").to_string();
+    let font = text
+        .lines()
+        .find_map(|l| l.strip_prefix("font_path = '"))
+        .and_then(|r| r.split('\'').next())
+        .expect("config.toml の font_path");
+    assert!(
+        Path::new(font).exists(),
+        "既定のフォント {font} がありません(性能試験は既定の設定で測ります)"
+    );
+    text
 }
 
-/// 同梱の config.toml(既定の設定)の `[render]` の font_path だけを、同梱のテスト用フォントに差し替えた設定。
-fn config_text(extra: &str) -> String {
-    let base = include_str!("../../../config.toml");
-    let a = base.find("\n[render]").expect("[render] 節");
-    let b = base.find("\n[prompts]").expect("[prompts] 節");
-    format!(
-        "{}\n[render]\nfont_path = '{}'\n{extra}\n{}",
-        &base[..a],
-        font_path().display(),
-        &base[b..]
-    )
-}
-
-/// 1.8 秒の収録(全体が音。トリムで短くならない)。
+/// 1.7 秒の収録(全体が音。トリムで短くならない)。
 fn write_voice(path: &Path) {
     let spec = hound::WavSpec {
         channels: 1,
@@ -47,7 +42,7 @@ fn write_voice(path: &Path) {
         sample_format: hound::SampleFormat::Int,
     };
     let mut w = hound::WavWriter::create(path, spec).unwrap();
-    for i in 0..(48_000 * 18 / 10) {
+    for i in 0..(48_000 * 17 / 10) {
         let v = 0.1 * (2.0 * std::f64::consts::PI * 440.0 * i as f64 / 48_000.0).sin();
         w.write_sample((v * 32_767.0).round() as i16).unwrap();
     }
@@ -113,8 +108,8 @@ struct Project {
     config: PathBuf,
 }
 
-/// 台本・収録・設定を書いて build を通す。素材は呼び出し側が `tracks/` に置く(`make_assets`)。
-fn project(body: &str, lines: usize, make_assets: impl FnOnce(&Path), extra: &str) -> Project {
+/// 台本・収録・設定を書いて build を通す。台本の長さは、末尾の `#pause` で `target_ms` ちょうど(±1 コマ以内)にする。素材は呼び出し側が `tracks/` に置く(`make_assets`)。
+fn project(body: &str, lines: usize, target_ms: i64, make_assets: impl FnOnce(&Path)) -> Project {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("台本 性能");
     let voices = dir.join("voices");
@@ -131,16 +126,51 @@ fn project(body: &str, lines: usize, make_assets: impl FnOnce(&Path), extra: &st
     }
     make_assets(&tracks);
     let config = dir.join("config.toml");
-    fs::write(&config, config_text(extra)).unwrap();
+    fs::write(&config, config_text()).unwrap();
+    let build = || {
+        let o = run_build(&BuildArgs {
+            script: script.clone(),
+            voice_dir: None,
+            config: Some(config.clone()),
+            no_cache: false,
+        });
+        assert!(o != Outcome::Failed, "build が失敗しました");
+        let text = fs::read_to_string(dir.join("timeline").join("timeline.json")).unwrap();
+        s2v_timeline::load_str(&text).unwrap().duration_ms
+    };
     let t = Instant::now();
-    let o = run_build(&BuildArgs {
-        script: script.clone(),
-        voice_dir: None,
-        config: Some(config.clone()),
-        no_cache: false,
-    });
-    assert!(o != Outcome::Failed, "build が失敗しました");
-    println!("build: {:.1} 秒", t.elapsed().as_secs_f64());
+    let d = build();
+    assert!(
+        d <= target_ms,
+        "台詞だけで {d} ms あり、目標 {target_ms} ms を超えています"
+    );
+    // 末尾の #pause で目標の長さにそろえる(#pause の長さがそのまま足されるとは限らないので、ずれを見て直す)
+    let base = fs::read_to_string(&script).unwrap();
+    let mut pause = target_ms - d;
+    let mut d = d;
+    for _ in 0..3 {
+        fs::write(
+            &script,
+            format!(
+                "{base}#pause {pause}
+"
+            ),
+        )
+        .unwrap();
+        d = build();
+        if (d - target_ms).abs() <= 34 {
+            break;
+        }
+        pause += target_ms - d;
+    }
+    println!(
+        "build: {:.1} 秒、台本の長さ {d} ms",
+        t.elapsed().as_secs_f64()
+    );
+    assert!(
+        (d - target_ms).abs() <= 34,
+        "台本の長さ {d} ms が目標 {target_ms} ms と 1 コマ以上ずれています"
+    );
     Project {
         _tmp: tmp,
         dir,
@@ -181,10 +211,11 @@ fn png_1080p(path: &Path) {
     fs::write(path, pm.encode_png().unwrap()).unwrap();
 }
 
-fn run_a(lines: usize, cuts: usize, check: bool) {
+fn run_a(lines: usize, cuts: usize, target_ms: i64, check: bool) {
     let p = project(
         &script_text(lines, cuts, "image"),
         lines,
+        target_ms,
         |tracks| {
             png_1080p(&tracks.join("S01.png"));
             for n in 2..=cuts {
@@ -195,7 +226,6 @@ fn run_a(lines: usize, cuts: usize, check: bool) {
                 .unwrap();
             }
         },
-        "",
     );
     measure(&p, "(a) 多数のカット", check);
 }
@@ -204,6 +234,7 @@ fn run_b(lines: usize, video_secs: u32, check: bool) {
     let p = project(
         &script_text(lines, 1, "video"),
         lines,
+        video_secs as i64 * 1000,
         |tracks| {
             let secs = video_secs.to_string();
             ffmpeg(
@@ -225,25 +256,23 @@ fn run_b(lines: usize, video_secs: u32, check: bool) {
                 ],
             );
         },
-        "",
     );
     measure(&p, "(b) 長い動画の素材", check);
 }
 
 /// 本番の試験の生成部分(台本・収録・素材・設定)が通ることを小さな規模で確かめる。
+// 既定のフォントが必要で、本番の試験と同じく手動で動かす(生成部分の確認用)
 #[test]
+#[ignore = "既定の設定(既定のフォント)が必要な、小規模の生成確認"]
 fn generator_smoke() {
-    if std::env::var("S2V_SKIP_FFMPEG_TESTS").as_deref() == Ok("1") {
-        return;
-    }
-    run_a(6, 3, false);
+    run_a(6, 3, 12_000, false);
     run_b(4, 8, false);
 }
 
 #[test]
 #[ignore = "手動の性能試験(最大で 30 分以上かかる)"]
 fn perf_many_cuts() {
-    run_a(LINES, 200, true);
+    run_a(LINES, 200, 1_800_000, true);
 }
 
 #[test]

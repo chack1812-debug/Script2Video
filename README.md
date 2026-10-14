@@ -70,7 +70,7 @@ script2video render 第1話.txt
 script2video render 第1話.txt --config config.toml
 ```
 
-前提: ffmpeg と ffprobe が 6.0 以上で、PATH にある(または `[render] ffmpeg` / `ffprobe` で場所を指定)。git の日付版(2023 年以降)も受け付ける。版を読み取れないときは警告を出して続ける。`build` を先に実行し、台本・収録を変えたら `build` をやり直す(台本や音声が `timeline/timeline.json` と食い違うと失敗する)。
+前提: ffmpeg(6.0 以上)と ffprobe が PATH にある(または `[render] ffmpeg` / `ffprobe` で場所を指定)。版を検査するのは ffmpeg だけで、git の日付版(2023 年以降)も受け付ける。ffmpeg の版を読み取れないときは警告を出して続ける。ffprobe は起動できることだけを確かめる。`build` を先に実行し、収録や台本を変えたら `build` をやり直す。台本だけが `build` の後に変わったときは、警告(終了コード 1)を出して続ける。`full_dialogue.wav` が `timeline.json` と別の `build` のもの、`timeline.json` の版が違う、台本の長さが 0 または 24 時間超のときは失敗する。
 
 素材は台本フォルダの `tracks/` に置く。カットごとに 1 つで、名前はカット ID から決まる。シーンの最初のカット(`S01-C01`)は `S01`、それ以降は `S01_C02` のように `_C番号` を付ける。
 
@@ -92,7 +92,7 @@ tracks/S01_C02.mp4     S01-C02 の動画
 - 素材が足りない・同じカットに複数ある(拡張子違いを含む)・画像のカットに動画が置かれているなど種類が台本と違う
 - 動画の素材が HDR や BT.2020 など、BT.709 以外の色で明示されている
 - `font_path` のフォントが読めない・縦書きに必要な機能が無い
-- 台本・音声が `timeline.json` と食い違う、または版が違う(`build` をやり直す)
+- `full_dialogue.wav` が `timeline.json` と別の `build` のもの、`timeline.json` の版が違う、台本の長さが 0 または 24 時間超(`build` をやり直す)
 - 設定値の範囲外、`bubbles.json` の誤り、ffmpeg が使えない・出力の検査に通らない
 
 `config.toml` の `[render]` の主な設定(全項目は同梱の `config.toml` を参照):
