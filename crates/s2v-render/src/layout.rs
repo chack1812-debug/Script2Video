@@ -391,6 +391,92 @@ mod tests {
             .all(|u| u.glyphs[0].transform == GlyphTransform::Rotated));
     }
 
+    /// フォントの表から、字形 id の横送り(px)と asc+desc(px)を求める(組版の実装とは別の経路)
+    fn metrics(f: &FontFace) -> (impl Fn(u16) -> f32 + '_, f32) {
+        let s = 40.0 / f32::from(f.units_per_em);
+        let tf = rustybuzz::ttf_parser::Face::parse(f.data(), f.index()).unwrap();
+        let adv = move |gid: u16| {
+            f32::from(
+                tf.glyph_hor_advance(rustybuzz::ttf_parser::GlyphId(gid))
+                    .unwrap(),
+            ) * s
+        };
+        let asc_desc = (i32::from(f.ascender) + i32::from(f.descender)) as f32 * s;
+        (adv, asc_desc)
+    }
+
+    #[test]
+    fn tate_chu_yoko_positions_scale_and_advance_follow_font_metrics() {
+        let f = face();
+        let c = ctx(&f);
+        let (adv, asc_desc) = metrics(&f);
+        // 00〜99 のすべてで、表から求めた期待値と一致することを調べる
+        let mut shrunk = 0;
+        let mut kept = 0;
+        for n in 0..100 {
+            let t = format!("{n:02}");
+            let u = &shape_units(&c, &t)[0];
+            assert_eq!(u.glyphs.len(), 2, "{t}");
+            let (a0, a1) = (adv(u.glyphs[0].glyph_id), adv(u.glyphs[1].glyph_id));
+            let w = a0 + a1;
+            let want_scale = (40.0 / w).min(1.0);
+            let GlyphTransform::Tcy { scale_x } = u.glyphs[0].transform else {
+                panic!("{t}")
+            };
+            assert!(
+                (scale_x - want_scale).abs() < 1e-4,
+                "{t}: {scale_x} {want_scale}"
+            );
+            // 単位の高さは常に 1 em。組全体を 1 em に収めて左右中央に置く
+            assert!((u.height - 40.0).abs() < 1e-3, "{t}");
+            let left = (40.0 - w * want_scale) / 2.0;
+            let want_y = (40.0 + asc_desc) / 2.0;
+            assert!(
+                (u.glyphs[0].x - left).abs() < 1e-3,
+                "{t}: {}",
+                u.glyphs[0].x
+            );
+            assert!(
+                (u.glyphs[1].x - (left + a0 * want_scale)).abs() < 1e-3,
+                "{t}: {}",
+                u.glyphs[1].x
+            );
+            assert!((u.glyphs[0].y - want_y).abs() < 1e-3, "{t}");
+            assert!((u.glyphs[1].y - want_y).abs() < 1e-3, "{t}");
+            if want_scale < 1.0 {
+                shrunk += 1;
+                // 縮小後の幅はちょうど 1 em で、左端は 0
+                assert!(u.glyphs[0].x.abs() < 1e-3, "{t}");
+                assert!(
+                    (a0 * want_scale + a1 * want_scale - 40.0).abs() < 1e-3,
+                    "{t}"
+                );
+            } else {
+                kept += 1;
+            }
+        }
+        // テスト用フォントでは数字の組がすべて 1 em を超えるので縮小される
+        assert!(shrunk > 0, "shrunk={shrunk} kept={kept}");
+    }
+
+    #[test]
+    fn rotated_units_have_font_advance_height_and_fixed_offsets() {
+        let f = face();
+        let c = ctx(&f);
+        let (adv, asc_desc) = metrics(&f);
+        let units = shape_units(&c, "AB");
+        assert_eq!(units.len(), 2);
+        for u in &units {
+            assert_eq!(u.glyphs.len(), 1);
+            let g = &u.glyphs[0];
+            assert_eq!(g.transform, GlyphTransform::Rotated);
+            // 単位の高さは横送り、単位の中の原点は y = 0。x は列の中央から asc+desc の半分を引いた位置
+            assert!((u.height - adv(g.glyph_id)).abs() < 1e-3, "{}", u.text);
+            assert!(g.y.abs() < 1e-3, "{}", u.text);
+            assert!((g.x - (20.0 - asc_desc / 2.0)).abs() < 1e-3, "{}", u.text);
+        }
+    }
+
     #[test]
     fn latin_word_is_rotated_per_grapheme() {
         let f = face();

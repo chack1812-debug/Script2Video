@@ -269,10 +269,9 @@ mod tests {
         big.size = (3000, 2000);
         let (out, w) = auto_layout(&[big], &BTreeMap::new(), &params());
         let b = &out["S01-L001"];
-        assert!(
-            b.x >= 0 && b.y >= 0 && b.x as u32 + b.w <= 1920 && b.y as u32 + b.h <= 1080,
-            "{b:?}"
-        );
+        // 画面から余白(40)を除いた 1840x1000 に切り詰め、左上は (40, 40)
+        assert_eq!((b.w, b.h), (1840, 1000), "{b:?}");
+        assert_eq!((b.x, b.y), (40, 40), "{b:?}");
         assert!(w.iter().any(|m| m.contains("S01-L001")), "{w:?}");
     }
 

@@ -16,13 +16,26 @@ const MIN_GIT_YEAR: u32 = 2023;
 /// `ffmpeg -version` の1行目を判定する。
 /// "ffmpeg version 6.1.1 …"・"n7.1"・git の日付版 "2026-03-26-git-…"(2023 年以降)を受ける。
 pub fn check_version(first_line: &str) -> VersionCheck {
-    let unknown = || VersionCheck::Unknown(format!("ffmpeg の版を読み取れません: {first_line}"));
-    let Some(rest) = first_line.trim().strip_prefix("ffmpeg version ") else {
+    check_tool_version("ffmpeg", first_line)
+}
+
+/// `ffprobe -version` の1行目を判定する(規則は `check_version` と同じ。接頭辞は "ffprobe version ")。
+pub fn check_ffprobe_version(first_line: &str) -> VersionCheck {
+    check_tool_version("ffprobe", first_line)
+}
+
+fn check_tool_version(program: &str, first_line: &str) -> VersionCheck {
+    let unknown = || VersionCheck::Unknown(format!("{program} の版を読み取れません: {first_line}"));
+    let Some(rest) = first_line
+        .trim()
+        .strip_prefix(program)
+        .and_then(|r| r.strip_prefix(" version "))
+    else {
         return unknown();
     };
     let token = rest.split_whitespace().next().unwrap_or("");
     let too_old = |need: String| {
-        VersionCheck::TooOld(format!("ffmpeg が古すぎます({token})。{need}が必要です"))
+        VersionCheck::TooOld(format!("{program} が古すぎます({token})。{need}が必要です"))
     };
     // (c) 日付の git 版 YYYY-MM-DD-git-…
     if let Some(year) = parse_git_date(token) {
@@ -342,6 +355,31 @@ mod tests {
             check_version("ffmpeg version 2024-02-29-git-x Copyright"),
             VersionCheck::Ok
         );
+    }
+
+    #[test]
+    fn ffprobe_version_parsing() {
+        assert_eq!(
+            check_ffprobe_version("ffprobe version 6.1.1-full_build-www.gyan.dev Copyright"),
+            VersionCheck::Ok
+        );
+        assert_eq!(
+            check_ffprobe_version("ffprobe version 2026-03-26-git-fd9f1e9c52-full_build"),
+            VersionCheck::Ok
+        );
+        match check_ffprobe_version("ffprobe version 5.1.2 Copyright") {
+            VersionCheck::TooOld(m) => assert!(m.contains("ffprobe"), "{m}"),
+            v => panic!("{v:?}"),
+        }
+        // 別のプログラム名の行は判定できない
+        assert!(matches!(
+            check_ffprobe_version("ffmpeg version 6.1.1"),
+            VersionCheck::Unknown(_)
+        ));
+        assert!(matches!(
+            check_version("ffprobe version 6.1.1"),
+            VersionCheck::Unknown(_)
+        ));
     }
 
     #[test]

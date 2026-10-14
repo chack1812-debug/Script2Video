@@ -99,8 +99,13 @@ pub fn video_color_input(s: &Stream) -> Result<(String, String), String> {
         }
     };
     let range = match explicit(&s.color_range) {
+        None | Some("tv") => "tv",
         Some("pc") => "pc",
-        _ => "tv",
+        Some(other) => {
+            return Err(format!(
+                "素材の色の範囲 {other} には対応していません(tv か pc のみ)"
+            ));
+        }
     };
     Ok((matrix.to_string(), range.to_string()))
 }
@@ -342,6 +347,28 @@ mod tests {
         s.color_primaries = None;
         s.color_space = Some("bt2020nc".into());
         assert!(video_color_input(&s).is_err());
+    }
+
+    #[test]
+    fn video_color_range_accepts_only_tv_pc_or_absent() {
+        let mut s = Stream {
+            codec_type: Some("video".into()),
+            ..Default::default()
+        };
+        for (v, want) in [
+            (None, "tv"),
+            (Some("unknown"), "tv"),
+            (Some("tv"), "tv"),
+            (Some("pc"), "pc"),
+        ] {
+            s.color_range = v.map(String::from);
+            assert_eq!(video_color_input(&s).unwrap().1, want, "{v:?}");
+        }
+        for bad in ["jpeg", "mpeg", "full", "limited"] {
+            s.color_range = Some(bad.into());
+            let e = video_color_input(&s).unwrap_err();
+            assert!(e.contains(bad), "{e}");
+        }
     }
 
     #[test]

@@ -25,8 +25,8 @@ use s2v_render::ItemKind;
 use s2v_timeline::{Timeline, VisualKind};
 use s2v_video::audio_check::{check_audio, check_av_length, decode_args, f32le, is_silent};
 use s2v_video::ffmpeg::{
-    check_version, concat_args, concat_list, cut_args, mux_args, Background, EncodeSettings, Fit,
-    VersionCheck,
+    check_ffprobe_version, check_version, concat_args, concat_list, cut_args, mux_args, Background,
+    EncodeSettings, Fit, VersionCheck,
 };
 use s2v_video::frames::{overlay_list, plan_cuts, total_frames, CutPlan, ShownItem};
 use s2v_video::probe::{
@@ -92,20 +92,20 @@ fn render(args: &RenderArgs) -> anyhow::Result<Outcome> {
     // 2. Process.log(追記)
     let mut log = ProcLog::append(&dir.join("Process.log"), "render")?;
     let result = render_main(args, &config.render, &dir, &mut log);
-    let outcome = match result {
-        Ok(()) if log.warning_count() > 0 => Outcome::Warnings,
-        Ok(()) => Outcome::Ok,
+    match result {
+        // 成功: output.mp4 は置き換え済み。ログの書込み確認は置き換えの前に済ませてあるので、
+        // ここで失敗扱いにしない(置き換え後の結果を覆さない)
+        Ok(()) if log.warning_count() > 0 => Ok(Outcome::Warnings),
+        Ok(()) => Ok(Outcome::Ok),
         Err(msg) => {
             log.error(&msg);
             log.error("output.mp4 は変更していません");
-            Outcome::Failed
+            if let Err(e) = log.check() {
+                eprintln!("[ERROR] {e:#}");
+            }
+            Ok(Outcome::Failed)
         }
-    };
-    if let Err(e) = log.check() {
-        eprintln!("[ERROR] {e:#}");
-        return Ok(Outcome::Failed);
     }
-    Ok(outcome)
 }
 
 /// 台本の項目(吹き出しまたはト書き)。時刻は `effective_times` を通した表示時刻。
@@ -313,9 +313,15 @@ fn tool_version(label: &str, exe: &str) -> Result<String, String> {
         .to_string())
 }
 
-/// `ffmpeg -version` の 1 行目で処理を進めてよいか決める。古ければ Err、読み取れなければ警告を足す。
-fn gate_version(first_line: &str, warnings: &mut Vec<String>) -> Result<(), String> {
-    match check_version(first_line) {
+/// `-version` の 1 行目で処理を進めてよいか決める。古ければ Err、読み取れなければ警告を足す。
+/// `probe` が true なら ffprobe の行として判定する。
+fn gate_version(first_line: &str, probe: bool, warnings: &mut Vec<String>) -> Result<(), String> {
+    let r = if probe {
+        check_ffprobe_version(first_line)
+    } else {
+        check_version(first_line)
+    };
+    match r {
         VersionCheck::Ok => Ok(()),
         VersionCheck::TooOld(m) => Err(m),
         VersionCheck::Unknown(m) => {
@@ -325,10 +331,10 @@ fn gate_version(first_line: &str, warnings: &mut Vec<String>) -> Result<(), Stri
     }
 }
 
-/// ffmpeg・ffprobe を確かめる(起動・版)。ffmpeg の版の警告は `warnings` に足す。
+/// ffmpeg・ffprobe を確かめる(起動・版)。版の警告は `warnings` に足す。
 fn check_tools(ffmpeg: &str, ffprobe: &str, warnings: &mut Vec<String>) -> Result<(), String> {
-    gate_version(&tool_version("ffmpeg", ffmpeg)?, warnings)?;
-    tool_version("ffprobe", ffprobe)?;
+    gate_version(&tool_version("ffmpeg", ffmpeg)?, false, warnings)?;
+    gate_version(&tool_version("ffprobe", ffprobe)?, true, warnings)?;
     Ok(())
 }
 
@@ -422,6 +428,7 @@ fn place_items(
         h: cfg.height,
     };
     let mut placed: BTreeMap<String, Placed> = BTreeMap::new();
+    let mut manual_clipped: BTreeSet<String> = BTreeSet::new();
     let mut layout_items = Vec::new();
     for it in items {
         let ctx = render_ctx(face, cfg, it.kind);
@@ -439,7 +446,20 @@ fn place_items(
                         p.w,
                         p.h
                     ));
-                    expand_to_min(p, min, canvas)
+                    let mut q = expand_to_min(p, min, canvas);
+                    // 広げても画面に入らないときは画面の大きさに切り詰め、枠の中で切って描く
+                    if q.w > canvas.w || q.h > canvas.h {
+                        q.w = q.w.min(canvas.w);
+                        q.h = q.h.min(canvas.h);
+                        q.x = q.x.clamp(0, (canvas.w - q.w) as i32);
+                        q.y = q.y.clamp(0, (canvas.h - q.h) as i32);
+                        warnings.push(format!(
+                            "{}: 文字が画面に収まらないので、画面の大きさ {}x{} に切り詰めます",
+                            it.id, q.w, q.h
+                        ));
+                        manual_clipped.insert(it.id.clone());
+                    }
+                    q
                 };
                 let size = (p.w, p.h);
                 placed.insert(it.id.clone(), p);
@@ -482,7 +502,7 @@ fn place_items(
     );
     warnings.extend(auto_warnings);
     // 自動配置が画面の大きさに切り詰めた項目(min_size より小さく置かれたもの)
-    let clipped: BTreeSet<String> = layout_items
+    let mut clipped: BTreeSet<String> = layout_items
         .iter()
         .filter(|li| {
             auto.get(&li.id)
@@ -490,6 +510,7 @@ fn place_items(
         })
         .map(|li| li.id.clone())
         .collect();
+    clipped.extend(manual_clipped);
     placed.extend(auto);
     (placed, clipped)
 }
@@ -849,14 +870,29 @@ fn render_main(
     }
 
     // 13. 置き換え
-    let out = dir.join("output.mp4");
-    std::fs::rename(seg.join("output.tmp.mp4"), &out)
-        .map_err(|e| format!("output.mp4 に置き換えられません: {}: {e}", out.display()))?;
-    log.info(format!(
-        "output.mp4 を書き出しました({total} コマ、{:.2} 秒)",
-        total as f64 / f64::from(cfg.fps)
-    ));
-    Ok(())
+    commit_output(
+        log,
+        &seg.join("output.tmp.mp4"),
+        &dir.join("output.mp4"),
+        &format!(
+            "output.mp4 を書き出しました({total} コマ、{:.2} 秒)",
+            total as f64 / f64::from(cfg.fps)
+        ),
+    )
+}
+
+/// 成功の記録を先に書き、ログに書けていることを確かめてから output.mp4 へ置き換える。
+/// 置き換えの後には失敗しうる処理を何も置かない(置き換え後に失敗扱いにならない)。
+fn commit_output(
+    log: &mut ProcLog,
+    tmp: &Path,
+    out: &Path,
+    success_msg: &str,
+) -> Result<(), String> {
+    log.info(success_msg);
+    log.check().map_err(|e| format!("{e:#}"))?;
+    std::fs::rename(tmp, out)
+        .map_err(|e| format!("output.mp4 に置き換えられません: {}: {e}", out.display()))
 }
 
 /// ffmpeg を `jobs` 個まで並列に起動する。失敗が出たら新しい起動をやめる。
@@ -1173,18 +1209,111 @@ mod tests {
     }
 
     #[test]
+    fn manual_item_too_big_for_the_screen_is_clipped_inside_it() {
+        let face = FontFace::load(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../s2v-render/tests/fonts/test-vrt2.ttf"),
+            0,
+        )
+        .unwrap();
+        let cfg = RenderConfig {
+            width: 320,
+            height: 180,
+            ..RenderConfig::default()
+        };
+        let items = vec![Item {
+            id: "S01-L001".into(),
+            kind: ItemKind::Bubble,
+            text: "あ".repeat(500),
+            start_ms: 0,
+            end_ms: 1000,
+            order: 0,
+        }];
+        let manual: BTreeMap<String, Placed> = [(
+            "S01-L001".to_string(),
+            Placed {
+                kind: ItemKind::Bubble,
+                x: 200,
+                y: 100,
+                w: 60,
+                h: 60,
+                tail: None,
+                start_offset_ms: 0,
+                end_offset_ms: 0,
+            },
+        )]
+        .into();
+        let mut w = Vec::new();
+        let (placed, clipped) = place_items(&items, &manual, &cfg, &face, &mut w);
+        let p = &placed["S01-L001"];
+        assert!(p.x >= 0 && p.y >= 0, "{p:?}");
+        assert!(p.x as u32 + p.w <= 320 && p.y as u32 + p.h <= 180, "{p:?}");
+        assert!(clipped.contains("S01-L001"), "{clipped:?}");
+        assert!(w.iter().any(|m| m.contains("画面")), "{w:?}");
+
+        let files: BTreeMap<Vec<String>, String> =
+            [(vec!["S01-L001".to_string()], "ov_0001.png".to_string())].into();
+        let d = tempfile::tempdir().unwrap();
+        write_overlays(d.path(), &files, &items, &placed, &clipped, &cfg, &face).unwrap();
+        assert!(d.path().join("ov_0001.png").exists());
+    }
+
+    struct FailingWriter;
+    impl std::io::Write for FailingWriter {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("書き込み失敗"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn commit_output_does_not_replace_when_the_log_cannot_be_written() {
+        let d = tempfile::tempdir().unwrap();
+        let (tmp, out) = (d.path().join("t.mp4"), d.path().join("output.mp4"));
+        std::fs::write(&tmp, "new").unwrap();
+        std::fs::write(&out, "old").unwrap();
+        let mut log = ProcLog::from_writer(Box::new(FailingWriter));
+        let e = commit_output(&mut log, &tmp, &out, "ok").unwrap_err();
+        assert!(e.contains("Process.log"), "{e}");
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "old");
+        assert!(tmp.exists());
+    }
+
+    #[test]
+    fn commit_output_replaces_and_reports_rename_failure() {
+        let d = tempfile::tempdir().unwrap();
+        let (tmp, out) = (d.path().join("t.mp4"), d.path().join("output.mp4"));
+        std::fs::write(&tmp, "new").unwrap();
+        std::fs::write(&out, "old").unwrap();
+        let mut log = ProcLog::from_writer(Box::new(Vec::<u8>::new()));
+        commit_output(&mut log, &tmp, &out, "ok").unwrap();
+        assert_eq!(std::fs::read_to_string(&out).unwrap(), "new");
+        // 置き換え元が無ければ Err
+        let e = commit_output(&mut log, &tmp, &out, "ok").unwrap_err();
+        assert!(e.contains("置き換えられません"), "{e}");
+    }
+
+    #[test]
     fn version_check_gates_the_run() {
         let mut w = Vec::new();
-        assert!(gate_version("ffmpeg version 5.1.2 Copyright", &mut w).is_err());
-        assert!(gate_version("ffmpeg version 6.1.1 Copyright", &mut w).is_ok());
+        assert!(gate_version("ffmpeg version 5.1.2 Copyright", false, &mut w).is_err());
+        assert!(gate_version("ffmpeg version 6.1.1 Copyright", false, &mut w).is_ok());
         assert!(gate_version(
             "ffmpeg version 2026-03-26-git-fd9f1e9c52-full_build",
+            false,
             &mut w
         )
         .is_ok());
         assert!(w.is_empty());
-        assert!(gate_version("ffmpeg version N-12345-gabcdef", &mut w).is_ok());
+        assert!(gate_version("ffmpeg version N-12345-gabcdef", false, &mut w).is_ok());
         assert_eq!(w.len(), 1, "{w:?}");
+        // ffprobe も同じ規則
+        assert!(gate_version("ffprobe version 5.1.2 Copyright", true, &mut w).is_err());
+        assert!(gate_version("ffprobe version 7.0 Copyright", true, &mut w).is_ok());
+        assert!(gate_version("ffprobe version N-1-gabc", true, &mut w).is_ok());
+        assert_eq!(w.len(), 2, "{w:?}");
     }
 
     #[test]
