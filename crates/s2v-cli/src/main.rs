@@ -31,6 +31,13 @@ enum Command {
         #[arg(long)]
         no_cache: bool,
     },
+    /// 素材・吹き出し・ト書き・音声を合成して output.mp4 を作る
+    Render {
+        script: PathBuf,
+        /// 設定ファイル(省略時は同梱の既定設定)
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -48,6 +55,9 @@ fn main() -> ExitCode {
             config,
             no_cache,
         }),
+        Command::Render { script, config } => {
+            s2v_cli::run_render(&s2v_cli::RenderArgs { script, config })
+        }
     };
     ExitCode::from(outcome.code())
 }
