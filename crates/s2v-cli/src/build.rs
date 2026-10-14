@@ -12,6 +12,7 @@ use s2v_audio::AudioProcessor;
 use s2v_core::ids::LineId;
 use s2v_core::placement::{flatten, place, LineSource, MissingReason};
 use s2v_core::time::{ceil_ms, floor_ms};
+use s2v_core::visual_timeline::layout_visuals;
 use s2v_core::voices::match_voice_files;
 use s2v_core::{validate, Config, Scene, ScriptItem, ScriptParser};
 use s2v_export::fcpxml::render_fcpxml;
@@ -97,7 +98,10 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
     }
 
     // 2. 台本
-    let text = std::fs::read_to_string(&args.script).with_context(|| {
+    let script_bytes = std::fs::read(&args.script)
+        .with_context(|| format!("台本を読めません: {}", args.script.display()))?;
+    let script_sha256 = sha256_hex(&script_bytes);
+    let text = String::from_utf8(script_bytes).with_context(|| {
         format!(
             "台本を読めません(UTF-8 で保存してください): {}",
             args.script.display()
@@ -133,6 +137,7 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
         scenes: &scenes,
         script_warnings: &script_warnings,
         stem: &stem,
+        script_sha256: &script_sha256,
     };
     Ok(run_after_commit(
         args, &config, &job, &out_dir, &voice_dir, &mut log,
@@ -145,6 +150,8 @@ struct Job<'a> {
     script_warnings: &'a [String],
     /// 台本のファイル名(拡張子なし。FCPXML のプロジェクト名)
     stem: &'a str,
+    /// 台本ファイルのバイト列の SHA-256(timeline.json に記録する)
+    script_sha256: &'a str,
 }
 
 /// コミットポイント以降を実行する。失敗(Process.log に書けない場合を含む)は
@@ -230,6 +237,7 @@ fn produce(
         scenes,
         script_warnings,
         stem,
+        script_sha256,
     } = *job;
     // コミットポイント: 前回の成果物が古いまま残らないよう、新しく作る前に消す
     remove_final_artifacts(out_dir)
@@ -385,7 +393,14 @@ fn produce(
     write_f32_stereo(&tracks_dir.join("dialogue.wav"), &mixed.dialogue)?;
     write_f32_stereo(&tracks_dir.join("bgm.wav"), &mixed.bgm)?;
     write_f32_stereo(&tracks_dir.join("se.wav"), &mixed.se)?;
-    write_i24_stereo(&out_dir.join("full_dialogue.wav"), &mixed.master)?;
+    let dialogue_path = out_dir.join("full_dialogue.wav");
+    write_i24_stereo(&dialogue_path, &mixed.master)?;
+    let audio_sha256 = sha256_hex(&std::fs::read(&dialogue_path).with_context(|| {
+        format!(
+            "full_dialogue.wav を読み直せません: {}",
+            dialogue_path.display()
+        )
+    })?);
     let total = mixed.master.len() as i64;
 
     // 9. timeline.json・字幕・FCPXML
@@ -421,10 +436,17 @@ fn produce(
     let timeline_dir = out_dir.join("timeline");
     std::fs::create_dir_all(&timeline_dir)
         .with_context(|| format!("timeline/ を作れません: {}", timeline_dir.display()))?;
+    let (visuals, visual_warnings) = layout_visuals(&placement.scenes, ceil_ms(total));
+    for w in &visual_warnings {
+        log.warn(w);
+    }
     write_timeline_json(
         &timeline_dir.join("timeline.json"),
         &TimelineInput {
             script: file_name(&args.script),
+            script_sha256: script_sha256.to_string(),
+            audio_sha256,
+            visuals: &visuals,
             duration_samples: total,
             target_lufs: config.normalize.target_lufs,
             casts: casts.into_values().collect(),
@@ -654,6 +676,7 @@ A:田中
                 scenes: &scenes,
                 script_warnings: &[],
                 stem: "ep",
+                script_sha256: &"0".repeat(64),
             },
             &out,
             &voices,

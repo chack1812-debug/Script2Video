@@ -94,7 +94,7 @@ fn golden_timeline_and_outputs() {
 
     let out = f.dir.clone();
     let v = read_json(&out.join("timeline").join("timeline.json"));
-    assert_eq!(v["schema_version"], 2);
+    assert_eq!(v["schema_version"], 3);
     assert_eq!(v["script"], "第1話.txt");
     let ms = |i: usize, k: &str| v["lines"][i][k].as_i64().unwrap();
     assert_eq!((ms(0, "start_ms"), ms(0, "end_ms")), (0, 1_110));
@@ -126,7 +126,23 @@ fn golden_timeline_and_outputs() {
         (Some(3_720), Some(5_720))
     );
     assert_eq!(v["scenes"][2]["id"], "S03");
-    assert_eq!(v["scenes"][0]["visual"]["text"], "朝の居間。");
+    assert_eq!(v["scenes"][0]["cuts"][0]["visual"]["text"], "朝の居間。");
+    // カットの区間: S01 [0, 3720)、S02 [3720, 6720)、S03 [6720, duration)
+    let cut = |s: usize| {
+        (
+            v["scenes"][s]["cuts"][0]["start_ms"].as_i64().unwrap(),
+            v["scenes"][s]["cuts"][0]["end_ms"].as_i64().unwrap(),
+        )
+    };
+    assert_eq!(cut(0), (0, 3_720));
+    assert_eq!(cut(1), (3_720, 6_720));
+    assert_eq!(cut(2).0, 6_720);
+    assert_eq!(cut(2).1, v["duration_ms"].as_i64().unwrap());
+    // 共通の型で読めて、検証を通る
+    s2v_timeline::load_str(
+        &fs::read_to_string(out.join("timeline").join("timeline.json")).unwrap(),
+    )
+    .unwrap();
     assert_eq!(v["takes"][0]["trims"][0]["head_ms"], 170);
     assert_eq!(v["takes"][0]["trims"][0]["tail_ms"], 220);
     assert_eq!(v["takes"][2]["files"].as_array().unwrap().len(), 0);

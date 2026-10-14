@@ -1,4 +1,5 @@
-//! `timeline.json` v2(設計書 §6)。後続工程との契約。
+//! `timeline.json` v3(設計書 §6、映像工程設計書 §3.5)。後続工程との契約。
+//! 型と検証は s2v-timeline にあり、ここでは組み立てて検証してから書き出す。
 
 use std::collections::HashMap;
 use std::path::Path;
@@ -6,8 +7,11 @@ use std::path::Path;
 use s2v_core::ids::{format_scene_id, LineId};
 use s2v_core::placement::{MissingReason, PlacedEvent, Placement};
 use s2v_core::time::{ceil_ms, floor_ms};
-use s2v_core::VisualKind;
-use serde::Serialize;
+use s2v_core::visual_timeline::SceneSpans;
+use s2v_timeline::{
+    CastEntry, CutEntry, EventEntry, LineEntry, Normalize, NoteEntry, SceneEntry, TakeEntry,
+    Timeline, Trim, Visual,
+};
 
 #[derive(Debug, Clone)]
 pub struct CastInfo {
@@ -39,109 +43,37 @@ pub struct LineAudioInfo {
 
 pub struct TimelineInput<'a> {
     pub script: String,
+    /// 台本ファイルのバイト列の SHA-256(小文字16進)
+    pub script_sha256: String,
+    /// `full_dialogue.wav` のバイト列の SHA-256(小文字16進)
+    pub audio_sha256: String,
     pub duration_samples: i64,
     pub target_lufs: f64,
     pub casts: Vec<CastInfo>,
     pub placement: &'a Placement,
     pub takes: Vec<TakeInfo>,
     pub line_audio: &'a HashMap<LineId, LineAudioInfo>,
+    /// `layout_visuals` の結果(`placement.scenes` と同じ並び)
+    pub visuals: &'a [SceneSpans],
 }
 
-#[derive(Serialize)]
-struct TimelineDoc {
-    schema_version: u32,
-    script: String,
-    sample_rate: u32,
-    duration_ms: i64,
-    normalize: NormalizeDoc,
-    cast: Vec<CastDoc>,
-    scenes: Vec<SceneDoc>,
-    takes: Vec<TakeDoc>,
-    lines: Vec<LineDoc>,
-    events: Vec<EventDoc>,
+fn reason(r: MissingReason) -> s2v_timeline::Reason {
+    use s2v_timeline::Reason as R;
+    match r {
+        MissingReason::NoFile => R::NoFile,
+        MissingReason::Duplicate => R::Duplicate,
+        MissingReason::Unreadable => R::Unreadable,
+        MissingReason::Silent => R::Silent,
+        MissingReason::BadFormat => R::BadFormat,
+        MissingReason::Unmeasurable => R::Unmeasurable,
+    }
 }
 
-#[derive(Serialize)]
-struct NormalizeDoc {
-    target_lufs: f64,
-}
-
-#[derive(Serialize)]
-struct CastDoc {
-    name: String,
-    speaker: String,
-    appearance: Option<String>,
-}
-
-#[derive(Serialize)]
-struct VisualDoc {
-    text: String,
-    kind: Option<VisualKind>,
-}
-
-#[derive(Serialize)]
-struct SceneDoc {
-    id: String,
-    name: Option<String>,
-    index: usize,
-    silent: bool,
-    start_ms: i64,
-    end_ms: i64,
-    visual: Option<VisualDoc>,
-}
-
-#[derive(Serialize)]
-struct TrimDoc {
-    track: Option<String>,
-    head_ms: i64,
-    tail_ms: i64,
-}
-
-#[derive(Serialize)]
-struct TakeDoc {
-    id: String,
-    tracks: Vec<Option<String>>,
-    files: Vec<String>,
-    trims: Option<Vec<TrimDoc>>,
-    missing: bool,
-    reason: Option<MissingReason>,
-}
-
-#[derive(Serialize)]
-struct LineDoc {
-    id: String,
-    scene: String,
-    cast: String,
-    text: String,
-    start_ms: i64,
-    end_ms: i64,
-    take: String,
-    track: Option<String>,
-    measured_lufs: Option<f64>,
-    requested_gain_db: Option<f64>,
-    norm_gain_db: Option<f64>,
-    norm_clamped: Option<bool>,
-    src_start_ms: Option<i64>,
-    src_end_ms: Option<i64>,
-    missing: bool,
-    reason: Option<MissingReason>,
-}
-
-#[derive(Serialize)]
-#[serde(tag = "type", rename_all = "snake_case")]
-enum EventDoc {
-    Se {
-        file: String,
-        start_ms: i64,
-        gain_db: f64,
-    },
-    BgmStart {
-        file: String,
-        start_ms: i64,
-    },
-    BgmStop {
-        start_ms: i64,
-    },
+fn kind(k: s2v_core::VisualKind) -> s2v_timeline::VisualKind {
+    match k {
+        s2v_core::VisualKind::Image => s2v_timeline::VisualKind::Image,
+        s2v_core::VisualKind::Video => s2v_timeline::VisualKind::Video,
+    }
 }
 
 /// 小数第2位に丸める(LUFS・dB の表示用)。
@@ -177,7 +109,8 @@ fn finite_r2(name: &str, v: f64) -> anyhow::Result<f64> {
     finite(name, r2(v))
 }
 
-pub fn timeline_value(input: &TimelineInput<'_>) -> anyhow::Result<serde_json::Value> {
+/// 組み立てて、§3.6 の不変条件を検証する。違反は内部の誤りとして Err。
+pub fn build_timeline(input: &TimelineInput<'_>) -> anyhow::Result<Timeline> {
     finite("normalize.target_lufs", input.target_lufs)?;
     let p = input.placement;
     let mut lines = Vec::with_capacity(p.lines.len());
@@ -202,7 +135,7 @@ pub fn timeline_value(input: &TimelineInput<'_>) -> anyhow::Result<serde_json::V
             ),
             None => (None, None, None),
         };
-        lines.push(LineDoc {
+        lines.push(LineEntry {
             id,
             scene: format_scene_id(l.scene),
             cast: l.cast.clone(),
@@ -218,7 +151,7 @@ pub fn timeline_value(input: &TimelineInput<'_>) -> anyhow::Result<serde_json::V
             src_start_ms: a.map(|a| floor_ms(a.src_start)),
             src_end_ms: a.map(|a| ceil_ms(a.src_end)),
             missing: l.missing.is_some(),
-            reason: l.missing,
+            reason: l.missing.map(reason),
         });
     }
 
@@ -231,80 +164,119 @@ pub fn timeline_value(input: &TimelineInput<'_>) -> anyhow::Result<serde_json::V
                 path,
                 start,
                 gain_db,
-            } => EventDoc::Se {
+            } => EventEntry::Se {
                 file: file_name(path),
                 start_ms: floor_ms(*start),
                 gain_db: finite_r2("events.se.gain_db", *gain_db)?,
             },
-            PlacedEvent::BgmStart { path, start } => EventDoc::BgmStart {
+            PlacedEvent::BgmStart { path, start } => EventEntry::BgmStart {
                 file: file_name(path),
                 start_ms: floor_ms(*start),
             },
-            PlacedEvent::BgmStop { start } => EventDoc::BgmStop {
+            PlacedEvent::BgmStop { start } => EventEntry::BgmStop {
                 start_ms: floor_ms(*start),
             },
         });
     }
 
-    let doc = TimelineDoc {
-        schema_version: 2,
+    if p.scenes.len() != input.visuals.len() {
+        anyhow::bail!("内部の誤り: シーンとカットの区間の数が違います");
+    }
+    let scenes = p
+        .scenes
+        .iter()
+        .zip(input.visuals)
+        .map(|(s, v)| SceneEntry {
+            id: format_scene_id(s.id),
+            name: s.name.clone(),
+            index: s.index,
+            silent: s.silent,
+            start_ms: floor_ms(s.start),
+            end_ms: ceil_ms(s.end),
+            cuts: v
+                .cuts
+                .iter()
+                .map(|c| CutEntry {
+                    id: c.id.clone(),
+                    start_ms: c.start_ms,
+                    end_ms: c.end_ms,
+                    visual: c.visual.as_ref().map(|x| Visual {
+                        text: x.text.clone(),
+                        kind: x.kind.map(kind),
+                        looped: x.looped,
+                    }),
+                })
+                .collect(),
+            notes: v
+                .notes
+                .iter()
+                .map(|n| NoteEntry {
+                    id: n.id.clone(),
+                    text: n.text.clone(),
+                    start_ms: n.start_ms,
+                    end_ms: n.end_ms,
+                })
+                .collect(),
+        })
+        .collect();
+
+    let t = Timeline {
+        schema_version: s2v_timeline::SCHEMA_VERSION,
         script: input.script.clone(),
+        script_sha256: input.script_sha256.clone(),
+        audio_sha256: input.audio_sha256.clone(),
         sample_rate: 48_000,
         duration_ms: ceil_ms(input.duration_samples),
-        normalize: NormalizeDoc {
+        normalize: Normalize {
             target_lufs: input.target_lufs,
         },
         cast: input
             .casts
             .iter()
-            .map(|c| CastDoc {
+            .map(|c| CastEntry {
                 name: c.name.clone(),
                 speaker: c.speaker.clone(),
                 appearance: c.appearance.clone(),
             })
             .collect(),
-        scenes: p
-            .scenes
-            .iter()
-            .map(|s| SceneDoc {
-                id: format_scene_id(s.id),
-                name: s.name.clone(),
-                index: s.index,
-                silent: s.silent,
-                start_ms: floor_ms(s.start),
-                end_ms: ceil_ms(s.end),
-                visual: s.cuts[0].visual.as_ref().map(|v| VisualDoc {
-                    text: v.text.clone(),
-                    kind: v.kind,
-                }),
-            })
-            .collect(),
+        scenes,
         takes: input
             .takes
             .iter()
-            .map(|t| TakeDoc {
+            .map(|t| TakeEntry {
                 id: t.id.clone(),
                 tracks: vec![None],
                 files: t.files.clone(),
                 trims: t.trims.map(|(h, tl)| {
-                    vec![TrimDoc {
+                    vec![Trim {
                         track: None,
                         head_ms: h,
                         tail_ms: tl,
                     }]
                 }),
                 missing: t.missing.is_some(),
-                reason: t.missing,
+                reason: t.missing.map(reason),
             })
             .collect(),
         lines,
         events: event_docs,
     };
-    Ok(serde_json::to_value(doc)?)
+    if let Err(errs) = t.validate() {
+        anyhow::bail!(
+            "timeline.json の検証に失敗しました(内部の誤り): {}",
+            errs.join(" / ")
+        );
+    }
+    Ok(t)
 }
 
+pub fn timeline_value(input: &TimelineInput<'_>) -> anyhow::Result<serde_json::Value> {
+    Ok(serde_json::to_value(build_timeline(input)?)?)
+}
+
+/// 検証を通ったものだけを書く(通らなければファイルは作らない)。
 pub fn write_timeline_json(path: &Path, input: &TimelineInput<'_>) -> anyhow::Result<()> {
-    std::fs::write(path, serde_json::to_string_pretty(&timeline_value(input)?)?)?;
+    std::fs::write(path, build_timeline(input)?.to_json_pretty())?;
     Ok(())
 }
 
@@ -312,7 +284,68 @@ pub fn write_timeline_json(path: &Path, input: &TimelineInput<'_>) -> anyhow::Re
 mod tests {
     use super::*;
     use s2v_core::placement::{PlacedCut, PlacedLine, PlacedScene, PlacedVisual};
+    use s2v_core::visual_timeline::layout_visuals;
     use s2v_core::VisualKind;
+
+    /// 役 A・B と、台詞ごとのテイクを置いた、既定の組み立て(§3.6 の不変条件を満たす)。
+    /// 正常な台詞のテイクは `{ID}.wav`、不足の台詞のテイクは no_file。
+    fn input_with<'a>(
+        placement: &'a Placement,
+        audio: &'a HashMap<LineId, LineAudioInfo>,
+        visuals: &'a [SceneSpans],
+    ) -> TimelineInput<'a> {
+        TimelineInput {
+            script: "s.txt".into(),
+            script_sha256: "a".repeat(64),
+            audio_sha256: "b".repeat(64),
+            duration_samples: 480_000,
+            target_lufs: -23.0,
+            casts: ["A", "B"]
+                .into_iter()
+                .map(|n| CastInfo {
+                    name: n.into(),
+                    speaker: format!("話者{n}"),
+                    appearance: None,
+                })
+                .collect(),
+            placement,
+            takes: placement
+                .lines
+                .iter()
+                .map(|l| {
+                    let id = l.id.file_stem();
+                    match l.missing {
+                        None => TakeInfo {
+                            files: vec![format!("{id}.wav")],
+                            id,
+                            trims: Some((10, 20)),
+                            missing: None,
+                        },
+                        Some(r) => TakeInfo {
+                            id,
+                            files: vec![],
+                            trims: None,
+                            missing: Some(r),
+                        },
+                    }
+                })
+                .collect(),
+            line_audio: audio,
+            visuals,
+        }
+    }
+
+    fn visuals_of(placement: &Placement) -> Vec<SceneSpans> {
+        layout_visuals(&placement.scenes, 10_000).0
+    }
+
+    fn cut(number: u32) -> PlacedCut {
+        PlacedCut {
+            number,
+            at: None,
+            visual: None,
+        }
+    }
 
     fn sample_placement() -> Placement {
         Placement {
@@ -364,11 +397,7 @@ mod tests {
                     silent: true,
                     start: 120_000,
                     end: 216_000,
-                    cuts: vec![PlacedCut {
-                        number: 1,
-                        at: None,
-                        visual: None,
-                    }],
+                    cuts: vec![cut(1)],
                     notes: vec![],
                 },
             ],
@@ -386,9 +415,7 @@ mod tests {
         }
     }
 
-    #[test]
-    fn timeline_v2_shape_and_rounding() {
-        let placement = sample_placement();
+    fn sample_audio() -> HashMap<LineId, LineAudioInfo> {
         let mut audio = HashMap::new();
         audio.insert(
             LineId { scene: 1, line: 1 },
@@ -401,42 +428,56 @@ mod tests {
                 norm_clamped: false,
             },
         );
-        let input = TimelineInput {
-            script: "第1話.txt".into(),
-            duration_samples: 216_001,
-            target_lufs: -23.0,
-            casts: vec![CastInfo {
+        audio
+    }
+
+    fn sample_input<'a>(
+        placement: &'a Placement,
+        audio: &'a HashMap<LineId, LineAudioInfo>,
+        visuals: &'a [SceneSpans],
+    ) -> TimelineInput<'a> {
+        let mut input = input_with(placement, audio, visuals);
+        input.script = "第1話.txt".into();
+        input.duration_samples = 216_001;
+        input.casts = vec![
+            CastInfo {
                 name: "A".into(),
                 speaker: "田中".into(),
                 appearance: None,
-            }],
-            placement: &placement,
-            takes: vec![
-                TakeInfo {
-                    id: "S01_L001".into(),
-                    files: vec!["S01_L001.wav".into()],
-                    trims: Some((170, 220)),
-                    missing: None,
-                },
-                TakeInfo {
-                    id: "S01_L002".into(),
-                    files: vec![],
-                    trims: None,
-                    missing: Some(MissingReason::NoFile),
-                },
-            ],
-            line_audio: &audio,
-        };
+            },
+            CastInfo {
+                name: "B".into(),
+                speaker: "鈴木".into(),
+                appearance: None,
+            },
+        ];
+        input.takes[0].trims = Some((170, 220));
+        input
+    }
+
+    #[test]
+    fn timeline_v3_shape_and_rounding() {
+        let placement = sample_placement();
+        let audio = sample_audio();
+        let (visuals, _) = layout_visuals(&placement.scenes, ceil_ms(216_001));
+        let input = sample_input(&placement, &audio, &visuals);
         let v = timeline_value(&input).unwrap();
-        assert_eq!(v["schema_version"], 2);
+        assert_eq!(v["schema_version"], 3);
+        assert_eq!(v["script_sha256"], "a".repeat(64));
+        assert_eq!(v["audio_sha256"], "b".repeat(64));
         assert_eq!(v["sample_rate"], 48_000);
         assert_eq!(v["duration_ms"], 4_501);
         assert_eq!(v["normalize"]["target_lufs"], -23.0);
         assert_eq!(v["cast"][0]["speaker"], "田中");
+        assert_eq!(v["cast"][1]["name"], "B");
         assert_eq!(v["scenes"][0]["id"], "S01");
-        assert_eq!(v["scenes"][0]["visual"]["kind"], "image");
+        assert_eq!(v["scenes"][0]["cuts"][0]["id"], "S01-C01");
+        assert_eq!(v["scenes"][0]["cuts"][0]["visual"]["text"], "港");
+        assert_eq!(v["scenes"][0]["cuts"][0]["visual"]["kind"], "image");
+        assert_eq!(v["scenes"][0]["cuts"][0]["visual"]["loop"], false);
+        assert!(v["scenes"][0].get("visual").is_none());
         assert_eq!(v["scenes"][1]["silent"], true);
-        assert!(v["scenes"][1]["visual"].is_null());
+        assert!(v["scenes"][1]["cuts"][0]["visual"].is_null());
         assert_eq!(v["takes"][0]["tracks"][0], serde_json::Value::Null);
         assert_eq!(v["takes"][0]["trims"][0]["head_ms"], 170);
         assert!(v["takes"][1]["trims"].is_null());
@@ -468,6 +509,33 @@ mod tests {
         assert_eq!(v["events"][1]["type"], "se");
         assert_eq!(v["events"][1]["file"], "door.wav");
         assert_eq!(v["events"][1]["start_ms"], 100);
+        // 共通の型で読み直せて、検証を通る
+        s2v_timeline::load_str(&serde_json::to_string(&v).unwrap()).unwrap();
+    }
+
+    #[test]
+    fn invalid_input_is_rejected_before_writing() {
+        // 台詞の役が cast に無い → 内部の誤りとして Err、ファイルは作らない
+        let placement = sample_placement();
+        let audio = sample_audio();
+        let (visuals, _) = layout_visuals(&placement.scenes, 4_501);
+        let mut input = sample_input(&placement, &audio, &visuals);
+        input.casts.clear();
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("timeline.json");
+        let e = write_timeline_json(&path, &input).unwrap_err().to_string();
+        assert!(e.contains("内部の誤り"), "{e}");
+        assert!(!path.exists());
+    }
+
+    #[test]
+    fn scene_and_visual_count_mismatch_is_an_error() {
+        let placement = sample_placement();
+        let audio = sample_audio();
+        let visuals = visuals_of(&placement);
+        let input = input_with(&placement, &audio, &visuals[..1]);
+        let e = build_timeline(&input).unwrap_err().to_string();
+        assert!(e.contains("シーンとカットの区間の数"), "{e}");
     }
 
     /// 正常な台詞すべてに有効な LineAudioInfo を与える。
@@ -492,24 +560,10 @@ mod tests {
             .collect()
     }
 
-    fn input_with<'a>(
-        placement: &'a Placement,
-        audio: &'a HashMap<LineId, LineAudioInfo>,
-    ) -> TimelineInput<'a> {
-        TimelineInput {
-            script: "s.txt".into(),
-            duration_samples: 0,
-            target_lufs: -23.0,
-            casts: vec![],
-            placement,
-            takes: vec![],
-            line_audio: audio,
-        }
-    }
-
     #[test]
     fn non_finite_audio_values_are_errors() {
         let placement = sample_placement();
+        let visuals = visuals_of(&placement);
         for bad in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             for field in 0..3 {
                 let mut info = LineAudioInfo {
@@ -527,7 +581,7 @@ mod tests {
                 }
                 let mut audio = HashMap::new();
                 audio.insert(LineId { scene: 1, line: 1 }, info);
-                let input = input_with(&placement, &audio);
+                let input = input_with(&placement, &audio, &visuals);
                 assert!(timeline_value(&input).is_err());
                 let dir = tempfile::tempdir().unwrap();
                 let path = dir.path().join("timeline.json");
@@ -540,8 +594,9 @@ mod tests {
     #[test]
     fn non_finite_target_or_se_gain_is_an_error() {
         let placement = sample_placement();
+        let visuals = visuals_of(&placement);
         let audio = audio_for(&placement);
-        let mut input = input_with(&placement, &audio);
+        let mut input = input_with(&placement, &audio, &visuals);
         input.target_lufs = f64::NAN;
         assert!(timeline_value(&input).is_err());
 
@@ -551,7 +606,7 @@ mod tests {
             start: 0,
             gain_db: f64::INFINITY,
         }];
-        let input = input_with(&p2, &audio);
+        let input = input_with(&p2, &audio, &visuals);
         assert!(timeline_value(&input).is_err());
         // 同じ入力でも SE が有限なら通る(上の Err が行の欠落ではなく SE 由来である確認)
         p2.events = vec![PlacedEvent::Se {
@@ -559,13 +614,14 @@ mod tests {
             start: 0,
             gain_db: -3.0,
         }];
-        assert!(timeline_value(&input_with(&p2, &audio)).is_ok());
+        assert!(timeline_value(&input_with(&p2, &audio, &visuals)).is_ok());
     }
 
     #[test]
     fn non_finite_values_of_missing_lines_are_ignored() {
         // 不足の台詞は測定値を出さないので、line_audio の中身は見ない
         let placement = sample_placement();
+        let visuals = visuals_of(&placement);
         let mut audio = audio_for(&placement);
         audio.insert(
             LineId { scene: 1, line: 2 },
@@ -578,7 +634,7 @@ mod tests {
                 norm_clamped: false,
             },
         );
-        let v = timeline_value(&input_with(&placement, &audio)).unwrap();
+        let v = timeline_value(&input_with(&placement, &audio, &visuals)).unwrap();
         assert!(v["lines"][1]["measured_lufs"].is_null());
     }
 
@@ -602,22 +658,23 @@ mod tests {
             silent: false,
             start: 0,
             end: 48,
-            cuts: vec![PlacedCut {
-                number: 1,
-                at: None,
-                visual: None,
-            }],
+            cuts: vec![cut(1)],
             notes: vec![],
         });
         let audio = audio_for(&placement);
-        let v = timeline_value(&input_with(&placement, &audio)).unwrap();
+        let visuals = visuals_of(&placement);
+        let v = timeline_value(&input_with(&placement, &audio, &visuals)).unwrap();
         assert_eq!(v["scenes"][0]["id"], "S00");
+        assert_eq!(v["scenes"][0]["cuts"][0]["id"], "S00-C01");
         assert_eq!(v["lines"][0]["scene"], "S00");
         assert_eq!(v["lines"][0]["id"], "S00-L001");
 
         let empty = Placement::default();
         let audio = HashMap::new();
-        let v = timeline_value(&input_with(&empty, &audio)).unwrap();
+        let mut input = input_with(&empty, &audio, &[]);
+        input.duration_samples = 0;
+        input.casts.clear();
+        let v = timeline_value(&input).unwrap();
         for k in ["cast", "scenes", "takes", "lines", "events"] {
             assert_eq!(v[k].as_array().unwrap().len(), 0, "{k}");
         }
@@ -627,6 +684,17 @@ mod tests {
     #[test]
     fn lines_keep_script_order_and_events_are_sorted() {
         let mut placement = Placement::default();
+        // 台詞は S01 のシーンの中に置く(検証が台詞のシーンの存在を見る)
+        placement.scenes.push(PlacedScene {
+            id: 1,
+            name: None,
+            index: 1,
+            silent: false,
+            start: 0,
+            end: 96_048,
+            cuts: vec![cut(1)],
+            notes: vec![],
+        });
         for (n, start) in [(1u32, 96_000i64), (2, 0)] {
             placement.lines.push(PlacedLine {
                 id: LineId { scene: 1, line: n },
@@ -647,7 +715,8 @@ mod tests {
             },
         ];
         let audio = audio_for(&placement);
-        let v = timeline_value(&input_with(&placement, &audio)).unwrap();
+        let visuals = visuals_of(&placement);
+        let v = timeline_value(&input_with(&placement, &audio, &visuals)).unwrap();
         assert_eq!(v["lines"][0]["id"], "S01-L001");
         assert_eq!(v["lines"][1]["id"], "S01-L002");
         assert_eq!(v["events"][0]["type"], "bgm_start");
@@ -660,32 +729,36 @@ mod tests {
     fn write_timeline_json_writes_valid_json() {
         let placement = sample_placement();
         let audio = audio_for(&placement);
+        let visuals = visuals_of(&placement);
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("timeline.json");
-        write_timeline_json(&path, &input_with(&placement, &audio)).unwrap();
-        let v: serde_json::Value =
-            serde_json::from_str(&std::fs::read_to_string(&path).unwrap()).unwrap();
-        assert_eq!(v["schema_version"], 2);
+        write_timeline_json(&path, &input_with(&placement, &audio, &visuals)).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&text).unwrap();
+        assert_eq!(v["schema_version"], 3);
         assert_eq!(v["lines"][0]["measured_lufs"], -20.0);
+        s2v_timeline::load_str(&text).unwrap();
     }
 
     #[test]
     fn normal_line_without_audio_info_is_an_error() {
         let placement = sample_placement();
+        let visuals = visuals_of(&placement);
         let audio = HashMap::new();
-        let err = timeline_value(&input_with(&placement, &audio)).unwrap_err();
+        let err = timeline_value(&input_with(&placement, &audio, &visuals)).unwrap_err();
         assert!(err.to_string().contains("S01-L001"), "{err}");
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("timeline.json");
-        assert!(write_timeline_json(&path, &input_with(&placement, &audio)).is_err());
+        assert!(write_timeline_json(&path, &input_with(&placement, &audio, &visuals)).is_err());
         assert!(!path.exists());
     }
 
     #[test]
     fn normal_lines_have_all_audio_fields_non_null() {
         let placement = sample_placement();
+        let visuals = visuals_of(&placement);
         let audio = audio_for(&placement);
-        let v = timeline_value(&input_with(&placement, &audio)).unwrap();
+        let v = timeline_value(&input_with(&placement, &audio, &visuals)).unwrap();
         let l = &v["lines"][0];
         for k in [
             "measured_lufs",
@@ -703,7 +776,7 @@ mod tests {
             LineId { scene: 1, line: 2 },
             audio[&LineId { scene: 1, line: 1 }],
         );
-        let v = timeline_value(&input_with(&placement, &audio)).unwrap();
+        let v = timeline_value(&input_with(&placement, &audio, &visuals)).unwrap();
         for k in [
             "measured_lufs",
             "requested_gain_db",
@@ -731,6 +804,7 @@ mod tests {
                 gain_db: -0.004,
             },
         ];
+        let visuals = visuals_of(&placement);
         let mut audio = HashMap::new();
         audio.insert(
             LineId { scene: 1, line: 1 },
@@ -743,7 +817,7 @@ mod tests {
                 norm_clamped: false,
             },
         );
-        let v = timeline_value(&input_with(&placement, &audio)).unwrap();
+        let v = timeline_value(&input_with(&placement, &audio, &visuals)).unwrap();
         let text = serde_json::to_string(&v).unwrap();
         assert!(!text.contains("-0.0"), "{text}");
         assert!(!text.contains("-0,"), "{text}");

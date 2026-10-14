@@ -6,6 +6,7 @@ edition = "2021"
 [dependencies]
 s2v-core  = { path = "../s2v-core" }
 s2v-audio = { path = "../s2v-audio" }
+s2v-timeline = { path = "../s2v-timeline" }
 anyhow.workspace = true
 thiserror.workspace = true
 hound = "3"
