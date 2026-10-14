@@ -82,6 +82,15 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
         eprintln!("[ERROR] 出力していません");
         return Ok(Outcome::Failed);
     }
+    // 同じ台本フォルダで他のコマンドが動いている間は何も書かない。build の終わりまで保持する
+    let _lock = match crate::lock::ScriptLock::acquire(&out_dir) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[ERROR] {e:#}");
+            eprintln!("[ERROR] 出力していません");
+            return Ok(Outcome::Failed);
+        }
+    };
     // 1. 設定
     let config = match &args.config {
         Some(p) => Config::from_file(p)
@@ -126,6 +135,18 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "script".to_string());
     let mut log = ProcLog::create(&out_dir.join("Process.log"))?;
+    // コミットポイントの直前に古い完成動画を改名する。失敗しても前回の成果物は消さない
+    match rename_stale_output(&out_dir) {
+        Ok(true) => log.info("古い output.mp4 を output.stale.mp4 に改名しました"),
+        Ok(false) => {}
+        Err(e) => {
+            log.error(format!(
+                "古い output.mp4 を output.stale.mp4 に改名できません: {e}"
+            ));
+            log.error("出力していません");
+            return Ok(Outcome::Failed);
+        }
+    }
     let script_warnings: Vec<String> = parser
         .warnings()
         .iter()
@@ -142,6 +163,21 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
     Ok(run_after_commit(
         args, &config, &job, &out_dir, &voice_dir, &mut log,
     ))
+}
+
+/// コミットポイントの直前に、古い完成動画を output.stale.mp4 に改名する(映像工程設計書 §2.2)。
+/// 古い output.stale.mp4 は上書きする。output.mp4 がファイルでなければエラー。
+fn rename_stale_output(out_dir: &Path) -> std::io::Result<bool> {
+    let mp4 = out_dir.join("output.mp4");
+    match std::fs::symlink_metadata(&mp4) {
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
+        Err(e) => Err(e),
+        Ok(m) if !m.is_file() => Err(std::io::Error::other("output.mp4 がファイルではありません")),
+        Ok(_) => {
+            std::fs::rename(&mp4, out_dir.join("output.stale.mp4"))?;
+            Ok(true)
+        }
+    }
 }
 
 /// 検証済みの台本まわりの入力。
@@ -395,12 +431,12 @@ fn produce(
     write_f32_stereo(&tracks_dir.join("se.wav"), &mixed.se)?;
     let dialogue_path = out_dir.join("full_dialogue.wav");
     write_i24_stereo(&dialogue_path, &mixed.master)?;
-    let audio_sha256 = sha256_hex(&std::fs::read(&dialogue_path).with_context(|| {
+    let audio_sha256 = crate::fsutil::sha256_file(&dialogue_path).with_context(|| {
         format!(
             "full_dialogue.wav を読み直せません: {}",
             dialogue_path.display()
         )
-    })?);
+    })?;
     let total = mixed.master.len() as i64;
 
     // 9. timeline.json・字幕・FCPXML

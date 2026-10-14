@@ -525,6 +525,8 @@ mod tests {
         let path = dir.path().join("timeline.json");
         let e = write_timeline_json(&path, &input).unwrap_err().to_string();
         assert!(e.contains("内部の誤り"), "{e}");
+        // 失敗の原因が役の欠落であること(別の理由で Err になっていない)
+        assert!(e.contains("役"), "{e}");
         assert!(!path.exists());
     }
 

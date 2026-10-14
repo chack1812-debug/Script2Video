@@ -829,7 +829,9 @@ fn failed_rerun_keeps_output_mp4_and_voices() {
     fs::write(&f.script, REGRESSION_SCRIPT).unwrap();
     assert_eq!(run_build(&no_voice_args(&f)), Outcome::Failed);
     assert_no_final_artifacts(&f.dir);
-    assert_eq!(fs::read(f.dir.join("output.mp4")).unwrap(), b"mp4");
+    // 出力を始めた後の失敗なので、古い output.mp4 は output.stale.mp4 に改名済み(消えてはいない)
+    assert!(!f.dir.join("output.mp4").exists());
+    assert_eq!(fs::read(f.dir.join("output.stale.mp4")).unwrap(), b"mp4");
     assert!(f.voices.join("S01_L001.wav").exists());
     assert!(f.dir.join("work").exists());
 }
@@ -1068,4 +1070,99 @@ fn scene_zero_line_before_first_paragraph_builds() {
         lines[1]["start_ms"].as_i64().unwrap(),
         lines[0]["start_ms"].as_i64().unwrap() + 100
     );
+}
+
+#[test]
+fn old_output_mp4_is_renamed_to_stale_and_previous_stale_is_replaced() {
+    let f = fixture(SCRIPT);
+    for id in ["S01_L001", "S01_L002", "S01_L003", "S03_L001"] {
+        write_voice(&f.voices.join(format!("{id}.wav")));
+    }
+    fs::write(f.dir.join("output.mp4"), b"new-old").unwrap();
+    fs::write(f.dir.join("output.stale.mp4"), b"older").unwrap();
+    assert_eq!(run_build(&args(&f, None, false)), Outcome::Ok);
+    assert!(!f.dir.join("output.mp4").exists());
+    assert_eq!(
+        fs::read(f.dir.join("output.stale.mp4")).unwrap(),
+        b"new-old"
+    );
+    let log = fs::read_to_string(f.dir.join("Process.log")).unwrap();
+    assert!(log.contains("output.stale.mp4"), "{log}");
+}
+
+#[test]
+fn stale_rename_failure_keeps_previous_outputs() {
+    // 改名できない(改名先が空でないフォルダ)ときは エラー 2 で、前回の成果物を消さない
+    let f = fixture(SCRIPT);
+    for id in ["S01_L001", "S01_L002", "S01_L003", "S03_L001"] {
+        write_voice(&f.voices.join(format!("{id}.wav")));
+    }
+    assert_eq!(run_build(&args(&f, None, false)), Outcome::Ok);
+    fs::write(f.dir.join("output.mp4"), b"mp4").unwrap();
+    fs::create_dir_all(f.dir.join("output.stale.mp4").join("x")).unwrap();
+    assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
+    assert_all_final_artifacts(&f.dir);
+    assert_eq!(fs::read(f.dir.join("output.mp4")).unwrap(), b"mp4");
+}
+
+#[test]
+fn build_fails_while_another_command_holds_the_lock() {
+    let f = fixture(SCRIPT);
+    let _held = s2v_cli::lock::ScriptLock::acquire(&f.dir).unwrap();
+    assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
+    assert_no_final_artifacts(&f.dir);
+}
+
+#[test]
+fn sha256_fields_match_the_files() {
+    let f = fixture(SCRIPT);
+    for id in ["S01_L001", "S01_L002", "S01_L003", "S03_L001"] {
+        write_voice(&f.voices.join(format!("{id}.wav")));
+    }
+    run_build(&args(&f, None, false));
+    let v = read_json(&f.dir.join("timeline").join("timeline.json"));
+    assert_eq!(
+        v["script_sha256"].as_str().unwrap(),
+        s2v_cli::fsutil::sha256_file(&f.script).unwrap()
+    );
+    assert_eq!(
+        v["audio_sha256"].as_str().unwrap(),
+        s2v_cli::fsutil::sha256_file(&f.dir.join("full_dialogue.wav")).unwrap()
+    );
+    // 鮮度の検査が通る
+    assert!(s2v_cli::freshness::check_fresh(&f.script, true)
+        .unwrap()
+        .warnings
+        .is_empty());
+}
+
+#[test]
+fn cuts_and_notes_reach_timeline_v3() {
+    let script = "@scene 居間\n@pause\nsentence 500\ncast 300\nparagraph 1000\n@cast\nA:田中\n\n@script\n#paragraph[S01] 朝\n#visual (image) 港\n#note[N01] 翌朝、港。\n[S01-L001] A:おはよう。\n#cut[C02]\n#visual (video loop) 波\n#note[N02] 二人は黙る。\n#pause 2000\n";
+    let f = fixture(script);
+    write_voice(&f.voices.join("S01_L001.wav"));
+    assert_eq!(run_build(&args(&f, None, false)), Outcome::Ok);
+    let v = read_json(&f.dir.join("timeline").join("timeline.json"));
+    let s = &v["scenes"][0];
+    assert_eq!(s["cuts"][0]["id"], "S01-C01");
+    assert_eq!(s["cuts"][1]["id"], "S01-C02");
+    assert_eq!(s["cuts"][1]["visual"]["kind"], "video");
+    assert_eq!(s["cuts"][1]["visual"]["loop"], true);
+    let l_end = v["lines"][0]["end_ms"].as_i64().unwrap();
+    // C02 と N02 は台詞の終わり(現在位置。floor)から。N01 は C02 で終わる
+    assert!((l_end - 1..=l_end).contains(&s["cuts"][1]["start_ms"].as_i64().unwrap()));
+    assert_eq!(s["notes"][0]["end_ms"], s["cuts"][1]["start_ms"]);
+    assert_eq!(s["notes"][1]["start_ms"], s["cuts"][1]["start_ms"]);
+    // N02 は #pause 2000 の間も表示される(最後まで)
+    assert_eq!(s["notes"][1]["end_ms"], v["duration_ms"]);
+    s2v_timeline::load_str(
+        &fs::read_to_string(f.dir.join("timeline").join("timeline.json")).unwrap(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn unnumbered_cut_fails_build() {
+    let f = fixture(&SCRIPT.replace("#visual (image) 朝の居間。\n", "#cut\n"));
+    assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
 }
