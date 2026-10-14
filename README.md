@@ -16,19 +16,29 @@ script2video build <台本.txt> [--voice-dir <収録フォルダ>] [--config <�
 出力を始める前に判明する失敗(設定値の範囲外・台本の構文エラー)では、前回の出力には触れません。
 出力を始めた後に失敗した場合は、古い成果物が残らないよう、前回の `full_dialogue.wav`、`tracks/*.wav`、`timeline/` の `timeline.json`・`subtitles.srt`・`timeline.fcpxml` だけを消します(`output.mp4`・`voices/`・`work/`・台本とその `.bak` `.ids` `.html` には触れません)。失敗の理由は `Process.log` に記録します。
 
+## インストール
+
+```bash
+# リポジトリ直下で実行。~/.cargo/bin/script2video(.exe) に入る(PATH に ~/.cargo/bin が必要)
+cargo install --path crates/s2v-cli --locked
+script2video --help
+```
+
+コードを更新したら、同じコマンドをもう一度実行して入れ直す(`--force` を付けると同じバージョンでも入れ直す)。
+
 ## 使い方
 
 ```bash
 # 1. 台本に台詞IDとシーン番号を書き込む(台本名.bak・台本名.ids・台本名.html も出力)
-cargo run --release -p s2v-cli -- number 第1話.txt
+script2video number 第1話.txt
 
 # 2. 台詞ごとに収録する(ファイル名は台詞IDの - を _ にしたもの: S01_L003.wav。モノラル)
 #    台詞番号の桁数は問いません(S01_L1.wav も S01_L001.wav も同じ台詞)
 
 # 3. 音声・字幕・タイムラインを作る(出力は台本と同じフォルダ。収録は 台本フォルダ/voices/ に置く)
-cargo run --release -p s2v-cli -- build 第1話.txt
+script2video build 第1話.txt
 # 収録を別の場所に置いたときだけ指定する
-cargo run --release -p s2v-cli -- build 第1話.txt --voice-dir 収録/
+script2video build 第1話.txt --voice-dir 収録/
 ```
 
 `build` のオプション: `--voice-dir 収録フォルダ`(省略時は台本と同じフォルダの `voices/`。無い・フォルダでないときはエラー。相対パスは台本フォルダではなく現在のフォルダからの相対、既定の `voices` だけが台本フォルダからの相対)、`--config 設定.toml`(省略時は同梱の `config.toml`)、`--no-cache`(中間ファイルを使わない)。
