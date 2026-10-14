@@ -13,6 +13,21 @@ pub const REVERB_WET_GAIN: f32 = 0.4;
 type IrKey = (OrderedFloat<f64>, usize);
 type StereoIr = [Vec<f32>; 2];
 
+/// dry と wet の混合比。`apply` と音量補償(processor)の両方がこの関数を使い、食い違いを防ぐ。
+pub(crate) fn actual_wet(
+    reverb_wet: f64,
+    wet_base: f64,
+    avg_dist: f64,
+    wet_distance_slope: f64,
+) -> f64 {
+    (reverb_wet * wet_base * (1.0 + wet_distance_slope * avg_dist)).min(0.9)
+}
+
+/// 量子化(4桁)した値。キャッシュのキーに使う。
+pub(crate) fn round4(v: f64) -> f64 {
+    (v * 10000.0).round() / 10000.0
+}
+
 /// (rt60, pre_delay) をキーとした stereo IR キャッシュ ([ir_l, ir_r])
 pub struct IrCache {
     sample_rate: u32,
@@ -55,8 +70,18 @@ impl IrCache {
         avg_dist: f64,
         wet_distance_slope: f64,
     ) {
-        let actual_wet =
-            (reverb_wet * wet_base * (1.0 + wet_distance_slope * avg_dist)).min(0.9) as f32;
+        let actual_wet = actual_wet(reverb_wet, wet_base, avg_dist, wet_distance_slope) as f32;
+        self.apply_with_wet(stereo, rt60, pre_delay, actual_wet);
+    }
+
+    /// `actual_wet`(`actual_wet()` で求めた混合比)を直接指定して適用する (in-place)。
+    pub(crate) fn apply_with_wet(
+        &self,
+        stereo: &mut [[f32; 2]],
+        rt60: f64,
+        pre_delay: usize,
+        actual_wet: f32,
+    ) {
         if actual_wet <= 0.0 || stereo.is_empty() {
             return;
         }
@@ -72,10 +97,6 @@ impl IrCache {
             }
         }
     }
-}
-
-fn round4(v: f64) -> f64 {
-    (v * 10000.0).round() / 10000.0
 }
 
 /// FFT 畳み込み (線形)

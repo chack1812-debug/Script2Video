@@ -1,9 +1,14 @@
+use std::collections::HashMap;
+use std::sync::Mutex;
+
+use ordered_float::OrderedFloat;
 use s2v_core::{AudioConfig, Cast, SceneConfig};
 
 use crate::acoustics::{compute_reverb_params, resolve_room_geometry, ReverbParams, RoomGeometry};
 use crate::early::build_early_taps;
 use crate::geometry::{calc_geometry, directivity_pattern};
-use crate::reverb::IrCache;
+use crate::loudness::{measure_stereo, Loudness};
+use crate::reverb::{actual_wet, round4, IrCache};
 
 /// room_size/reverb_wet の実効値を決定する (Cast > Scene > AudioConfig の優先順)。
 /// Python版 audio_processor.py:81-88 (`c_room_size if ... else (s_room_size if ... else self.default_room_size)`) 相当。
@@ -40,9 +45,14 @@ fn delay_samples(dist: f64, sound_speed: f64, fs: f64) -> anyhow::Result<usize> 
     Ok(v.max(0.0) as usize)
 }
 
+/// 残響の音量補償ゲインのキー: (rt60, pre_delay, actual_wet)。rt60 と actual_wet は4桁に丸める。
+type ReverbCompKey = (OrderedFloat<f64>, usize, OrderedFloat<f64>);
+
 pub struct AudioProcessor {
     config: AudioConfig,
     ir_cache: IrCache,
+    /// 残響パラメータごとの固定の音量補償ゲイン(信号に依存しないので render は線形のまま)。
+    reverb_comp: Mutex<HashMap<ReverbCompKey, f32>>,
     /// 基準ゲイン(設計書 5.10 C)。生成時に較正する。
     calib_gain: f64,
 }
@@ -63,10 +73,66 @@ impl AudioProcessor {
         let mut p = Self {
             config,
             ir_cache: IrCache::new(sample_rate),
+            reverb_comp: Mutex::new(HashMap::new()),
             calib_gain: 1.0,
         };
         p.calib_gain = crate::calib::compute_calibration_gain(&p)?;
         Ok(p)
+    }
+
+    /// 残響パラメータ(rt60、pre_delay、混合比 actual_wet)に対する固定の音量補償ゲイン。
+    ///
+    /// 較正信号(dual-mono: L=R=信号)を、残響の前と後(`IrCache::apply` と同じパラメータ)で
+    /// BS.1770 のステレオラウドネスを測り、その差を戻すゲインを返す。結果はパラメータごとに
+    /// キャッシュする。実際の経路では残響の前に早期反射が加わるが、補償は素の dual-mono を
+    /// 基準にして求める(許容 ±0.5 LU。テストで確認)。測定不能や不正な値は Err(丸めない)。
+    pub(crate) fn reverb_comp_gain(
+        &self,
+        rt60: f64,
+        pre_delay: usize,
+        actual_wet: f64,
+    ) -> anyhow::Result<f32> {
+        let key = (
+            OrderedFloat(round4(rt60)),
+            pre_delay,
+            OrderedFloat(round4(actual_wet)),
+        );
+        let poisoned = || anyhow::anyhow!("残響の音量補償のキャッシュが使えません");
+        if let Some(&g) = self.reverb_comp.lock().map_err(|_| poisoned())?.get(&key) {
+            return Ok(g);
+        }
+        // 丸めた値で計算し、同じキーなら常に同じゲインになるようにする
+        let (rt60, wet) = (key.0.into_inner(), key.2.into_inner() as f32);
+        self.ir_cache.compute_if_needed(rt60, pre_delay);
+        let signal = crate::calib::calibration_signal(crate::calib::CALIBRATION_SEED);
+        let tail = (self.config.sample_rate as f64 * rt60) as usize + pre_delay;
+        let mut stereo: Vec<[f32; 2]> = signal
+            .iter()
+            .map(|&v| [v, v])
+            .chain(std::iter::repeat_n([0.0, 0.0], tail))
+            .collect();
+        let Loudness::Lufs(before) = measure_stereo(&stereo) else {
+            anyhow::bail!("残響の音量補償: 残響の前のラウドネスを測定できませんでした");
+        };
+        self.ir_cache
+            .apply_with_wet(&mut stereo, rt60, pre_delay, wet);
+        let Loudness::Lufs(after) = measure_stereo(&stereo) else {
+            anyhow::bail!("残響の音量補償: 残響の後のラウドネスを測定できませんでした");
+        };
+        let gain = 10f64.powf((before - after) / 20.0) as f32;
+        if !(gain.is_finite() && gain > 0.0) {
+            anyhow::bail!("残響の音量補償ゲインが不正です: {gain}");
+        }
+        self.reverb_comp
+            .lock()
+            .map_err(|_| poisoned())?
+            .insert(key, gain);
+        Ok(gain)
+    }
+
+    #[cfg(test)]
+    fn reverb_comp_len(&self) -> usize {
+        self.reverb_comp.lock().unwrap().len()
     }
 
     /// 較正で求めた基準ゲイン。
@@ -271,6 +337,22 @@ impl AudioProcessor {
             cast.distance,
             self.config.early_reflections.wet_distance_slope,
         );
+        if reverb_active {
+            // 残響による音量変化を、パラメータごとの固定ゲインで戻す(信号に依存しない)
+            let aw = actual_wet(
+                reverb_wet,
+                rp.wet_base,
+                cast.distance,
+                self.config.early_reflections.wet_distance_slope,
+            );
+            if aw > 0.0 {
+                let g = self.reverb_comp_gain(rp.rt60, rp.pre_delay, aw)?;
+                for f in &mut stereo {
+                    f[0] *= g;
+                    f[1] *= g;
+                }
+            }
+        }
         Ok(stereo)
     }
 }
@@ -886,5 +968,111 @@ mod tests {
                 "{bad}: {err:#}"
             );
         }
+    }
+
+    /// 音声風(4Hz で振幅が揺れる帯域制限ノイズ)。較正信号とは別の種を使う。
+    fn speech_like(seed: u64) -> Vec<f32> {
+        let mut x = crate::calib::calibration_signal(seed);
+        for (k, s) in x.iter_mut().enumerate() {
+            let t = k as f32 / 48_000.0;
+            *s *= (0.5 + 0.5 * (2.0 * std::f32::consts::PI * 4.0 * t).sin()).powi(2) * 1.6;
+        }
+        x
+    }
+
+    /// 残響あり/なし(同じ早期反射設定)の出力ラウドネス差(LU)。
+    fn reverb_loudness_diff(
+        p: &AudioProcessor,
+        input: &[f32],
+        cast: &Cast,
+        scene: &SceneConfig,
+    ) -> f64 {
+        use crate::loudness::{measure_stereo, Loudness};
+        let dry_scene = SceneConfig {
+            reverb_wet: Some(0.0),
+            ..scene.clone()
+        };
+        let wet = p.render(input, cast, scene).unwrap();
+        let dry = p.render(input, cast, &dry_scene).unwrap();
+        match (measure_stereo(&wet), measure_stereo(&dry)) {
+            (Loudness::Lufs(a), Loudness::Lufs(b)) => a - b,
+            _ => panic!("測定できませんでした"),
+        }
+    }
+
+    #[test]
+    fn reverb_scenes_keep_the_reference_loudness() {
+        let p = AudioProcessor::new(s2v_core::Config::builtin().audio).unwrap();
+        let big = SceneConfig {
+            room_w: Some(25.0),
+            room_d: Some(45.0),
+            room_h: Some(18.0),
+            reverb_wet: Some(1.0),
+            ..SceneConfig::new("大")
+        };
+        let cases: Vec<(&str, SceneConfig, f64)> = vec![
+            ("default", SceneConfig::new("d"), 1.0),
+            (
+                "wet0.3",
+                SceneConfig {
+                    reverb_wet: Some(0.3),
+                    ..SceneConfig::new("w")
+                },
+                1.0,
+            ),
+            ("big", big, 1.0),
+            ("dist0.5", SceneConfig::new("n"), 0.5),
+            ("dist3.0", SceneConfig::new("f"), 3.0),
+        ];
+        let mut failures = Vec::new();
+        for seed in [7u64, 8] {
+            let input = speech_like(seed);
+            for (name, scene, dist) in &cases {
+                let diff = reverb_loudness_diff(&p, &input, &dummy_cast(0.0, *dist), scene);
+                eprintln!("LOUDNESS seed {seed} {name}: {diff:.3}");
+                if diff.abs() >= 0.5 {
+                    failures.push(format!("seed {seed} {name}: {diff}"));
+                }
+            }
+        }
+        assert!(failures.is_empty(), "{failures:?}");
+    }
+
+    #[test]
+    fn reverb_comp_gain_is_above_one_for_strong_wet_and_not_applied_when_reverb_off() {
+        let p = AudioProcessor::new(default_audio_config()).unwrap();
+        let strong = p.reverb_comp_gain(1.0, 480, 0.9).unwrap();
+        let weak = p.reverb_comp_gain(1.0, 480, 0.1).unwrap();
+        assert!(strong > 1.0, "{strong}");
+        assert!(strong > weak, "strong={strong} weak={weak}");
+        // 残響なしでは補償を計算も参照もしない(キャッシュに入らない)
+        let before = p.reverb_comp_len();
+        let x = tone(2_000, 0.2);
+        let off = SceneConfig {
+            reverb_wet: Some(0.0),
+            ..default_scene()
+        };
+        p.render(&x, &dummy_cast(0.0, 1.0), &off).unwrap();
+        assert_eq!(p.reverb_comp_len(), before);
+    }
+
+    #[test]
+    fn reverb_comp_gain_is_cached_and_depends_on_parameters() {
+        let p = AudioProcessor::new(default_audio_config()).unwrap();
+        assert_eq!(p.reverb_comp_len(), 0);
+        let a = p.reverb_comp_gain(0.8, 240, 0.5).unwrap();
+        assert_eq!(p.reverb_comp_len(), 1);
+        let a2 = p.reverb_comp_gain(0.8, 240, 0.5).unwrap();
+        // 4桁に丸めた同じキーは同じゲイン(再計算しない)
+        let a3 = p.reverb_comp_gain(0.800_001, 240, 0.500_001).unwrap();
+        assert_eq!(p.reverb_comp_len(), 1);
+        assert_eq!(a, a2);
+        assert_eq!(a, a3);
+        let b = p.reverb_comp_gain(0.8, 240, 0.9).unwrap();
+        let c = p.reverb_comp_gain(2.0, 240, 0.5).unwrap();
+        let d = p.reverb_comp_gain(0.8, 480, 0.5).unwrap();
+        assert_eq!(p.reverb_comp_len(), 4);
+        assert!(a != b && a != c);
+        assert!(d.is_finite() && d > 0.0);
     }
 }
