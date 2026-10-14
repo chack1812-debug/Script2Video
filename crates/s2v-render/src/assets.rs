@@ -59,18 +59,38 @@ pub fn match_assets(tracks_dir: &Path, cuts: &[(String, Option<VisualKind>)]) ->
     let mut result = AssetMatch::default();
     // (ファイル名, 語幹の小文字, 種類)
     let mut entries: Vec<(String, String, AssetKind)> = Vec::new();
-    if let Ok(rd) = std::fs::read_dir(tracks_dir) {
-        for e in rd.flatten() {
-            let name = e.file_name().to_string_lossy().into_owned();
-            let p = Path::new(&name);
-            let (Some(stem), Some(ext)) = (p.file_stem(), p.extension()) else {
-                continue;
-            };
-            if let Some(kind) = kind_of_ext(&ext.to_string_lossy()) {
-                entries.push((name.clone(), stem.to_string_lossy().to_lowercase(), kind));
+    match std::fs::read_dir(tracks_dir) {
+        Ok(rd) => {
+            for e in rd {
+                let e = match e {
+                    Ok(e) => e,
+                    Err(err) => {
+                        result.errors.push(format!(
+                            "tracks/ の列挙中にエラー: {}: {err}",
+                            tracks_dir.display()
+                        ));
+                        continue;
+                    }
+                };
+                let name = e.file_name().to_string_lossy().into_owned();
+                let p = Path::new(&name);
+                let (Some(stem), Some(ext)) = (p.file_stem(), p.extension()) else {
+                    continue;
+                };
+                if let Some(kind) = kind_of_ext(&ext.to_string_lossy()) {
+                    entries.push((name.clone(), stem.to_string_lossy().to_lowercase(), kind));
+                }
             }
+            entries.sort_by(|a, b| a.0.cmp(&b.0));
         }
-        entries.sort_by(|a, b| a.0.cmp(&b.0));
+        Err(err) if err.kind() == std::io::ErrorKind::NotFound => {}
+        Err(err) => {
+            result.errors.push(format!(
+                "tracks/ を読めません: {}: {err}",
+                tracks_dir.display()
+            ));
+            return result;
+        }
     }
     let root = std::fs::canonicalize(tracks_dir).ok();
 
@@ -219,6 +239,14 @@ mod tests {
         let d = tempfile::tempdir().unwrap();
         let m = match_assets(&d.path().join("無い"), &cuts(&[("S01-C01", None)]));
         assert_eq!(m.missing, vec!["S01-C01".to_string()]);
+    }
+
+    #[test]
+    fn unreadable_tracks_dir_is_an_error_not_missing() {
+        let d = dir(&["file.txt"]);
+        let m = match_assets(&d.path().join("file.txt"), &cuts(&[("S01-C01", None)]));
+        assert!(m.missing.is_empty(), "{:?}", m.missing);
+        assert_eq!(m.errors.len(), 1, "{:?}", m.errors);
     }
 
     #[test]
