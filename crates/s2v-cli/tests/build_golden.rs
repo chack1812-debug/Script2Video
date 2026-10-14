@@ -1228,6 +1228,24 @@ fn mixed_image_and_video_on_different_lines_is_a_script_error_before_any_write()
 }
 
 #[test]
+fn visual_before_scene_zero_opens_is_ignored_even_if_mixed() {
+    let f = fixture(
+        "@scene 居間
+@cast
+A:田中
+
+@script
+#visual (image) 朝
+#visual (video) 昼
+#paragraph[S01]
+[S01-L001] A:あ
+",
+    );
+    write_voice(&f.voices.join("S01_L001.wav"));
+    assert_ne!(run_build(&args(&f, None, false)), Outcome::Failed);
+}
+
+#[test]
 fn mixed_image_and_video_in_scene_zero_is_a_script_error_before_any_write() {
     let f = fixture("@scene 居間\n@cast\nA:田中\n\n@script\n#cut[C02]\n#visual (image) 朝\n#visual (video) 昼\n[S00-L001] A:あ\n");
     write_voice(&f.voices.join("S00_L001.wav"));

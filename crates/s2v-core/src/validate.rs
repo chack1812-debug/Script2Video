@@ -34,6 +34,8 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
     let mut se_refs: Vec<(LineRef, Option<u32>, usize)> = Vec::new();
     let mut block: Option<Block> = None;
     let mut warned_s00 = false;
+    // S00 が実際に開かれたか(最初の #paragraph より前で、台詞・#cut・#note のどれかが出た後)
+    let mut s00_open = false;
     // 現在のカットの #visual の種類(最初に種類を示したもの)。#paragraph と #cut で空に戻す
     let mut cut_kind: Option<VisualKind> = None;
 
@@ -107,6 +109,7 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
                 match block.as_mut() {
                     Some(b) => b.lines += 1,
                     None => {
+                        s00_open = true;
                         if !warned_s00 {
                             d.warnings.push(pw(
                                 *line_no,
@@ -145,7 +148,7 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
                 kind: Some(k),
                 line_no,
                 ..
-            }) => match cut_kind {
+            }) if block.is_some() || s00_open => match cut_kind {
                 None => cut_kind = Some(*k),
                 Some(prev) if prev != *k => d.errors.push(pw(
                     *line_no,
@@ -155,6 +158,9 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
             },
             ScriptItem::Command(ScriptCommand::Cut { id, line_no })
             | ScriptItem::Command(ScriptCommand::Note { id, line_no, .. }) => {
+                if block.is_none() {
+                    s00_open = true;
+                }
                 if matches!(item, ScriptItem::Command(ScriptCommand::Cut { .. })) {
                     cut_kind = None;
                 }
@@ -283,6 +289,19 @@ mod tests {
             "#paragraph[S01]\n[S01-L001] A:一\n#cut[C02]\n#paragraph[S02]\n[S02-L001] A:二\n#cut[C02]\n",
         );
         assert!(d.errors.is_empty(), "{:?}", d.errors);
+    }
+
+    #[test]
+    fn visual_before_scene_zero_opens_is_not_checked_for_mixing() {
+        // まだ開いていない S00 の #visual は無視される(警告のみ)ので混在でもエラーにしない
+        let d = check("#visual (image) a\n#visual (video) b\n#paragraph[S01]\n[S01-L001] A:一\n");
+        assert!(d.errors.is_empty(), "{:?}", messages(&d.errors));
+    }
+
+    #[test]
+    fn image_and_video_after_a_scene_zero_line_is_an_error() {
+        let d = check("[S00-L001] A:一\n#visual (image) a\n#visual (video) b\n");
+        assert_eq!(d.errors.len(), 1, "{:?}", messages(&d.errors));
     }
 
     #[test]
