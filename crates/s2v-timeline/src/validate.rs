@@ -22,6 +22,30 @@ fn file_stem(name: &str) -> &str {
     name.rsplit_once('.').map_or(name, |(stem, _)| stem)
 }
 
+/// 台本仕様 §3.1: 番号の桁数(先頭の 0)と英字の大文字小文字は区別しない。
+/// 数字の連なりは先頭の 0 を落とし(0 だけなら "0")、英字は小文字にそろえる。
+pub(crate) fn normalize_name(s: &str) -> String {
+    let mut out = String::new();
+    let mut run = String::new();
+    let flush = |run: &mut String, out: &mut String| {
+        if !run.is_empty() {
+            let t = run.trim_start_matches('0');
+            out.push_str(if t.is_empty() { "0" } else { t });
+            run.clear();
+        }
+    };
+    for c in s.chars() {
+        if c.is_ascii_digit() {
+            run.push(c);
+        } else {
+            flush(&mut run, &mut out);
+            out.push(c.to_ascii_lowercase());
+        }
+    }
+    flush(&mut run, &mut out);
+    out
+}
+
 pub(crate) fn check(t: &Timeline) -> Vec<String> {
     let mut e: Vec<String> = Vec::new();
     let dur = t.duration_ms;
@@ -168,7 +192,7 @@ pub(crate) fn check(t: &Timeline) -> Vec<String> {
                         None => tk.id.clone(),
                         Some(r) => format!("{}.{r}", tk.id),
                     };
-                    if file_stem(&tk.files[i]) != want {
+                    if normalize_name(file_stem(&tk.files[i])) != normalize_name(&want) {
                         e.push(format!(
                             "{}: files[{i}] が {want} のファイルではありません",
                             tk.id
@@ -301,6 +325,7 @@ pub(crate) fn check(t: &Timeline) -> Vec<String> {
 
 #[cfg(test)]
 mod tests {
+    use super::normalize_name;
     use crate::*;
 
     /// 2シーン(S01 は C01・C02 とト書き1つ、S02 は無言)の正しい timeline。
@@ -564,6 +589,21 @@ mod tests {
         assert!(!broken(|t| t.takes[1].files = vec!["S01_L002.wav".into()]).is_empty()); // no_file は 0 件
         assert!(!broken(|t| t.takes[1].reason = Some(Reason::Duplicate)).is_empty()); // duplicate は 2 件以上
         assert!(!broken(|t| t.takes[0].tracks = vec![]).is_empty());
+    }
+
+    #[test]
+    fn normalize_name_ignores_padding_and_case() {
+        assert_eq!(normalize_name("S1_L1"), normalize_name("S01_L001"));
+        assert_eq!(normalize_name("S01_L001.A"), normalize_name("s01_l1.A"));
+        assert_ne!(normalize_name("S01_L002"), normalize_name("S01_L001"));
+        assert_ne!(normalize_name("S01_L010"), normalize_name("S01_L1"));
+        assert_eq!(normalize_name("S0_L00"), normalize_name("S00_L0"));
+    }
+
+    #[test]
+    fn take_files_may_differ_in_padding_and_case() {
+        let e = broken(|t| t.takes[0].files = vec!["S1_L1.WAV".into()]);
+        assert!(e.is_empty(), "{e:?}");
     }
 
     #[test]

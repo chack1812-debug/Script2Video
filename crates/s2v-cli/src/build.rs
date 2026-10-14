@@ -23,7 +23,7 @@ use s2v_export::timeline_json::{
 use s2v_export::wavio::{write_f32_stereo, write_i24_stereo};
 use s2v_export::{mix, MixRequest};
 
-use crate::layout::check_layout;
+use crate::layout::{check_layout, script_dir};
 use crate::proclog::ProcLog;
 use crate::work::{line_key, resampled_key, sha256_hex, LineKeyParams, NormMeta, WorkDir};
 use crate::Outcome;
@@ -62,15 +62,13 @@ fn file_name(p: &Path) -> String {
         .unwrap_or_default()
 }
 
-/// 台本のあるフォルダ(出力先)。相対の台本名だけなら現在のフォルダ。
-fn script_dir(script: &Path) -> PathBuf {
-    match script.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => PathBuf::from("."),
-    }
-}
-
 fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
+    // 台本が無いときは、ロックファイルも作らずに止める
+    if !args.script.is_file() {
+        eprintln!("[ERROR] 台本を読めません: {}", args.script.display());
+        eprintln!("[ERROR] 出力していません");
+        return Ok(Outcome::Failed);
+    }
     let out_dir = script_dir(&args.script);
     let voice_dir = args
         .voice_dir

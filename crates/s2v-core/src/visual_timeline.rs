@@ -52,7 +52,8 @@ pub fn layout_visuals(scenes: &[PlacedScene], duration_ms: i64) -> (Vec<SceneSpa
             let start = cut_starts[k];
             let end = cut_starts.get(k + 1).copied().unwrap_or(ve);
             let id = format_cut_id(s.id, c.number);
-            if start == end && c.number != 1 && vs != ve {
+            // 映像のない C01 が空になるのは普通(#paragraph の直後の #cut)なので警告しない
+            if start == end && !(c.number == 1 && c.visual.is_none()) && vs != ve {
                 warnings.push(format!("{id} は長さが 0 なので映像に現れません"));
             }
             cuts.push(CutSpan {
@@ -184,6 +185,20 @@ mod tests {
             ]
         );
         assert!(w.is_empty(), "{w:?}");
+    }
+
+    #[test]
+    fn empty_c01_with_a_visual_warns() {
+        let mut s2 = scene(2, 4000, &[3000], &[]);
+        s2.cuts[0].visual = Some(crate::placement::PlacedVisual {
+            text: "朝".into(),
+            kind: None,
+            looped: false,
+        });
+        let sc = vec![scene(1, 0, &[], &[]), s2];
+        let (_, w) = layout_visuals(&sc, 8000);
+        assert_eq!(w.len(), 1, "{w:?}");
+        assert!(w[0].contains("S02-C01"), "{w:?}");
     }
 
     #[test]

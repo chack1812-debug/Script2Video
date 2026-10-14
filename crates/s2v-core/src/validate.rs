@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use crate::ids::{format_scene_id, LineId, LineRef};
 use crate::parser::ParseWarning;
-use crate::types::{Scene, ScriptCommand, ScriptItem, SeAnchor};
+use crate::types::{Scene, ScriptCommand, ScriptItem, SeAnchor, VisualKind};
 
 #[derive(Debug, Default)]
 pub struct Diagnostics {
@@ -34,6 +34,8 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
     let mut se_refs: Vec<(LineRef, Option<u32>, usize)> = Vec::new();
     let mut block: Option<Block> = None;
     let mut warned_s00 = false;
+    // 現在のカットの #visual の種類(最初に種類を示したもの)。#paragraph と #cut で空に戻す
+    let mut cut_kind: Option<VisualKind> = None;
 
     for item in scenes.iter().flat_map(|s| s.items.iter()) {
         match item {
@@ -117,6 +119,7 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
             }
             ScriptItem::Command(ScriptCommand::Paragraph { id, line_no, .. }) => {
                 close_block(&mut block, &mut d);
+                cut_kind = None;
                 cur_scene = *id;
                 match id {
                     None => d.errors.push(pw(
@@ -138,8 +141,23 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
                     pause_ms: 0.0,
                 });
             }
+            ScriptItem::Command(ScriptCommand::Visual {
+                kind: Some(k),
+                line_no,
+                ..
+            }) if block.is_some() => match cut_kind {
+                None => cut_kind = Some(*k),
+                Some(prev) if prev != *k => d.errors.push(pw(
+                    *line_no,
+                    "同じカットの #visual に image と video が混在しています",
+                )),
+                _ => {}
+            },
             ScriptItem::Command(ScriptCommand::Cut { id, line_no })
             | ScriptItem::Command(ScriptCommand::Note { id, line_no, .. }) => {
+                if matches!(item, ScriptItem::Command(ScriptCommand::Cut { .. })) {
+                    cut_kind = None;
+                }
                 let (what, seen) = if matches!(item, ScriptItem::Command(ScriptCommand::Cut { .. }))
                 {
                     ("カット", &mut seen_cuts)
@@ -265,6 +283,47 @@ mod tests {
             "#paragraph[S01]\n[S01-L001] A:一\n#cut[C02]\n#paragraph[S02]\n[S02-L001] A:二\n#cut[C02]\n",
         );
         assert!(d.errors.is_empty(), "{:?}", d.errors);
+    }
+
+    #[test]
+    fn image_and_video_on_different_lines_of_one_cut_is_an_error() {
+        let d = check(
+            "#paragraph[S01]
+#visual (image) a
+#visual (video) b
+[S01-L001] A:一
+",
+        );
+        assert_eq!(d.errors.len(), 1, "{:?}", messages(&d.errors));
+        assert_eq!(d.errors[0].line_no, 10);
+        assert!(d.errors[0].message.contains("image と video が混在"));
+        // 同じ種類・種類の無い行は混在ではない
+        let d = check(
+            "#paragraph[S01]
+#visual (image) a
+#visual b
+#visual (image) c
+[S01-L001] A:一
+",
+        );
+        assert!(d.errors.is_empty(), "{:?}", messages(&d.errors));
+    }
+
+    #[test]
+    fn image_and_video_in_different_cuts_or_scenes_is_fine() {
+        let d = check(
+            "#paragraph[S01]
+#visual (image) a
+[S01-L001] A:一
+#cut[C02]
+#visual (video) b
+[S01-L002] A:二
+#paragraph[S02]
+#visual (video) c
+[S02-L001] A:三
+",
+        );
+        assert!(d.errors.is_empty(), "{:?}", messages(&d.errors));
     }
 
     #[test]

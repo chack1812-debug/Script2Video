@@ -205,7 +205,7 @@ v3 は、`s2v-timeline` の型として全フィールドを定義する(①の�
 - イベント: `start_ms` は `0 ≤ start_ms ≤ duration_ms`。
 - 一意(v2 の部分): `takes[].id`、`cast[].name` はそれぞれ重複しない。
 - テイク: `tracks` は1つ以上で重複しない(混合・単独は `[null]` の1つ)。
-  - `missing: false` なら `reason` が null、`files.len() == tracks.len() == trims.len()`、`trims[i].track == tracks[i]`。さらに `files[i]` は `tracks[i]` のファイル: `tracks[i]` が null なら、ファイル名(拡張子を除く)が `id` に等しい。役名なら、ファイル名(拡張子を除く)が `<id>.<tracks[i]>` に等しい(台本仕様 §3.1)。
+  - `missing: false` なら `reason` が null、`files.len() == tracks.len() == trims.len()`、`trims[i].track == tracks[i]`。さらに `files[i]` は `tracks[i]` のファイル: `tracks[i]` が null なら、ファイル名(拡張子を除く)が `id` に等しい。役名なら、ファイル名(拡張子を除く)が `<id>.<tracks[i]>` に等しい(台本仕様 §3.1)。ただし比較では、台詞番号・シーン番号の桁数(先頭の 0)と英字の大文字小文字を区別しない(台本仕様 §3.1、README の『桁数は問いません』)。`files` には実ファイル名をそのまま残す。
   - `missing: true` なら `reason` が null でなく、`trims` が null。`files` の件数は `reason` で決まる: `no_file` は 0、`duplicate` は 2 以上、それ以外は 1 以上。
 - 台詞のトラック: `lines[].track` は、参照先のテイクの `tracks` のどれか(混合・単独のテイクでは null)。
 - 台詞の null の規則: `missing: false` なら `reason` が null、`norm_clamped` が真偽値。`missing: true` なら `norm_clamped` も null。`reason` の値は①の設計書 §6 の列挙のどれか。

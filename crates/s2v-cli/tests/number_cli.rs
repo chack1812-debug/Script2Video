@@ -351,3 +351,11 @@ fn number_fails_while_the_folder_is_locked() {
     drop(held);
     assert_eq!(run_number(&script), Outcome::Ok);
 }
+
+#[test]
+fn number_on_missing_script_fails_before_taking_the_lock() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("none.txt");
+    assert_eq!(run_number(&script), Outcome::Failed);
+    assert!(!dir.path().join(s2v_cli::lock::LOCK_FILE).exists());
+}

@@ -1182,3 +1182,46 @@ fn unnumbered_cut_fails_build() {
     assert_eq!(fs::read(f.dir.join("output.mp4")).unwrap(), b"keep");
     assert!(!f.dir.join("output.stale.mp4").exists());
 }
+
+#[test]
+fn unpadded_and_uppercase_voice_file_names_build_and_validate() {
+    // 台本仕様 §3.1: 桁数・大文字小文字は区別しない。実ファイル名は files にそのまま残る
+    let f = fixture(SCRIPT);
+    write_voice(&f.voices.join("S1_L1.wav"));
+    write_voice(&f.voices.join("S01_L002.WAV"));
+    let o = run_build(&args(&f, None, false));
+    assert!(matches!(o, Outcome::Ok | Outcome::Warnings), "{o:?}");
+    let path = f.dir.join("timeline").join("timeline.json");
+    let v = read_json(&path);
+    let files = |i: usize| v["takes"][i]["files"][0].as_str().unwrap().to_string();
+    let takes = v["takes"].as_array().unwrap();
+    let find = |id: &str| takes.iter().position(|t| t["id"] == id).unwrap();
+    assert_eq!(files(find("S01_L001")), "S1_L1.wav");
+    assert_eq!(files(find("S01_L002")), "S01_L002.WAV");
+    s2v_timeline::load_str(&fs::read_to_string(&path).unwrap()).unwrap();
+}
+
+#[test]
+fn mixed_image_and_video_on_different_lines_is_a_script_error_before_any_write() {
+    // 台本の誤りは配置より前に止め、前回の成果物を消さず output.mp4 も改名しない
+    let f = fixture("@scene 居間\n@cast\nA:田中\n\n@script\n#paragraph[S01]\n#visual (image) 朝\n#visual (video) 昼\n[S01-L001] A:あ\n");
+    write_voice(&f.voices.join("S01_L001.wav"));
+    fs::write(f.dir.join("output.mp4"), b"keep").unwrap();
+    assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
+    assert_eq!(fs::read(f.dir.join("output.mp4")).unwrap(), b"keep");
+    assert!(!f.dir.join("output.stale.mp4").exists());
+    assert_untouched_except_output(&f.dir);
+}
+
+fn assert_untouched_except_output(dir: &Path) {
+    assert!(!dir.join("timeline").exists());
+    assert!(!dir.join("Process.log").exists());
+}
+
+#[test]
+fn missing_script_fails_before_taking_the_lock() {
+    let f = fixture(SCRIPT);
+    fs::remove_file(&f.script).unwrap();
+    assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
+    assert!(!f.dir.join(s2v_cli::lock::LOCK_FILE).exists());
+}

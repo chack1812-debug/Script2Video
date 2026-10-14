@@ -45,6 +45,11 @@ pub fn run_number(script: &Path) -> Outcome {
         return Outcome::Failed;
     }
 
+    // 台本が無いときは、ロックファイルも作らずに止める
+    if !script.is_file() {
+        eprintln!("[ERROR] 台本を読めません: {}", script.display());
+        return Outcome::Failed;
+    }
     // 同じ台本フォルダでの同時実行を防ぐ。関数の終わりまで保持する
     let _lock = match ScriptLock::acquire(&crate::layout::script_dir(script)) {
         Ok(l) => l,
