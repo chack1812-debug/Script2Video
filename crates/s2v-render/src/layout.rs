@@ -283,12 +283,14 @@ pub fn layout(ctx: &LayoutContext, text: &str, inner_h: f32) -> Layout {
 /// max_inner_h のもとでの、余白を含む最小の大きさ(切り上げの整数 px)
 pub fn min_size(ctx: &LayoutContext, text: &str) -> (u32, u32) {
     let l = layout(ctx, text, ctx.max_inner_h as f32);
-    let pad = 2 * ctx.padding;
+    // padding が大きくてもあふれないよう u64 で足し、u32::MAX に飽和させる
+    let pad = 2 * u64::from(ctx.padding);
+    let add = |v: f32| u32::try_from(u64::from(v.ceil() as u32) + pad).unwrap_or(u32::MAX);
     if l.columns.is_empty() {
-        let e = ctx.font_size.ceil() as u32 + pad;
+        let e = add(ctx.font_size);
         return (e, e);
     }
-    (l.width.ceil() as u32 + pad, l.height.ceil() as u32 + pad)
+    (add(l.width), add(l.height))
 }
 
 /// 大きさ w×h の枠の内側で組版して収まるか(設計書 §6.2)
@@ -448,6 +450,16 @@ mod tests {
             layout(&c, "港の朝、12日。AB", 160.0),
             layout(&c, "港の朝、12日。AB", 160.0)
         );
+    }
+
+    #[test]
+    fn huge_padding_does_not_overflow() {
+        let f = face();
+        let mut c = ctx(&f);
+        c.padding = u32::MAX;
+        assert_eq!(min_size(&c, "港"), (u32::MAX, u32::MAX));
+        assert_eq!(min_size(&c, ""), (u32::MAX, u32::MAX));
+        assert!(!fits(&c, "港", u32::MAX, u32::MAX));
     }
 
     #[test]
