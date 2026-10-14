@@ -201,7 +201,7 @@ v3 は、`s2v-timeline` の型として全フィールドを定義する(①の�
 - ト書き: シーンの中で `start_ms` が単調非減少。各ト書きの `end_ms` は次のト書きの `start_ms` 以下。シーンの映像区間の内側にある。
 - 参照: `lines[].scene` は `scenes[].id` のどれか。`lines[].cast` は `cast[].name` のどれか。`lines[].take` は `takes[].id` のどれか。`lines` を台本の並びにたどったとき、所属シーンの `scenes` での位置は減らない。
 - 台詞: `missing: false` なら `src_start_ms ≤ src_end_ms` と `measured_lufs`・ゲインが有限値。`missing: true` なら `reason` が null でなく、`src_*`・`measured_lufs`・ゲインが null。
-- シーン: `index` は 0(`S00`)または台本の並びの番号で、並びに沿って増える。`silent: true` のシーンには台詞が無い。
+- シーン: `index` は台本の並びの 1 からの連番(`S00` があればそれが 1。既存の①の出力と同じ)。`silent: true` のシーンには台詞が無い。
 - イベント: `start_ms` は `0 ≤ start_ms ≤ duration_ms`。
 - 一意(v2 の部分): `takes[].id`、`cast[].name` はそれぞれ重複しない。
 - テイク: `tracks` は1つ以上で重複しない(混合・単独は `[null]` の1つ)。
