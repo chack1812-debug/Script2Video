@@ -7,6 +7,7 @@ pub fn decode_args(path: &str) -> Vec<String> {
     [
         "-nostdin",
         "-hide_banner",
+        "-n",
         "-v",
         "error",
         "-i",
@@ -93,6 +94,21 @@ pub fn is_silent(reference: &[f32]) -> bool {
 
 const SR: usize = 48_000;
 
+/// 設計書 §4.6 の映像と音声の長さの検査。差が 1 コマ + 1024 サンプル以内であること(整数で判定)。
+/// |frames/fps − samples/48000| ≤ 1/fps + 1024/48000 を 48000×fps 倍した形で比べる。
+pub fn check_av_length(total_frames: i64, fps: u32, decoded_samples: usize) -> Vec<String> {
+    let fps = fps as i128;
+    let diff = (total_frames as i128 * SR as i128 - decoded_samples as i128 * fps).abs();
+    let limit = SR as i128 + 1024 * fps;
+    if diff > limit {
+        vec![format!(
+            "映像({total_frames} コマ、{fps}fps)と音声({decoded_samples} サンプル)の長さの差が 1 コマ + 1024 サンプルを超えています"
+        )]
+    } else {
+        Vec::new()
+    }
+}
+
 /// 設計書 §4.6 の音声の検査。reference は full_dialogue.wav の左右の平均。
 /// 全体が無音なら検査せず空の Vec を返す(呼び出し側が is_silent で判定して Process.log に書く)。
 pub fn check_audio(reference: &[f32], decoded: &[f32]) -> Vec<String> {
@@ -163,6 +179,34 @@ mod tests {
         assert!(check_audio(&r, &r).is_empty());
         assert!(is_silent(&vec![0.0; 48_000]));
         assert!(!is_silent(&r));
+    }
+
+    #[test]
+    fn decode_args_have_nostdin_hide_banner_and_n() {
+        assert_eq!(
+            &decode_args("o.mp4")[..6],
+            ["-nostdin", "-hide_banner", "-n", "-v", "error", "-i"]
+        );
+    }
+
+    #[test]
+    fn shifted_audio_after_leading_silence_is_detected() {
+        let mut r = vec![0.0; 48_000 * 12];
+        r.extend(noise(48_000 * 3, 3));
+        let mut d = vec![0.0; 48_000 * 12 + 100];
+        d.extend_from_slice(&r[48_000 * 12..r.len() - 100]);
+        assert_eq!(d.len(), r.len());
+        assert!(!check_audio(&r, &d).is_empty());
+    }
+
+    #[test]
+    fn av_length_boundaries() {
+        // 90 コマ(30fps)= 144000 サンプル。許容は 1 コマ(1600)+ 1024 サンプル。
+        assert!(check_av_length(90, 30, 144_000).is_empty());
+        assert!(check_av_length(90, 30, 144_000 + 1600 + 1024).is_empty());
+        assert!(!check_av_length(90, 30, 144_000 + 1600 + 1025).is_empty());
+        assert!(check_av_length(90, 30, 144_000 - 1600 - 1024).is_empty());
+        assert!(!check_av_length(90, 30, 144_000 - 1600 - 1025).is_empty());
     }
 
     #[test]
