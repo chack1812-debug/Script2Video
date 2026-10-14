@@ -46,11 +46,7 @@ pub fn run_number(script: &Path) -> Outcome {
     }
 
     // 同じ台本フォルダでの同時実行を防ぐ。関数の終わりまで保持する
-    let dir = match script.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p,
-        _ => Path::new("."),
-    };
-    let _lock = match ScriptLock::acquire(dir) {
+    let _lock = match ScriptLock::acquire(&crate::layout::script_dir(script)) {
         Ok(l) => l,
         Err(e) => {
             eprintln!("[ERROR] {e}");

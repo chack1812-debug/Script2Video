@@ -113,6 +113,14 @@ pub fn is_inside(inner: &Path, root: &Path) -> bool {
     i.len() >= r.len() && i[..r.len()] == r[..]
 }
 
+/// 台本のあるフォルダ(親が空なら `.`)。正規化はしない。
+pub fn script_dir(script: &Path) -> PathBuf {
+    match script.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
+        _ => PathBuf::from("."),
+    }
+}
+
 /// 台本フォルダ(相対の台本名だけなら `cwd`)。正規化済み。
 pub fn script_folder(script: &Path, cwd: &Path) -> PathBuf {
     let parent = script.parent().unwrap_or(Path::new(""));
@@ -177,6 +185,12 @@ mod tests {
 
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn script_dir_falls_back_to_dot() {
+        assert_eq!(script_dir(Path::new("s.txt")), PathBuf::from("."));
+        assert_eq!(script_dir(Path::new("a/s.txt")), PathBuf::from("a"));
     }
 
     #[test]

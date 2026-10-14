@@ -1,10 +1,11 @@
 //! 後続コマンド(prompts・bubbles・render)の共通の鮮度の検査(映像工程設計書 §2.4)。
 
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 use s2v_timeline::Timeline;
 
 use crate::fsutil::sha256_file;
+use crate::layout::script_dir;
 
 /// 24 時間(ミリ秒)。これを超える台本は bubbles・render で扱わない(設計書 §4.2)。
 pub const MAX_DURATION_MS: i64 = 86_400_000;
@@ -14,16 +15,9 @@ pub struct Fresh {
     pub warnings: Vec<String>,
 }
 
-fn folder(script: &Path) -> PathBuf {
-    match script.parent() {
-        Some(p) if !p.as_os_str().is_empty() => p.to_path_buf(),
-        _ => PathBuf::from("."),
-    }
-}
-
 /// Err は終了コード 2 の理由。`need_audio` は bubbles・render(音声と長さも確かめる)。
 pub fn check_fresh(script: &Path, need_audio: bool) -> Result<Fresh, String> {
-    let dir = folder(script);
+    let dir = script_dir(script);
     let tl_path = dir.join("timeline").join("timeline.json");
     let text = match std::fs::read_to_string(&tl_path) {
         Ok(t) => t,
@@ -136,17 +130,53 @@ mod tests {
         assert_eq!(f.warnings.len(), 1);
     }
 
+    fn err_of(r: Result<Fresh, String>) -> String {
+        match r {
+            Ok(_) => panic!("Err になるはず"),
+            Err(e) => e,
+        }
+    }
+
     #[test]
-    fn audio_mismatch_missing_timeline_and_zero_duration_are_errors() {
+    fn audio_mismatch_is_an_error_only_when_audio_is_needed() {
         let (d, script) = setup(1000);
         std::fs::write(d.path().join("full_dialogue.wav"), "別の音声").unwrap();
-        assert!(check_fresh(&script, true).is_err());
+        let e = err_of(check_fresh(&script, true));
+        assert!(e.contains("別の build"), "{e}");
         assert!(check_fresh(&script, false).is_ok()); // prompts は音声を見ない
-        let (_d2, script2) = setup(0);
-        assert!(check_fresh(&script2, true).is_err());
+    }
+
+    #[test]
+    fn missing_wav_is_an_error_when_audio_is_needed() {
+        let (d, script) = setup(1000);
+        std::fs::remove_file(d.path().join("full_dialogue.wav")).unwrap();
+        let e = err_of(check_fresh(&script, true));
+        assert!(e.contains("読めません"), "{e}");
+        assert!(check_fresh(&script, false).is_ok());
+    }
+
+    #[test]
+    fn zero_duration_is_an_error_when_audio_is_needed() {
+        let (_d, script) = setup(0);
+        let e = err_of(check_fresh(&script, true));
+        assert!(e.contains("長さが 0"), "{e}");
+        assert!(check_fresh(&script, false).is_ok());
+    }
+
+    #[test]
+    fn duration_over_24_hours_is_an_error_but_exactly_24_hours_passes() {
+        let (_d, script) = setup(MAX_DURATION_MS);
+        assert!(check_fresh(&script, true).is_ok());
+        let (_d2, script2) = setup(MAX_DURATION_MS + 1);
+        let e = err_of(check_fresh(&script2, true));
+        assert!(e.contains("24 時間"), "{e}");
         assert!(check_fresh(&script2, false).is_ok());
-        let d3 = tempfile::tempdir().unwrap();
-        let e = check_fresh(&d3.path().join("s.txt"), false).err().unwrap();
+    }
+
+    #[test]
+    fn missing_timeline_json_says_to_run_build() {
+        let d = tempfile::tempdir().unwrap();
+        let e = err_of(check_fresh(&d.path().join("s.txt"), false));
         assert!(e.contains("build"), "{e}");
     }
 
@@ -158,6 +188,7 @@ mod tests {
             "{\"schema_version\":2}",
         )
         .unwrap();
-        assert!(check_fresh(&script, false).is_err());
+        let e = err_of(check_fresh(&script, false));
+        assert!(e.contains("版"), "{e}");
     }
 }
