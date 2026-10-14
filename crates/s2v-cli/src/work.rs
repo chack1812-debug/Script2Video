@@ -58,6 +58,17 @@ pub struct WorkDir {
 impl WorkDir {
     /// `root`(出力フォルダの `work/`)を開く。書き込めなければ Err(→ 終了コード 2)。
     pub fn open(root: &Path, no_cache: bool) -> anyhow::Result<(WorkDir, Option<String>)> {
+        // リンク越しに書き込み・削除しないよう、work/ とその中のフォルダがリンクなら拒否する
+        for dir in std::iter::once(root.to_path_buf()).chain(SUBDIRS.iter().map(|s| root.join(s))) {
+            if let Ok(m) = std::fs::symlink_metadata(&dir) {
+                if m.file_type().is_symlink() {
+                    anyhow::bail!(
+                        "{} はリンクです。実際のフォルダにしてください",
+                        dir.display()
+                    );
+                }
+            }
+        }
         for sub in SUBDIRS {
             std::fs::create_dir_all(root.join(sub))?;
         }
@@ -321,6 +332,36 @@ mod tests {
         nc.store("resampled/S01_L002.wav", "k", &[0.5], None)
             .unwrap();
         assert!(nc.lookup("resampled/S01_L002.wav", "k").is_none());
+    }
+
+    #[test]
+    fn open_refuses_linked_work_subfolder() {
+        let tmp = tempfile::tempdir().unwrap();
+        let foreign = tmp.path().join("foreign");
+        std::fs::create_dir_all(&foreign).unwrap();
+        std::fs::write(foreign.join("keep.wav"), b"x").unwrap();
+        let root = tmp.path().join("work");
+        std::fs::create_dir_all(&root).unwrap();
+        let link = root.join("lines");
+        #[cfg(windows)]
+        let made = std::os::windows::fs::symlink_dir(&foreign, &link).is_ok()
+            || std::process::Command::new("cmd")
+                .args(["/C", "mklink", "/J"])
+                .arg(&link)
+                .arg(&foreign)
+                .output()
+                .map(|o| o.status.success())
+                .unwrap_or(false);
+        #[cfg(not(windows))]
+        let made = std::os::unix::fs::symlink(&foreign, &link).is_ok();
+        if !made {
+            if cfg!(windows) {
+                panic!("リンクを作れません(テストの準備の不具合)");
+            }
+            return;
+        }
+        assert!(WorkDir::open(&root, false).is_err());
+        assert!(foreign.join("keep.wav").exists());
     }
 
     #[test]

@@ -913,26 +913,41 @@ fn default_voices_that_is_a_file_gives_the_same_guidance_as_missing() {
     );
 }
 
-/// ディレクトリのリンクを作る(権限などで作れなければ None)。
-fn make_dir_link(link: &Path, target: &Path) -> Option<()> {
+/// ディレクトリのリンクを作る。作れなければ false。
+fn try_dir_link(link: &Path, target: &Path) -> bool {
     #[cfg(windows)]
     {
         if std::os::windows::fs::symlink_dir(target, link).is_ok() {
-            return Some(());
+            return true;
         }
-        let ok = std::process::Command::new("cmd")
+        std::process::Command::new("cmd")
             .args(["/C", "mklink", "/J"])
             .arg(link)
             .arg(target)
             .output()
             .map(|o| o.status.success())
-            .unwrap_or(false);
-        ok.then_some(())
+            .unwrap_or(false)
     }
     #[cfg(not(windows))]
     {
-        std::os::unix::fs::symlink(target, link).ok()
+        std::os::unix::fs::symlink(target, link).is_ok()
     }
+}
+
+/// リンクを作る。Windows では mklink /J に権限は要らないので、作れなければテストの準備の不具合として止める。
+/// それ以外の OS では作れなければ false(テストを省略する)。
+fn make_dir_link(link: &Path, target: &Path) -> bool {
+    if try_dir_link(link, target) {
+        return true;
+    }
+    if cfg!(windows) {
+        panic!(
+            "ディレクトリのリンク(シンボリックリンクとジャンクション)を作れません: {}。テストの準備に失敗しました",
+            link.display()
+        );
+    }
+    eprintln!("リンクを作れないためテストを省略します: {}", link.display());
+    false
 }
 
 #[test]
@@ -950,8 +965,7 @@ fn linked_output_folders_pointing_outside_are_refused_without_deleting() {
         ] {
             fs::write(foreign.join(n), b"precious").unwrap();
         }
-        if make_dir_link(&f.dir.join(sub), &foreign).is_none() {
-            eprintln!("リンクを作れないため {sub} のテストを省略します");
+        if !make_dir_link(&f.dir.join(sub), &foreign) {
             return;
         }
         assert_eq!(run_build(&no_voice_args(&f)), Outcome::Failed, "{sub}");
@@ -965,5 +979,34 @@ fn linked_output_folders_pointing_outside_are_refused_without_deleting() {
             assert_eq!(fs::read(foreign.join(n)).unwrap(), b"precious", "{sub}/{n}");
         }
         assert!(!f.dir.join("Process.log").exists(), "{sub}");
+    }
+}
+
+#[test]
+fn linked_work_subfolders_pointing_outside_are_refused_without_writing_or_deleting() {
+    for sub in ["resampled", "lines", "lines_prefade"] {
+        let f = fixture(ONE_LINE);
+        write_voice(&f.voices.join("S01_L001.wav"));
+        let foreign = f._tmp.path().join("foreign");
+        fs::create_dir_all(&foreign).unwrap();
+        let decoys = ["S01-L001.wav", "S01_L001.wav", "decoy.wav", "keep.txt"];
+        for n in decoys {
+            fs::write(foreign.join(n), b"precious").unwrap();
+        }
+        fs::create_dir_all(f.dir.join("work")).unwrap();
+        if !make_dir_link(&f.dir.join("work").join(sub), &foreign) {
+            return;
+        }
+        assert_eq!(run_build(&no_voice_args(&f)), Outcome::Failed, "{sub}");
+        for n in decoys {
+            assert_eq!(fs::read(foreign.join(n)).unwrap(), b"precious", "{sub}/{n}");
+        }
+        assert_eq!(
+            fs::read_dir(&foreign).unwrap().count(),
+            decoys.len(),
+            "{sub}"
+        );
+        assert!(!f.dir.join("Process.log").exists(), "{sub}");
+        assert!(!f.dir.join("timeline").exists(), "{sub}");
     }
 }

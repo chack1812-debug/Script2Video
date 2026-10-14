@@ -5,6 +5,9 @@ use std::path::{Component, Path, PathBuf};
 
 use anyhow::bail;
 
+/// `work/` の中のフォルダ(これらもリンクで台本フォルダの外へ出してはいけない)。
+pub const WORK_SUBDIRS: [&str; 3] = ["resampled", "lines", "lines_prefade"];
+
 /// 台本のファイル名にできない、出力側の名前(大文字小文字は区別しない)。
 pub const RESERVED_NAMES: [&str; 3] = ["full_dialogue.wav", "Process.log", "output.mp4"];
 /// 収録フォルダにできない、出力側のフォルダ名。
@@ -97,7 +100,9 @@ pub fn script_folder(script: &Path, cwd: &Path) -> PathBuf {
 
 /// 出力用フォルダが台本フォルダの外へのリンクでないことを確かめる(リンク越しに削除しないため)。
 pub fn check_contained(root: &Path, name: &str) -> anyhow::Result<()> {
-    let p = root.join(name);
+    let p = name
+        .split('/')
+        .fold(root.to_path_buf(), |acc, c| acc.join(c));
     let Ok(meta) = std::fs::symlink_metadata(&p) else {
         return Ok(()); // まだ無い
     };
@@ -141,6 +146,9 @@ pub fn check_layout(script: &Path, voice_dir: Option<&Path>, cwd: &Path) -> anyh
     }
     for sub in OUTPUT_DIRS {
         check_contained(&root, sub)?;
+    }
+    for sub in WORK_SUBDIRS {
+        check_contained(&root, &format!("work/{sub}"))?;
     }
     if voice_dir.is_none() {
         check_contained(&root, "voices")?;
@@ -253,6 +261,16 @@ mod tests {
             &PathBuf::from("a").join("script2").join("x"),
             &root
         ));
+    }
+
+    #[test]
+    fn work_subfolders_are_checked_too() {
+        let t = tmp();
+        std::fs::create_dir_all(t.path().join("work").join("lines")).unwrap();
+        assert!(check_contained(t.path(), "work/lines").is_ok());
+        assert!(check_contained(t.path(), "work/resampled").is_ok());
+        let script = t.path().join("s.txt");
+        assert!(check_layout(&script, None, t.path()).is_ok());
     }
 
     #[test]
