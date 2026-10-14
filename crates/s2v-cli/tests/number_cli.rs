@@ -359,3 +359,37 @@ fn number_on_missing_script_fails_before_taking_the_lock() {
     assert_eq!(run_number(&script), Outcome::Failed);
     assert!(!dir.path().join(s2v_cli::lock::LOCK_FILE).exists());
 }
+
+/// 台本のシンボリックリンクを作る。作れなければ false(権限が無い環境ではテストを飛ばす)。
+fn try_file_link(link: &std::path::Path, target: &std::path::Path) -> bool {
+    #[cfg(windows)]
+    {
+        std::os::windows::fs::symlink_file(target, link).is_ok()
+    }
+    #[cfg(unix)]
+    {
+        std::os::unix::fs::symlink(target, link).is_ok()
+    }
+}
+
+#[test]
+fn number_refuses_a_symlinked_script_without_writing() {
+    let dir = tempfile::tempdir().unwrap();
+    let real = dir.path().join("real.txt");
+    fs::write(&real, SCRIPT).unwrap();
+    let link = dir.path().join("link.txt");
+    if !try_file_link(&link, &real) {
+        eprintln!("シンボリックリンクを作れないためテストを省略します");
+        return;
+    }
+    assert_eq!(run_number(&link), Outcome::Failed);
+    // リンクはリンクのまま、実体も変わらず、何も作られない
+    assert!(fs::symlink_metadata(&link)
+        .unwrap()
+        .file_type()
+        .is_symlink());
+    assert_eq!(fs::read_to_string(&real).unwrap(), SCRIPT);
+    assert!(!dir.path().join("link.bak").exists());
+    assert!(!dir.path().join("link.ids").exists());
+    assert!(!dir.path().join(s2v_cli::lock::LOCK_FILE).exists());
+}

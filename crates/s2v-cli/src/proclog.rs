@@ -19,12 +19,18 @@ impl ProcLog {
 
     /// 追記で開き、区切りの行 `== <command> <時刻>(UTC) ==` を書く(prompts・bubbles・render 用)。
     pub fn append(path: &Path, command: &str) -> anyhow::Result<Self> {
+        // 既存のログが改行で終わっていなければ、区切りの行が前の行に続いてしまうので改行を足す
+        let needs_newline = std::fs::read(path)
+            .map(|b| b.last().is_some_and(|&c| c != b'\n'))
+            .unwrap_or(false);
         let f = std::fs::OpenOptions::new()
             .create(true)
             .append(true)
             .open(path)?;
         let mut log = Self::from_writer(Box::new(f));
-        let r = writeln!(log.out, "== {command} {} ==", utc_now()).and_then(|()| log.out.flush());
+        let sep = if needs_newline { "\n" } else { "" };
+        let r =
+            writeln!(log.out, "{sep}== {command} {} ==", utc_now()).and_then(|()| log.out.flush());
         if let Err(e) = r {
             log.write_error = Some(e);
         }
@@ -142,6 +148,28 @@ mod tests {
         let text = std::fs::read_to_string(&p).unwrap();
         assert!(text.starts_with("[INFO] build\n== render "), "{text}");
         assert!(text.ends_with("[INFO] ok\n"), "{text}");
+    }
+
+    #[test]
+    fn append_separates_header_when_previous_log_lacks_trailing_newline() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("Process.log");
+        std::fs::write(&p, "[INFO] build").unwrap();
+        drop(ProcLog::append(&p, "render").unwrap());
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("[INFO] build\n== render "), "{text}");
+        // 空のファイル・存在しないファイルでは余計な改行を入れない
+        let e = d.path().join("empty.log");
+        std::fs::write(&e, "").unwrap();
+        drop(ProcLog::append(&e, "render").unwrap());
+        assert!(std::fs::read_to_string(&e)
+            .unwrap()
+            .starts_with("== render "));
+        let n = d.path().join("none.log");
+        drop(ProcLog::append(&n, "render").unwrap());
+        assert!(std::fs::read_to_string(&n)
+            .unwrap()
+            .starts_with("== render "));
     }
 
     #[test]

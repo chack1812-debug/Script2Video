@@ -121,6 +121,19 @@ pub fn script_dir(script: &Path) -> PathBuf {
     }
 }
 
+/// 台本(引数のパス)がシンボリックリンクならエラーにする。
+/// 原子的な書き換えがリンク自体を通常のファイルに置き換えてしまうため、実体を指定させる。
+/// 存在しない・調べられないパスは別の検査に任せて Ok とする。
+pub fn check_not_symlink(script: &Path) -> anyhow::Result<()> {
+    match std::fs::symlink_metadata(script) {
+        Ok(m) if m.file_type().is_symlink() => anyhow::bail!(
+            "台本がリンク(シンボリックリンク)です。実体のファイルを指定してください: {}",
+            script.display()
+        ),
+        _ => Ok(()),
+    }
+}
+
 /// 台本フォルダ(相対の台本名だけなら `cwd`)。正規化済み。
 pub fn script_folder(script: &Path, cwd: &Path) -> PathBuf {
     let parent = script.parent().unwrap_or(Path::new(""));
@@ -185,6 +198,15 @@ mod tests {
 
     fn tmp() -> tempfile::TempDir {
         tempfile::tempdir().unwrap()
+    }
+
+    #[test]
+    fn check_not_symlink_accepts_regular_and_missing_files() {
+        let d = tmp();
+        let f = d.path().join("s.txt");
+        std::fs::write(&f, "x").unwrap();
+        assert!(check_not_symlink(&f).is_ok());
+        assert!(check_not_symlink(&d.path().join("none.txt")).is_ok());
     }
 
     #[test]

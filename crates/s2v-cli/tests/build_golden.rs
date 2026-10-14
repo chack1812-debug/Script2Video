@@ -1100,12 +1100,26 @@ fn stale_rename_failure_keeps_previous_outputs() {
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Ok);
     fs::write(f.dir.join("output.mp4"), b"mp4").unwrap();
     fs::create_dir_all(f.dir.join("output.stale.mp4").join("x")).unwrap();
-    assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
+    let log_before = fs::read(f.dir.join("Process.log")).unwrap();
+    // 実行ファイルを起動して標準エラーを取る
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_script2video"))
+        .arg("build")
+        .arg(&f.script)
+        .arg("--voice-dir")
+        .arg(&f.voices)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
     assert_all_final_artifacts(&f.dir);
     assert_eq!(fs::read(f.dir.join("output.mp4")).unwrap(), b"mp4");
-    // 失敗の原因が改名であること
-    let log = fs::read_to_string(f.dir.join("Process.log")).unwrap();
-    assert!(log.contains("output.stale.mp4 に改名できません"), "{log}");
+    // 失敗の原因が改名であること(標準エラーにだけ出し、前回の Process.log は変えない)
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("古い output.mp4 を output.stale.mp4 に改名できません"),
+        "{stderr}"
+    );
+    assert!(stderr.contains("出力していません"), "{stderr}");
+    assert_eq!(fs::read(f.dir.join("Process.log")).unwrap(), log_before);
 }
 
 #[test]
@@ -1213,6 +1227,17 @@ fn mixed_image_and_video_on_different_lines_is_a_script_error_before_any_write()
     assert_untouched_except_output(&f.dir);
 }
 
+#[test]
+fn mixed_image_and_video_in_scene_zero_is_a_script_error_before_any_write() {
+    let f = fixture("@scene 居間\n@cast\nA:田中\n\n@script\n#cut[C02]\n#visual (image) 朝\n#visual (video) 昼\n[S00-L001] A:あ\n");
+    write_voice(&f.voices.join("S00_L001.wav"));
+    fs::write(f.dir.join("output.mp4"), b"keep").unwrap();
+    assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
+    assert_eq!(fs::read(f.dir.join("output.mp4")).unwrap(), b"keep");
+    assert!(!f.dir.join("output.stale.mp4").exists());
+    assert_untouched_except_output(&f.dir);
+}
+
 fn assert_untouched_except_output(dir: &Path) {
     assert!(!dir.join("timeline").exists());
     assert!(!dir.join("Process.log").exists());
@@ -1224,4 +1249,24 @@ fn missing_script_fails_before_taking_the_lock() {
     fs::remove_file(&f.script).unwrap();
     assert_eq!(run_build(&args(&f, None, false)), Outcome::Failed);
     assert!(!f.dir.join(s2v_cli::lock::LOCK_FILE).exists());
+}
+
+#[test]
+fn symlinked_script_is_refused_before_the_lock_and_any_write() {
+    let f = fixture(SCRIPT);
+    let link = f.dir.join("リンク.txt");
+    #[cfg(windows)]
+    let made = std::os::windows::fs::symlink_file(&f.script, &link).is_ok();
+    #[cfg(unix)]
+    let made = std::os::unix::fs::symlink(&f.script, &link).is_ok();
+    if !made {
+        eprintln!("シンボリックリンクを作れないためテストを省略します");
+        return;
+    }
+    let mut a = args(&f, None, false);
+    a.script = link;
+    assert_eq!(run_build(&a), Outcome::Failed);
+    assert!(!f.dir.join(s2v_cli::lock::LOCK_FILE).exists());
+    assert_no_final_artifacts(&f.dir);
+    assert!(!f.dir.join("Process.log").exists());
 }

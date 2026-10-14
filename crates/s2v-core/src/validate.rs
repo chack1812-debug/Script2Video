@@ -145,7 +145,7 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
                 kind: Some(k),
                 line_no,
                 ..
-            }) if block.is_some() => match cut_kind {
+            }) => match cut_kind {
                 None => cut_kind = Some(*k),
                 Some(prev) if prev != *k => d.errors.push(pw(
                     *line_no,
@@ -283,6 +283,16 @@ mod tests {
             "#paragraph[S01]\n[S01-L001] A:一\n#cut[C02]\n#paragraph[S02]\n[S02-L001] A:二\n#cut[C02]\n",
         );
         assert!(d.errors.is_empty(), "{:?}", d.errors);
+    }
+
+    #[test]
+    fn image_and_video_in_one_cut_of_scene_zero_is_an_error() {
+        let d = check("#cut[C02]\n#visual (image) a\n#visual (video) b\n[S00-L001] A:一\n");
+        assert_eq!(d.errors.len(), 1, "{:?}", messages(&d.errors));
+        assert!(d.errors[0].message.contains("image と video が混在"));
+        // カットが違えば混在ではない
+        let d = check("#visual (image) a\n#cut[C02]\n#visual (video) b\n[S00-L001] A:一\n");
+        assert!(d.errors.is_empty(), "{:?}", messages(&d.errors));
     }
 
     #[test]

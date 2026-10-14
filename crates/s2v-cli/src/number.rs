@@ -45,6 +45,11 @@ pub fn run_number(script: &Path) -> Outcome {
         return Outcome::Failed;
     }
 
+    // 台本がリンクのときは、何も書かずに止める(ロックより前)
+    if let Err(e) = crate::layout::check_not_symlink(script) {
+        eprintln!("[ERROR] {e}");
+        return Outcome::Failed;
+    }
     // 台本が無いときは、ロックファイルも作らずに止める
     if !script.is_file() {
         eprintln!("[ERROR] 台本を読めません: {}", script.display());

@@ -14,7 +14,7 @@ script2video build <台本.txt> [--voice-dir <収録フォルダ>] [--config <�
 - `2`: 出力できない(設定値の範囲外、台本の構文エラー、配置エラー、`work/` に書けない、入出力の失敗など)
 
 出力を始める前に判明する失敗(設定値の範囲外・台本の構文エラー)では、前回の出力には触れません。
-出力を始めた後に失敗した場合は、古い成果物が残らないよう、前回の `full_dialogue.wav`、`tracks/*.wav`、`timeline/` の `timeline.json`・`subtitles.srt`・`timeline.fcpxml` だけを消します(`voices/`・`work/`・台本とその `.bak` `.ids` `.html` には触れません)。台本の最後に書いた `#pause` は、その長さだけ `full_dialogue.wav` の末尾の無音になります。`build` は `output.mp4` を作りません。前回の `output.mp4` があれば、出力を始める時点で `output.stale.mp4` に改名します(前の `output.stale.mp4` は上書き)。改名できなければ何も出力せず終了コード 2 で止まります。
+出力を始めた後に失敗した場合は、古い成果物が残らないよう、前回の `full_dialogue.wav`、`tracks/*.wav`、`timeline/` の `timeline.json`・`subtitles.srt`・`timeline.fcpxml` だけを消します(`voices/`・`work/`・台本とその `.bak` `.ids` `.html` には触れません)。台本の最後に書いた `#pause` は、その長さだけ `full_dialogue.wav` の末尾の無音になります。`build` は `output.mp4` を作りません。前回の `output.mp4` があれば、出力を始める時点で `output.stale.mp4` に改名します(前の `output.stale.mp4` は上書き)。改名は `Process.log` を作り直す前に行い、改名できなければ何も出力せず(前回の `Process.log` も変えず)、標準エラーにだけ理由を出して終了コード 2 で止まります。改名できたときは、作り直した `Process.log` の先頭に記録します。台本がシンボリックリンクのときは、`number`・`build` ともに何も書かずに終了コード 2 で止まります(実体のファイルを指定してください)。
 
 同じ台本フォルダで `number`・`build` を同時に実行すると、後から始めた方が終了コード 2 で止まります(`.script2video.lock` で排他)。失敗の理由は `Process.log` に記録します。
 
@@ -58,7 +58,7 @@ script2video build 第1話.txt --voice-dir 収録/
 
 詳しくは [台本仕様.md](台本仕様.md) の §2.8(`#cut`・`#visual`)・§2.9(`#note`)を参照。
 
-台本の書式は [台本仕様.md](台本仕様.md)、設計は [docs/superpowers/specs/2026-10-12-script2video-design.md](docs/superpowers/specs/2026-10-12-script2video-design.md) を参照。
+台本の書式は [台本仕様.md](台本仕様.md)、設計は [docs/superpowers/specs/2026-10-12-script2video-design.md](docs/superpowers/specs/2026-10-12-script2video-design.md) と、映像工程の設計 [docs/superpowers/specs/2026-10-14-script2video-video-design.md](docs/superpowers/specs/2026-10-14-script2video-video-design.md) を参照。
 
 ## 出力(台本フォルダ)
 

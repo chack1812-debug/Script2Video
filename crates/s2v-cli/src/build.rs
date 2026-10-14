@@ -63,6 +63,12 @@ fn file_name(p: &Path) -> String {
 }
 
 fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
+    // 台本がリンクのときは、何も書かずに止める(ロックより前)
+    if let Err(e) = crate::layout::check_not_symlink(&args.script) {
+        eprintln!("[ERROR] {e}");
+        eprintln!("[ERROR] 出力していません");
+        return Ok(Outcome::Failed);
+    }
     // 台本が無いときは、ロックファイルも作らずに止める
     if !args.script.is_file() {
         eprintln!("[ERROR] 台本を読めません: {}", args.script.display());
@@ -132,18 +138,19 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "script".to_string());
-    let mut log = ProcLog::create(&out_dir.join("Process.log"))?;
-    // コミットポイントの直前に古い完成動画を改名する。失敗しても前回の成果物は消さない
-    match rename_stale_output(&out_dir) {
-        Ok(true) => log.info("古い output.mp4 を output.stale.mp4 に改名しました"),
-        Ok(false) => {}
+    // コミットポイントの直前に古い完成動画を改名する。Process.log を作る(切り詰める)より前に行い、
+    // 失敗したときは前回の成果物も Process.log も変えず、標準エラーにだけ出す
+    let renamed = match rename_stale_output(&out_dir) {
+        Ok(r) => r,
         Err(e) => {
-            log.error(format!(
-                "古い output.mp4 を output.stale.mp4 に改名できません: {e}"
-            ));
-            log.error("出力していません");
+            eprintln!("[ERROR] 古い output.mp4 を output.stale.mp4 に改名できません: {e}");
+            eprintln!("[ERROR] 出力していません");
             return Ok(Outcome::Failed);
         }
+    };
+    let mut log = ProcLog::create(&out_dir.join("Process.log"))?;
+    if renamed {
+        log.info("古い output.mp4 を output.stale.mp4 に改名しました");
     }
     let script_warnings: Vec<String> = parser
         .warnings()
