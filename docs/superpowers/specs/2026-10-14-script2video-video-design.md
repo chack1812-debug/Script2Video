@@ -204,7 +204,10 @@ v3 は、`s2v-timeline` の型として全フィールドを定義する(①の�
 - シーン: `index` は 0(`S00`)または台本の並びの番号で、並びに沿って増える。`silent: true` のシーンには台詞が無い。
 - イベント: `start_ms` は `0 ≤ start_ms ≤ duration_ms`。
 - 一意(v2 の部分): `takes[].id`、`cast[].name` はそれぞれ重複しない。
-- テイク: `tracks` は1つ以上。`missing: false` なら `reason` が null、`files` が1つ以上、`trims` の件数が `tracks` と同じ。`missing: true` なら `reason` が null でなく、`trims` が null。
+- テイク: `tracks` は1つ以上で重複しない(混合・単独は `[null]` の1つ)。
+  - `missing: false` なら `reason` が null、`files.len() == tracks.len() == trims.len()`、`trims[i].track == tracks[i]`。
+  - `missing: true` なら `reason` が null でなく、`trims` が null。`files` の件数は `reason` で決まる: `no_file` は 0、`duplicate` は 2 以上、それ以外は 1 以上。
+- 台詞のトラック: `lines[].track` は、参照先のテイクの `tracks` のどれか(混合・単独のテイクでは null)。
 - 台詞の null の規則: `missing: false` なら `reason` が null、`norm_clamped` が真偽値。`missing: true` なら `norm_clamped` も null。`reason` の値は①の設計書 §6 の列挙のどれか。
 - イベント: `type` は `se`・`bgm_start`・`bgm_stop` のどれか。`se` は `file`・`start_ms`・`gain_db`、`bgm_start` は `file`・`start_ms`、`bgm_stop` は `start_ms` を必ず持つ。
 - 数値: 時刻・長さは i64 に収まる非負の整数。浮動小数は有限値。
@@ -258,14 +261,19 @@ ffmpeg は引数の配列で直接起動する(シェルを経由しない)。�
 ```
 ffconcat version 1.0
 file 'ov_0001.png'
+option framerate 60
 duration 1.483333
 file 'ov_empty.png'
+option framerate 60
 duration 2.000000
 file 'ov_empty.png'
+option framerate 60
 ```
 
-- 区間 k の重ね画像は、カット内の時刻 `t_k = (r_k − 0.5) / fps` 秒(k = 0 は 0)から始まる。**切り替えをコマの境目の半コマ手前に置く**ので、時刻の丸めの誤差(1µs 未満)があっても、コマ r_k には必ず区間 k の画像が、コマ r_k − 1 には区間 k−1 の画像が当たる。
-- `duration` は、各 t_k をマイクロ秒に丸めた値の差で書く(差を足し合わせても丸めの誤差が積み重ならない)。小数6桁。
+- **時刻の精度**: 全ての `file` に `option framerate <2×fps>` を付ける(最後の再掲の項目も)。付けないと、画像の入力の time base が既定の 1/25 秒になり、concat が足す開始時刻がその精度に丸められて、半コマ手前の切り替えが崩れる。`2×fps` なら time base は `1/(2×fps)` で、半コマの格子の時刻をちょうど表せる。
+- 区間の数を m とし、区間 k(0 ≤ k < m)の始まりを `u_0 = 0`、`u_k = (r_k − 0.5) / fps`(1 ≤ k < m)、終わりの時刻を `u_m = N / fps` とする。区間 k の重ね画像は `u_k` から始まる。**切り替えをコマの境目の半コマ手前に置く**ので、コマ r_k には必ず区間 k の画像が、コマ r_k − 1 には区間 k−1 の画像が当たる。
+- 区間 k の `duration` は `round_us(u_{k+1}) − round_us(u_k)`(`round_us` はマイクロ秒への四捨五入。差を足し合わせても丸めの誤差が積み重ならない)。小数6桁。
+- concat は各画像の開始時刻を time base `1/(2×fps)` の目盛りに丸める。区間 k の画像の時刻は、目盛りで `0, 2r_1 − 1, 2r_2 − 1, …` になる(マイクロ秒の丸めの誤差は目盛りの半分よりずっと小さいので、正しい目盛りに丸まる)。
 - 最後の項目は、ffmpeg の concat の仕様に合わせて、最後の画像をもう一度 `duration` なしで書く。
 
 **カットファイル**(コマ数 N):
@@ -277,16 +285,16 @@ file 'ov_empty.png'
 ```
 [0:v]setpts=PTS-STARTPTS,fps=<fps>,<収め方>,setsar=1,format=yuv420p<,tpad>,trim=end_frame=N,setpts=PTS-STARTPTS[bg];
 [1:v]setpts=PTS-STARTPTS,format=rgba[o];
-[bg][o]overlay=x=0:y=0:alpha=straight:eof_action=repeat:repeatlast=1:shortest=0,format=yuv420p[v]
+[bg][o]overlay=x=0:y=0:alpha=straight:eof_action=repeat:repeatlast=1:shortest=0:ts_sync_mode=default,format=yuv420p[v]
 ```
 
   - `<収め方>`: `contain` は `scale=W:H:force_original_aspect_ratio=decrease:out_color_matrix=bt709:out_range=tv,pad=W:H:(ow-iw)/2:(oh-ih)/2:color=<background>`、`cover` は `scale=W:H:force_original_aspect_ratio=increase:out_color_matrix=bt709:out_range=tv,crop=W:H`。
   - `<,tpad>`: 動画で `loop` でないときだけ `,tpad=stop_mode=clone:stop=-1` を入れる。
-  - 重ね画像の流れは区間の切り替えの時刻にだけコマを持ち、`overlay` は背景の各コマに、その時刻以前で最も新しい重ね画像を重ねる。
+  - 重ね画像の流れは区間の切り替えの時刻にだけコマを持ち、`overlay` は背景の各コマに、その時刻以前で最も新しい重ね画像を重ねる(`ts_sync_mode=default` で、この選び方を固定する)。
 - 出力: `-map [v] -an -frames:v N -fps_mode cfr -threads <threads> -c:v libx264 -preset <preset> -crf <crf> -profile:v high -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -video_track_timescale <fps×1000> cut_XXXX.mp4`。全カットで同じ値を使う。
 - 引数の配列とフィルタの文字列は、関数で組み立て、ゴールデンテストで固定する。
 
-**色**: 画像は sRGB とみなし、動画は素材の色情報に従う(色情報が無い動画は BT.709 とみなす)。どちらも `scale` で BT.709・リミテッドレンジ(tv)に変換する。素材の照合(§4.3)で、ffprobe の `color_transfer` が `smpte2084`・`arib-std-b67`、または `color_primaries` が `bt2020` の動画(HDR・広色域)は、未対応として エラー 2 にする。
+**色**: 画像は sRGB とみなす(原色は BT.709 と同じ)。動画は、ffprobe の `color_primaries`・`color_transfer` が明示されていて BT.709(`bt709`)以外のものを、未対応として素材の照合(§4.3)で エラー 2 にする(HDR・BT.2020・BT.601 系などの原色や伝達関数の変換は初版では行わない)。値が無い・`unknown` の動画は BT.709 とみなす。`scale` は YCbCr の行列とレンジだけを BT.709・リミテッドレンジ(tv)に変換する(`color_space` が BT.601 系の動画も、行列はここで変換できるので受け入れる)。
 
 **連結**: 各カットファイルを ffprobe(`-count_frames -show_streams -show_data_hash sha256`)で確かめる。
 
@@ -506,11 +514,13 @@ pub struct LayoutContext<'a> {
   - テスト用のフォントは、OFL のフォントから必要な文字と `vrt2`・`vert` を残した部分集合を作り、ライセンスの文書と一緒にリポジトリに置く(システムのフォントに依存しない)。
 - **render**:
   - コマの丸めと区間の分割(多数のカット・項目で、カットのコマ数の合計が全体のコマ数に一致し、各区間の中で表示中の項目の組が変わらないことを、ランダムな入力で確かめる)。i128 の計算と 24 時間の上限。
-  - 重ね画像の一覧(`ovl_XXXX.txt`)の時刻: 半コマ手前の切り替え、マイクロ秒への丸めが積み重ならないこと、最後の項目の繰り返し。
+  - 重ね画像の一覧(`ovl_XXXX.txt`)の時刻: 半コマ手前の切り替え、`u_m = N/fps`、マイクロ秒への丸めが積み重ならないこと、全項目の `option framerate`、最後の項目の繰り返し。
+  - **重ね画像の流れの時刻**(結合テスト): 一覧を ffprobe で読み、各 PNG のパケットの PTS が time base `1/(2×fps)` の目盛りで `0, 2r_1 − 1, 2r_2 − 1, …` になること(fps 30 と 60 の両方)。
+  - 色: BT.709 以外の原色・伝達関数が明示された動画の素材が エラー 2 になり、色情報の無い動画は受け入れられること。
   - ffmpeg の引数の配列とフィルタの文字列のゴールデン(画像・動画・loop・contain/cover、`-nostdin`・`-n`・`-threads`)。
   - **区間の境目のコマ**(結合テスト): 1コマごとに表示が切り替わる項目を含む台本で、各コマに正しい重ね画像が当たること(境目の前後のコマを取り出して画素で確かめる)。
   - 動画の素材が、区間の境目で途切れず、最後のコマで止まる・`loop` でループすること(コマ番号を焼き込んだテスト用の動画で確かめる)。
-  - HDR の動画の素材が エラー 2 になること。
+  - HDR・BT.2020 の動画の素材が エラー 2 になること。
   - **ffmpeg を使う結合テスト**(短い台本、単色の画像、数秒の動画、吹き出し付き、日本語を含むパス): mp4 を作り、§4.6 の検証を通ること、指定の時刻のコマを取り出して吹き出しの画素があること。ffmpeg が無ければテストは**失敗**する。環境変数 `S2V_SKIP_FFMPEG_TESTS=1` のときだけ飛ばす。
   - 検証や置き換えに失敗したとき、元の `output.mp4` が変わらないこと。
   - カットファイルの検査に外れたとき エラー 2 になること(検査の関数に、食い違った ffprobe の結果を与える単体テスト)。
