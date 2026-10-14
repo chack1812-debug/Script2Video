@@ -312,6 +312,12 @@ impl Config {
                 ));
             }
         }
+        if a.microphone_spacing.is_finite() && a.microphone_spacing > 1.0 {
+            e.push(format!(
+                "[audio] microphone_spacing は 1.0 m 以下で指定してください: {}",
+                a.microphone_spacing
+            ));
+        }
         e
     }
 }
@@ -412,5 +418,16 @@ se_fade_out_s = 0.05
             assert_eq!(e.len(), 1, "{bad}: {e:?}");
             assert!(e[0].contains("microphone_spacing"));
         }
+    }
+
+    #[test]
+    fn validate_rejects_microphone_spacing_above_one_metre() {
+        let mut c = Config::from_toml(MINIMAL).unwrap();
+        c.audio.microphone_spacing = 1.5;
+        let e = c.validate();
+        assert_eq!(e.len(), 1, "{e:?}");
+        assert!(e[0].contains("microphone_spacing"));
+        c.audio.microphone_spacing = 1.0;
+        assert!(c.validate().is_empty());
     }
 }

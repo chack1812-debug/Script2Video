@@ -51,6 +51,14 @@ fn delay_samples(dist: f64, sound_speed: f64, fs: f64) -> anyhow::Result<usize> 
 /// 話者距離(0.5 m 刻みの整数。0〜50 m))。
 type ReverbCompKey = (OrderedFloat<f64>, usize, u32, u32);
 
+/// マイク間隔の上限(m)。補償は中心の距離で測るため、左右の距離差を ±0.5 LU に収まる範囲に抑える。
+pub(crate) const MAX_MICROPHONE_SPACING_M: f64 = 1.0;
+
+/// 補償キャッシュの最大エントリー数。新しいキーを入れると超える場合は、マップ全体を空にする
+/// (最も単純な追い出し)。エントリーは決定的で必要になれば再計算されるので、結果は変わらない。
+/// 1024 を超える異なるパラメータの組が必要な台本は現実的でなく、その場合は再計算が増えるだけ。
+const MAX_COMP_ENTRIES: usize = 1024;
+
 /// 補償の測定に使う距離の刻み(m)と上限(m)。
 const COMP_DISTANCE_STEP_M: f64 = 0.5;
 const COMP_DISTANCE_MAX_M: f64 = 50.0;
@@ -63,6 +71,8 @@ pub struct AudioProcessor {
     ir_cache: IrCache,
     /// 残響パラメータごとの固定の音量補償ゲイン(信号に依存しないので render は線形のまま)。
     reverb_comp: Mutex<HashMap<ReverbCompKey, CompSlot>>,
+    /// 補償キャッシュの最大エントリー数(通常は `MAX_COMP_ENTRIES`)。
+    comp_cap: usize,
     /// テスト用: 補償ゲインを実際に計算した回数。
     #[cfg(test)]
     comp_computations: AtomicUsize,
@@ -137,12 +147,19 @@ impl AudioProcessor {
                 anyhow::bail!("[audio] {name} は 0 より大きい有限の値にしてください: {v}");
             }
         }
+        if config.microphone_spacing > MAX_MICROPHONE_SPACING_M {
+            anyhow::bail!(
+                "[audio] microphone_spacing は {MAX_MICROPHONE_SPACING_M} m 以下にしてください: {}",
+                config.microphone_spacing
+            );
+        }
         validate_audio_config(&config)?;
         let sample_rate = config.sample_rate;
         let mut p = Self {
             config,
             ir_cache: IrCache::new(sample_rate),
             reverb_comp: Mutex::new(HashMap::new()),
+            comp_cap: MAX_COMP_ENTRIES,
             #[cfg(test)]
             comp_computations: AtomicUsize::new(0),
             calib_gain: 1.0,
@@ -157,7 +174,9 @@ impl AudioProcessor {
     /// BS.1770 のステレオラウドネスを測り、その差を戻すゲインを返す。結果はパラメータごとに
     /// キャッシュする(同じキーの同時計算は1回に集約し、計算はキャッシュのロックの外で行う)。
     /// `actual_wet` は 0.01 刻みに量子化済みの値で、実際の混合に使う値と同じ。
-    /// 較正信号は、実際の経路と同じ空気吸収を量子化した距離(0.5 m 刻み、0〜50 m)で通してから測る。
+    /// 較正信号には、空気吸収を中心の距離(量子化: 0.5 m 刻み、0〜50 m)で左右とも同じに掛けてから測る。
+    /// 実際の経路は左右のマイクごとの距離(pan とマイク間隔で変わる)で掛けるが、その左右差は
+    /// マイク間隔(1 m 以下に制限)で抑えられ、±0.5 LU に収まることをテスト(LU 表)で確認している。
     /// 実際の経路では残響の前に早期反射が加わるが、補償は素の dual-mono を基準にして求める
     /// (許容 ±0.5 LU。テストで確認)。測定不能や不正な値は Err(丸めない)。
     pub(crate) fn reverb_comp_gain(
@@ -184,6 +203,10 @@ impl AudioProcessor {
                 .reverb_comp
                 .lock()
                 .map_err(|_| anyhow::anyhow!("残響の音量補償のキャッシュが使えません"))?;
+            // 追い出しはマップのロックの中だけで行う(計算中には行わない)。配布済みの Arc は有効なまま
+            if !map.contains_key(&key) && map.len() >= self.comp_cap {
+                map.clear();
+            }
             Arc::clone(map.entry(key).or_default())
         };
         slot.get_or_init(|| {
@@ -202,8 +225,9 @@ impl AudioProcessor {
         self.ir_cache.compute_if_needed(rt60, pre_delay)?;
         let signal = crate::calib::calibration_signal(crate::calib::CALIBRATION_SEED);
         let tail = (self.config.sample_rate as f64 * rt60) as usize + pre_delay;
-        // 実際の経路と同じ空気吸収(距離に応じたローパス)を通す。左右とも量子化した話者距離を使う
-        // (マイク間隔による左右の距離差は無視する。pan に依存しない基準にするため)。
+        // 空気吸収(距離に応じたローパス)を通す。左右とも中心の(量子化した)話者距離を使う。
+        // 実際の経路の左右の距離差(pan とマイク間隔による)は無視する。差はマイク間隔(1 m 以下)で
+        // 抑えられ、LU 表のテストで ±0.5 LU に収まることを確認している。
         let filtered = apply_air_absorption(
             &signal,
             distance,
@@ -228,6 +252,12 @@ impl AudioProcessor {
             anyhow::bail!("残響の音量補償ゲインが不正です: {gain}");
         }
         Ok(gain)
+    }
+
+    #[cfg(test)]
+    fn with_comp_cap_for_test(mut self, cap: usize) -> Self {
+        self.comp_cap = cap;
+        self
     }
 
     #[cfg(test)]
@@ -1139,6 +1169,9 @@ mod tests {
         strong.early_reflections.early_level = 2.5;
         let p_base = AudioProcessor::new(base).unwrap();
         let p_strong = AudioProcessor::new(strong).unwrap();
+        let mut wide = s2v_core::Config::builtin().audio;
+        wide.microphone_spacing = MAX_MICROPHONE_SPACING_M;
+        let p_wide = AudioProcessor::new(wide).unwrap();
         let wet = |w: f64| SceneConfig {
             reverb_wet: Some(w),
             ..SceneConfig::new("w")
@@ -1155,64 +1188,62 @@ mod tests {
             c.height = Some(h);
             c
         };
-        // (名前, 早期反射を強くしたプロセッサか, 場面, 台詞)
-        let cases: Vec<(&str, bool, SceneConfig, Cast)> = vec![
-            (
-                "default",
-                false,
-                SceneConfig::new("d"),
-                dummy_cast(0.0, 1.0),
-            ),
-            ("wet0.3", false, wet(0.3), dummy_cast(0.0, 1.0)),
-            ("wet1.0", false, wet(1.0), dummy_cast(0.0, 1.0)),
-            (
-                "big",
-                false,
-                room(25.0, 45.0, 18.0, 1.0),
-                dummy_cast(0.0, 1.0),
-            ),
-            ("dist0.5", false, wet(1.0), dummy_cast(0.0, 0.5)),
-            ("dist3", false, wet(1.0), dummy_cast(0.0, 3.0)),
-            ("dist10", false, wet(1.0), dummy_cast(0.0, 10.0)),
-            ("dist20", false, wet(1.0), dummy_cast(0.0, 20.0)),
-            ("dist30", false, wet(1.0), dummy_cast(0.0, 30.0)),
-            ("pan+60", false, wet(1.0), dummy_cast(60.0, 1.0)),
-            ("pan-60", false, wet(1.0), dummy_cast(-60.0, 1.0)),
-            ("pan+60 wet0.3", false, wet(0.3), dummy_cast(60.0, 3.0)),
+        // (名前, プロセッサ(0: 既定、1: 早期反射を強く、2: マイク間隔 1.0 m), 場面, 台詞)
+        let cases: Vec<(&str, u8, SceneConfig, Cast)> = vec![
+            ("default", 0, SceneConfig::new("d"), dummy_cast(0.0, 1.0)),
+            ("wet0.3", 0, wet(0.3), dummy_cast(0.0, 1.0)),
+            ("wet1.0", 0, wet(1.0), dummy_cast(0.0, 1.0)),
+            ("big", 0, room(25.0, 45.0, 18.0, 1.0), dummy_cast(0.0, 1.0)),
+            ("dist0.5", 0, wet(1.0), dummy_cast(0.0, 0.5)),
+            ("dist3", 0, wet(1.0), dummy_cast(0.0, 3.0)),
+            ("dist10", 0, wet(1.0), dummy_cast(0.0, 10.0)),
+            ("dist20", 0, wet(1.0), dummy_cast(0.0, 20.0)),
+            ("dist30", 0, wet(1.0), dummy_cast(0.0, 30.0)),
+            ("pan+60", 0, wet(1.0), dummy_cast(60.0, 1.0)),
+            ("pan-60", 0, wet(1.0), dummy_cast(-60.0, 1.0)),
+            ("pan+60 wet0.3", 0, wet(0.3), dummy_cast(60.0, 3.0)),
             (
                 "small strong-early",
-                true,
+                1,
                 room(3.0, 4.0, 2.5, 1.0),
                 dummy_cast(0.0, 1.0),
             ),
             (
                 "small strong-early pan-60",
-                true,
+                1,
                 room(3.0, 4.0, 2.5, 0.3),
                 dummy_cast(-60.0, 0.5),
             ),
             (
                 "height0.3",
-                false,
+                0,
                 room(8.0, 8.0, 5.0, 1.0),
                 with_height(0.0, 2.0, 0.3),
             ),
             (
                 "height2.0",
-                false,
+                0,
                 room(8.0, 8.0, 5.0, 1.0),
                 with_height(0.0, 2.0, 2.0),
             ),
+            ("mic1.0 pan+90 d0.5", 2, wet(1.0), dummy_cast(90.0, 0.5)),
+            ("mic1.0 pan-90 d0.5", 2, wet(1.0), dummy_cast(-90.0, 0.5)),
+            ("mic1.0 pan+90 d3", 2, wet(1.0), dummy_cast(90.0, 3.0)),
+            ("mic1.0 pan-90 d3", 2, wet(1.0), dummy_cast(-90.0, 3.0)),
         ];
         let mut failures = Vec::new();
         eprintln!("LU TABLE (reverb - no reverb)");
         for seed in [7u64, 8] {
             let input = speech_like(seed);
-            for (name, strong_early, scene, cast) in &cases {
+            for (name, kind, scene, cast) in &cases {
                 if KNOWN_LIMIT.iter().any(|k| name == k) != known_limit {
                     continue;
                 }
-                let p = if *strong_early { &p_strong } else { &p_base };
+                let p = match kind {
+                    1 => &p_strong,
+                    2 => &p_wide,
+                    _ => &p_base,
+                };
                 let diff = reverb_loudness_diff(p, &input, cast, scene);
                 eprintln!("LOUDNESS seed {seed} {name}: {diff:.3}");
                 if diff.abs() >= limit {
@@ -1474,5 +1505,34 @@ mod tests {
         );
         assert_eq!(p.reverb_comp_len(), distinct.len());
         assert!(distinct.len() <= 40);
+    }
+
+    #[test]
+    fn new_rejects_too_wide_microphone_spacing() {
+        let mut cfg = default_audio_config();
+        cfg.microphone_spacing = 1.5;
+        let err = AudioProcessor::new(cfg).err().expect("1.5 m は Err");
+        assert!(format!("{err:#}").contains("microphone_spacing"));
+        let mut ok = default_audio_config();
+        ok.microphone_spacing = 1.0;
+        assert!(AudioProcessor::new(ok).is_ok());
+    }
+
+    #[test]
+    fn compensation_cache_is_bounded_and_results_do_not_change_after_eviction() {
+        let capped = AudioProcessor::new(default_audio_config())
+            .unwrap()
+            .with_comp_cap_for_test(3);
+        let reference = AudioProcessor::new(default_audio_config()).unwrap();
+        for round in 0..2 {
+            for i in 0..8 {
+                let d = 0.5 + i as f64;
+                let a = capped.reverb_comp_gain(0.3, 100, 0.3, d).unwrap();
+                assert!(capped.reverb_comp_len() <= 3, "round {round} i {i}");
+                let b = reference.reverb_comp_gain(0.3, 100, 0.3, d).unwrap();
+                assert_eq!(a, b, "追い出し後も同じゲイン: round {round} d {d}");
+            }
+        }
+        assert_eq!(reference.reverb_comp_len(), 8);
     }
 }
