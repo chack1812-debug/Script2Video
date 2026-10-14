@@ -273,9 +273,9 @@ pub fn timeline_value(input: &TimelineInput<'_>) -> anyhow::Result<serde_json::V
                 silent: s.silent,
                 start_ms: floor_ms(s.start),
                 end_ms: ceil_ms(s.end),
-                visual: s.visual_text.as_ref().map(|t| VisualDoc {
-                    text: t.clone(),
-                    kind: s.visual_kind,
+                visual: s.cuts[0].visual.as_ref().map(|v| VisualDoc {
+                    text: v.text.clone(),
+                    kind: v.kind,
                 }),
             })
             .collect(),
@@ -311,7 +311,7 @@ pub fn write_timeline_json(path: &Path, input: &TimelineInput<'_>) -> anyhow::Re
 #[cfg(test)]
 mod tests {
     use super::*;
-    use s2v_core::placement::{PlacedLine, PlacedScene};
+    use s2v_core::placement::{PlacedCut, PlacedLine, PlacedScene, PlacedVisual};
     use s2v_core::VisualKind;
 
     fn sample_placement() -> Placement {
@@ -346,8 +346,16 @@ mod tests {
                     silent: false,
                     start: 1,
                     end: 120_000,
-                    visual_text: Some("港".into()),
-                    visual_kind: Some(VisualKind::Image),
+                    cuts: vec![PlacedCut {
+                        number: 1,
+                        at: None,
+                        visual: Some(PlacedVisual {
+                            text: "港".into(),
+                            kind: Some(VisualKind::Image),
+                            looped: false,
+                        }),
+                    }],
+                    notes: vec![],
                 },
                 PlacedScene {
                     id: 2,
@@ -356,8 +364,12 @@ mod tests {
                     silent: true,
                     start: 120_000,
                     end: 216_000,
-                    visual_text: None,
-                    visual_kind: None,
+                    cuts: vec![PlacedCut {
+                        number: 1,
+                        at: None,
+                        visual: None,
+                    }],
+                    notes: vec![],
                 },
             ],
             events: vec![
@@ -370,6 +382,7 @@ mod tests {
             ],
             warnings: vec![],
             errors: vec![],
+            end_cursor: 0,
         }
     }
 
@@ -589,8 +602,12 @@ mod tests {
             silent: false,
             start: 0,
             end: 48,
-            visual_text: None,
-            visual_kind: None,
+            cuts: vec![PlacedCut {
+                number: 1,
+                at: None,
+                visual: None,
+            }],
+            notes: vec![],
         });
         let audio = audio_for(&placement);
         let v = timeline_value(&input_with(&placement, &audio)).unwrap();

@@ -4,7 +4,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
-use crate::ids::{format_scene_id, LineId};
+use crate::ids::{format_cut_id, format_scene_id, LineId};
 use crate::time::ms_to_samples;
 use crate::types::{PauseConfig, Scene, ScriptCommand, ScriptItem, SeAnchor, VisualKind};
 
@@ -79,6 +79,33 @@ pub struct PlacedLine {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct PlacedVisual {
+    pub text: String,
+    pub kind: Option<VisualKind>,
+    pub looped: bool,
+}
+
+/// カット。`number == 1` はシーンの頭の C01(`at` は None)。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedCut {
+    pub number: u32,
+    /// `#cut` の行の現在位置(サンプル)
+    pub at: Option<i64>,
+    pub visual: Option<PlacedVisual>,
+}
+
+/// ト書き。
+#[derive(Debug, Clone, PartialEq)]
+pub struct PlacedNote {
+    pub number: u32,
+    /// `#note` の行の現在位置(サンプル)
+    pub at: i64,
+    pub text: String,
+    /// 直前のカットの `cuts` での添字
+    pub after_cut: usize,
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub struct PlacedScene {
     pub id: u32,
     pub name: Option<String>,
@@ -88,8 +115,9 @@ pub struct PlacedScene {
     pub silent: bool,
     pub start: i64,
     pub end: i64,
-    pub visual_text: Option<String>,
-    pub visual_kind: Option<VisualKind>,
+    /// 常に 1 つ以上。先頭は C01
+    pub cuts: Vec<PlacedCut>,
+    pub notes: Vec<PlacedNote>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -127,15 +155,17 @@ pub struct Placement {
     pub warnings: Vec<String>,
     /// 出力を止める問題(終了コード 2)
     pub errors: Vec<String>,
+    /// 配置を終えた時点の現在位置(末尾の #pause を含む)
+    pub end_cursor: i64,
 }
 
 impl Placement {
-    /// 台詞・シーン・イベントの最も遅い時刻(サンプル)。
+    /// 台詞・シーン・イベント・末尾の #pause の最も遅い時刻(サンプル)。
     pub fn end_sample(&self) -> i64 {
         let l = self.lines.iter().map(|l| l.end).max().unwrap_or(0);
         let s = self.scenes.iter().map(|s| s.end).max().unwrap_or(0);
         let e = self.events.iter().map(|e| e.start()).max().unwrap_or(0);
-        l.max(s).max(e)
+        l.max(s).max(e).max(self.end_cursor)
     }
 }
 
@@ -145,8 +175,8 @@ struct OpenScene {
     open_cursor: i64,
     pause_total: i64,
     span: Option<(i64, i64)>,
-    visual_text: Option<String>,
-    visual_kind: Option<VisualKind>,
+    cuts: Vec<PlacedCut>,
+    notes: Vec<PlacedNote>,
 }
 
 impl OpenScene {
@@ -157,8 +187,12 @@ impl OpenScene {
             open_cursor,
             pause_total: 0,
             span: None,
-            visual_text: None,
-            visual_kind: None,
+            cuts: vec![PlacedCut {
+                number: 1,
+                at: None,
+                visual: None,
+            }],
+            notes: Vec::new(),
         }
     }
 
@@ -207,21 +241,64 @@ pub fn place(
                     open = Some(OpenScene::new(id.unwrap_or(0), name.clone(), cursor));
                     first_in_scene = true;
                 }
-                ScriptCommand::Cut { .. } | ScriptCommand::Note { .. } => {} // Task 4 で置き換える
-                ScriptCommand::Visual { kind, text, .. } => match open.as_mut() {
+                ScriptCommand::Visual {
+                    kind, looped, text, ..
+                } => match open.as_mut() {
                     Some(s) => {
-                        s.visual_text = Some(match s.visual_text.take() {
-                            Some(t) => format!("{t}\n{text}"),
-                            None => text.clone(),
-                        });
-                        if s.visual_kind.is_none() {
-                            s.visual_kind = *kind;
+                        let scene_id = s.id;
+                        let cut = s.cuts.last_mut().expect("C01 は常にある");
+                        match &mut cut.visual {
+                            None => {
+                                cut.visual = Some(PlacedVisual {
+                                    text: text.clone(),
+                                    kind: *kind,
+                                    looped: *looped,
+                                })
+                            }
+                            Some(v) => {
+                                v.text = format!("{}\n{text}", v.text);
+                                v.looped |= *looped;
+                                match (v.kind, *kind) {
+                                    (None, k) => v.kind = k,
+                                    (Some(a), Some(b)) if a != b => p.errors.push(format!(
+                                        "{}: #visual に image と video が混在しています",
+                                        format_cut_id(scene_id, cut.number)
+                                    )),
+                                    _ => {}
+                                }
+                            }
                         }
                     }
                     None => p.warnings.push(
                         "#visual が最初の #paragraph より前にあります（無視します）".to_string(),
                     ),
                 },
+                ScriptCommand::Cut { id, .. } => {
+                    if open.is_none() {
+                        open = Some(OpenScene::new(0, None, cursor));
+                        first_in_scene = true;
+                    }
+                    let s = open.as_mut().expect("直前で開いている");
+                    s.cuts.push(PlacedCut {
+                        number: id.unwrap_or(0),
+                        at: Some(cursor),
+                        visual: None,
+                    });
+                }
+                ScriptCommand::Note { id, text, .. } => {
+                    if open.is_none() {
+                        open = Some(OpenScene::new(0, None, cursor));
+                        first_in_scene = true;
+                    }
+                    let s = open.as_mut().expect("直前で開いている");
+                    let after_cut = s.cuts.len() - 1;
+                    s.notes.push(PlacedNote {
+                        number: id.unwrap_or(0),
+                        at: cursor,
+                        text: text.clone(),
+                        after_cut,
+                    });
+                }
                 ScriptCommand::Pause(ms) => {
                     // 負の値や極端な値でも cursor が後退・あふれないようにする
                     let n = ms_to_samples(*ms).max(0);
@@ -434,10 +511,11 @@ pub fn place(
             silent,
             start,
             end,
-            visual_text: s.visual_text,
-            visual_kind: s.visual_kind,
+            cuts: s.cuts,
+            notes: s.notes,
         });
     }
+    p.end_cursor = cursor;
     // シーンの開始時刻は台本の並びで単調非減少(同時刻は許す)
     for w in p.scenes.windows(2) {
         if w[1].start < w[0].start {
@@ -622,9 +700,100 @@ mod tests {
         assert!(
             matches!(p.events[1], PlacedEvent::BgmStop { start } if start == ms_to_samples(1000.0))
         );
-        assert_eq!(p.scenes[0].visual_text.as_deref(), Some("港。\n船。"));
-        assert_eq!(p.scenes[0].visual_kind, Some(VisualKind::Image));
+        assert_eq!(
+            p.scenes[0].cuts[0].visual,
+            Some(PlacedVisual {
+                text: "港。\n船。".into(),
+                kind: Some(VisualKind::Image),
+                looped: false
+            })
+        );
         assert_eq!(p.end_sample(), ms_to_samples(1000.0));
+    }
+
+    #[test]
+    fn cuts_and_notes_record_cursor_after_overlapping_lines() {
+        // 長い A(0〜5000)に B を重ね(1000〜2000)、直後の #cut・#note・#se は A の終わり(5000)
+        let s = scenes("#paragraph[S01]\n[S01-L001] A:一\n[S01-L002] B(at=L001+1000):二\n#cut[C02]\n#note[N01] 翌朝\n#se x.wav\n");
+        let src = present(&[(1, 1, 5000.0), (1, 2, 1000.0)]);
+        let p = place(&flatten(&s), &src, 200);
+        let sc = &p.scenes[0];
+        assert_eq!(sc.cuts.len(), 2);
+        assert_eq!((sc.cuts[0].number, sc.cuts[0].at), (1, None));
+        assert_eq!(
+            (sc.cuts[1].number, sc.cuts[1].at.map(ms)),
+            (2, Some(5000.0))
+        );
+        assert_eq!(
+            (
+                sc.notes[0].number,
+                ms(sc.notes[0].at),
+                sc.notes[0].after_cut
+            ),
+            (1, 5000.0, 1)
+        );
+        assert!(matches!(p.events[0], PlacedEvent::Se { start, .. } if ms(start) == 5000.0));
+    }
+
+    #[test]
+    fn visuals_attach_to_the_current_cut_and_aggregate() {
+        let s = scenes("#paragraph[S01]\n#visual (image) 港。\n#visual 船。\n[S01-L001] A:一\n#cut[C02]\n#visual (loop) 波\n#visual (video) 岸壁\n");
+        let p = place(&flatten(&s), &present(&[(1, 1, 1000.0)]), 200);
+        let c = &p.scenes[0].cuts;
+        assert_eq!(
+            c[0].visual,
+            Some(PlacedVisual {
+                text: "港。\n船。".into(),
+                kind: Some(VisualKind::Image),
+                looped: false
+            })
+        );
+        assert_eq!(
+            c[1].visual,
+            Some(PlacedVisual {
+                text: "波\n岸壁".into(),
+                kind: Some(VisualKind::Video),
+                looped: true
+            })
+        );
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+    }
+
+    #[test]
+    fn mixed_image_and_video_in_one_cut_is_an_error() {
+        let s = scenes("#paragraph[S01]\n#visual (image) a\n#visual (video) b\n[S01-L001] A:一\n");
+        let p = place(&flatten(&s), &present(&[(1, 1, 1000.0)]), 200);
+        assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+        assert!(p.errors[0].contains("S01-C01"), "{:?}", p.errors);
+    }
+
+    #[test]
+    fn cut_or_note_before_first_paragraph_opens_s00() {
+        let s = scenes("#note 前\n[S00-L001] A:一\n#paragraph[S01]\n[S01-L001] A:二\n");
+        let p = place(
+            &flatten(&s),
+            &present(&[(0, 1, 1000.0), (1, 1, 1000.0)]),
+            200,
+        );
+        assert_eq!(p.scenes[0].id, 0);
+        assert_eq!(p.scenes[0].notes.len(), 1);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        // S00 に台詞が無ければエラー
+        let s = scenes("#note 前\n#paragraph[S01]\n[S01-L001] A:二\n");
+        let p = place(&flatten(&s), &present(&[(1, 1, 1000.0)]), 200);
+        assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
+    }
+
+    #[test]
+    fn trailing_pause_extends_end_sample() {
+        let s = scenes("#paragraph[S01]\n[S01-L001] A:一\n#note[N01] 余韻\n#pause 2000\n");
+        let p = place(&flatten(&s), &present(&[(1, 1, 1000.0)]), 200);
+        assert_eq!(ms(p.end_cursor), 3000.0);
+        assert_eq!(ms(p.end_sample()), 3000.0);
+        // 末尾が台詞なら従来どおり
+        let s = scenes("#paragraph[S01]\n[S01-L001] A:一\n");
+        let p = place(&flatten(&s), &present(&[(1, 1, 1000.0)]), 200);
+        assert_eq!(ms(p.end_sample()), 1000.0);
     }
 
     fn assert_invariants(p: &Placement) {

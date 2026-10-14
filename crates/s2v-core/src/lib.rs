@@ -7,6 +7,7 @@ pub mod placement;
 pub mod time;
 pub mod types;
 pub mod validate;
+pub mod visual_timeline;
 pub mod voices;
 
 pub use cast::Cast;
