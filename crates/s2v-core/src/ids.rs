@@ -2,7 +2,8 @@
 
 use serde::{Deserialize, Serialize};
 
-/// 台詞ID。台詞番号 `line` は台本全体で一意。`scene` は採番時のシーン番号(表示用)。
+/// 台詞ID。台詞番号 `line` は各シーン(`#paragraph[Sxx]`)の中で1から数える。
+/// ID は組 (`scene`, `line`) として台本全体で一意。別のシーンに同じ台詞番号があってよい。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, PartialOrd, Ord, Serialize, Deserialize)]
 pub struct LineId {
     pub scene: u32,
@@ -41,20 +42,21 @@ impl LineId {
 }
 
 /// 台詞の参照 `L003+500`(`at=`、`#se at=/end=`)。
+/// `scene` が `None` なら同じシーンの台詞(省略形 `L003`)、`Some` なら完全形 `S01-L003`。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct LineRef {
+    pub scene: Option<u32>,
     pub line: u32,
     pub offset_ms: i64,
 }
 
 /// `L003`、`L003+500`、`L003-200`、`S01-L003+500` を読む。
+/// シーンを含む完全形ではシーン番号を `scene` に保つ。
 pub fn parse_line_ref(s: &str) -> Option<LineRef> {
     let s = s.trim();
-    let s = match s.split_once("-L") {
-        Some((scene, rest)) if scene.starts_with('S') && parse_digits(&scene[1..]).is_some() => {
-            rest
-        }
-        _ => s.strip_prefix('L')?,
+    let (scene, s) = match s.split_once("-L") {
+        Some((scene, rest)) if scene.starts_with('S') => (Some(parse_scene_id(scene)?), rest),
+        _ => (None, s.strip_prefix('L')?),
     };
     let split = s.find(['+', '-']).unwrap_or(s.len());
     let line = parse_digits(&s[..split])?;
@@ -64,7 +66,11 @@ pub fn parse_line_ref(s: &str) -> Option<LineRef> {
         let sign: i64 = if s.as_bytes()[split] == b'-' { -1 } else { 1 };
         sign * parse_digits(&s[split + 1..])? as i64
     };
-    Some(LineRef { line, offset_ms })
+    Some(LineRef {
+        scene,
+        line,
+        offset_ms,
+    })
 }
 
 /// シーン番号 `S02`(2桁以上)。
@@ -155,36 +161,43 @@ mod tests {
 
     #[test]
     fn parse_line_ref_variants() {
-        assert_eq!(
-            parse_line_ref("L003+500"),
+        let r = |scene, line, offset_ms| {
             Some(LineRef {
-                line: 3,
-                offset_ms: 500
+                scene,
+                line,
+                offset_ms,
             })
-        );
-        assert_eq!(
-            parse_line_ref("L003"),
-            Some(LineRef {
-                line: 3,
-                offset_ms: 0
-            })
-        );
-        assert_eq!(
-            parse_line_ref("L003-200"),
-            Some(LineRef {
-                line: 3,
-                offset_ms: -200
-            })
-        );
-        assert_eq!(
-            parse_line_ref("S01-L003+10"),
-            Some(LineRef {
-                line: 3,
-                offset_ms: 10
-            })
-        );
-        assert_eq!(parse_line_ref("L+5"), None);
-        assert_eq!(parse_line_ref("003+5"), None);
-        assert_eq!(parse_line_ref("L003+"), None);
+        };
+        assert_eq!(parse_line_ref("L003+500"), r(None, 3, 500));
+        assert_eq!(parse_line_ref("L003"), r(None, 3, 0));
+        assert_eq!(parse_line_ref("L003-200"), r(None, 3, -200));
+        assert_eq!(parse_line_ref("S01-L003+10"), r(Some(1), 3, 10));
+        assert_eq!(parse_line_ref("S01-L003-200"), r(Some(1), 3, -200));
+        assert_eq!(parse_line_ref("S01-L003"), r(Some(1), 3, 0));
+        assert_eq!(parse_line_ref("S12-L7+0"), r(Some(12), 7, 0));
+        assert_eq!(parse_line_ref(" S02-L001+100 "), r(Some(2), 1, 100));
+    }
+
+    #[test]
+    fn parse_line_ref_rejects_invalid_forms() {
+        for bad in [
+            "L+5",
+            "003+5",
+            "L003+",
+            "S01-L",
+            "S-L1",
+            "L",
+            "LL3",
+            "",
+            "S01-L003+x",
+            "S01L003",
+            "S01-003",
+            "X01-L003",
+            "S01-LL3",
+            "L003-",
+            "SS1-L3",
+        ] {
+            assert_eq!(parse_line_ref(bad), None, "{bad}");
+        }
     }
 }

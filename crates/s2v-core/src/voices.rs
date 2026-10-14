@@ -311,4 +311,16 @@ mod tests {
         let keys: Vec<u32> = m.files.keys().map(|k| k.line).collect();
         assert_eq!(keys, vec![1, 2, 3]);
     }
+
+    #[test]
+    fn same_line_number_in_different_scenes_maps_to_different_lines() {
+        let tmp = tempfile::tempdir().unwrap();
+        touch(tmp.path(), "S01_L001.wav");
+        touch(tmp.path(), "S02_L001.wav");
+        let want = [LineId { scene: 1, line: 1 }, LineId { scene: 2, line: 1 }];
+        let m = match_voice_files(tmp.path(), &want, false).unwrap();
+        assert_eq!(m.files[&want[0]], vec![tmp.path().join("S01_L001.wav")]);
+        assert_eq!(m.files[&want[1]], vec![tmp.path().join("S02_L001.wav")]);
+        assert!(m.warnings.is_empty(), "{:?}", m.warnings);
+    }
 }

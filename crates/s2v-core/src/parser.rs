@@ -1682,6 +1682,7 @@ A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
                 assert_eq!(
                     *at,
                     Some(crate::ids::LineRef {
+                        scene: None,
                         line: 1,
                         offset_ms: 500
                     })
@@ -1753,6 +1754,7 @@ A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
                 assert_eq!(
                     *anchor,
                     Some(SeAnchor::Start(crate::ids::LineRef {
+                        scene: None,
                         line: 3,
                         offset_ms: 200
                     }))
@@ -1768,6 +1770,7 @@ A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
                 assert_eq!(
                     *anchor,
                     Some(SeAnchor::End(crate::ids::LineRef {
+                        scene: None,
                         line: 4,
                         offset_ms: -100
                     }))
@@ -1776,6 +1779,57 @@ A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
             }
             other => panic!("{other:?}"),
         }
+    }
+
+    #[test]
+    fn full_form_line_refs_keep_their_scene() {
+        let (scenes, p) = parse_script(
+            "[S02-L001] A(at=S01-L003+100):一
+#se a.wav at=S01-L003-200
+#se b.wav end=S02-L001
+",
+        );
+        match &scenes[0].items[0] {
+            ScriptItem::Speech { at, .. } => assert_eq!(
+                *at,
+                Some(crate::ids::LineRef {
+                    scene: Some(1),
+                    line: 3,
+                    offset_ms: 100
+                })
+            ),
+            other => panic!("{other:?}"),
+        }
+        match &scenes[0].items[1] {
+            ScriptItem::Command(ScriptCommand::Se { anchor, .. }) => assert_eq!(
+                *anchor,
+                Some(SeAnchor::Start(crate::ids::LineRef {
+                    scene: Some(1),
+                    line: 3,
+                    offset_ms: -200
+                }))
+            ),
+            other => panic!("{other:?}"),
+        }
+        match &scenes[0].items[2] {
+            ScriptItem::Command(ScriptCommand::Se { anchor, .. }) => assert_eq!(
+                *anchor,
+                Some(SeAnchor::End(crate::ids::LineRef {
+                    scene: Some(2),
+                    line: 1,
+                    offset_ms: 0
+                }))
+            ),
+            other => panic!("{other:?}"),
+        }
+        // SE ファイルが無い警告以外(書式の警告)は出ない
+        assert!(
+            p.warnings()
+                .iter()
+                .all(|w| w.message.contains("SEファイル")),
+            "{:?}",
+            p.warnings()
+        );
     }
 
     #[test]
