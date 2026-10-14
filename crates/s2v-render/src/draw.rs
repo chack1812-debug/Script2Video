@@ -467,6 +467,79 @@ mod tests {
         let mut half = tiny_skia::Pixmap::new(1, 1).unwrap();
         half.fill(tiny_skia::Color::from_rgba8(200, 100, 50, 128));
         let png = composite(1, 1, &[(0, 0, &half)]).encode_png().unwrap();
-        assert!(!png.is_empty());
+        let back = tiny_skia::Pixmap::decode_png(&png).unwrap();
+        let got = px(&back, 0, 0);
+        for (g, e) in got.iter().zip([200u8, 100, 50, 128]) {
+            assert!(g.abs_diff(e) <= 1, "{got:?}");
+        }
+    }
+
+    /// 線なし・白塗りのト書きに描いた文字のインクの (外接矩形 x0,y0,x1,y1, 重心 x,y)
+    fn ink(text: &str, w: u32, h: u32) -> (u32, u32, u32, u32, f32, f32) {
+        let f = face();
+        let c = LayoutContext {
+            face: &f,
+            font_size: 40.0,
+            line_spacing: 0.4,
+            padding: 20,
+            max_inner_h: 400,
+        };
+        let mut st = style();
+        st.stroke_width = 0.0;
+        let o = render(
+            &c,
+            &st,
+            &ItemSpec {
+                kind: ItemKind::Note,
+                text,
+                w,
+                h,
+                tail: None,
+            },
+        )
+        .unwrap();
+        let (mut x0, mut y0, mut x1, mut y1) = (u32::MAX, u32::MAX, 0, 0);
+        let (mut sx, mut sy, mut n) = (0.0f32, 0.0f32, 0.0f32);
+        for y in 0..h {
+            for x in 0..w {
+                if px(&o.pixmap, x, y)[0] < 128 {
+                    x0 = x0.min(x);
+                    y0 = y0.min(y);
+                    x1 = x1.max(x);
+                    y1 = y1.max(y);
+                    sx += x as f32;
+                    sy += y as f32;
+                    n += 1.0;
+                }
+            }
+        }
+        assert!(n > 0.0, "インクが無い");
+        (x0, y0, x1, y1, sx / n, sy / n)
+    }
+
+    #[test]
+    fn rotated_ascii_is_vertical_and_clockwise() {
+        // 1列(幅 80 = 40 + 余白 40)に収まる回転の連なり
+        let (x0, y0, x1, y1, cx, cy) = ink("L", 80, 120);
+        assert!(y1 - y0 > 0 && x1 - x0 > 0);
+        // 列の中央(x = 40)付近
+        assert!(((x0 + x1) as f32 / 2.0 - 40.0).abs() < 12.0, "{x0} {x1}");
+        // 時計回り 90° の L は、上に横棒・左に縦棒(Γ形)で、重心は外接矩形の左上寄り
+        let (bx, by) = ((x0 + x1) as f32 / 2.0, (y0 + y1) as f32 / 2.0);
+        assert!(cx < bx && cy < by, "重心 ({cx},{cy}) 中心 ({bx},{by})");
+        // 2字を回転で並べると縦長になる
+        let (a0, b0, a1, b1, _, _) = ink("AB", 80, 160);
+        assert!(b1 - b0 > a1 - a0, "{a0} {b0} {a1} {b1}");
+    }
+
+    #[test]
+    fn tate_chu_yoko_stays_in_one_em_and_is_wide() {
+        let (x0, y0, x1, y1, _, _) = ink("12", 80, 80);
+        // 1文字分の枠(40 四方)に収まる
+        assert!(x1 - x0 < 40 && y1 - y0 < 40, "{x0} {y0} {x1} {y1}");
+        // 横に並んでいる
+        assert!(x1 - x0 > y1 - y0, "{x0} {y0} {x1} {y1}");
+        // 列の中央に寄っている
+        assert!(((x0 + x1) as f32 / 2.0 - 40.0).abs() < 6.0, "{x0} {x1}");
     }
 }
