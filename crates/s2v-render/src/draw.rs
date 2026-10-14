@@ -474,6 +474,16 @@ mod tests {
         }
     }
 
+    fn ctx(f: &FontFace, padding: u32) -> LayoutContext<'_> {
+        LayoutContext {
+            face: f,
+            font_size: 40.0,
+            line_spacing: 0.4,
+            padding,
+            max_inner_h: 400,
+        }
+    }
+
     /// 線なし・白塗りのト書きに描いた文字のインクの (外接矩形 x0,y0,x1,y1, 重心 x,y)
     fn ink(text: &str, w: u32, h: u32) -> (u32, u32, u32, u32, f32, f32) {
         let f = face();
@@ -527,6 +537,17 @@ mod tests {
         // 時計回り 90° の L は、上に横棒・左に縦棒(Γ形)で、重心は外接矩形の左上寄り
         let (bx, by) = ((x0 + x1) as f32 / 2.0, (y0 + y1) as f32 / 2.0);
         assert!(cx < bx && cy < by, "重心 ({cx},{cy}) 中心 ({bx},{by})");
+        // 縦の位置: インクは単位の縦の範囲(上端から単位の高さ)に収まり、上端より上へ出ない
+        let f = face();
+        let c = ctx(&f, 20);
+        let unit_h = crate::layout::shape_units(&c, "L")[0].height;
+        let top = 20.0 + (80.0 - unit_h) / 2.0;
+        assert!(y0 as f32 >= top - 1.0, "上へはみ出し {y0} < {top}");
+        assert!(
+            (y1 + 1) as f32 <= top + unit_h + 1.0,
+            "下へはみ出し {y1} > {}",
+            top + unit_h
+        );
         // 2字を回転で並べると縦長になる
         let (a0, b0, a1, b1, _, _) = ink("AB", 80, 160);
         assert!(b1 - b0 > a1 - a0, "{a0} {b0} {a1} {b1}");
@@ -541,5 +562,48 @@ mod tests {
         assert!(x1 - x0 > y1 - y0, "{x0} {y0} {x1} {y1}");
         // 列の中央に寄っている
         assert!(((x0 + x1) as f32 / 2.0 - 40.0).abs() < 6.0, "{x0} {x1}");
+    }
+
+    #[test]
+    fn tate_chu_yoko_is_shrunk_to_one_em_and_centered() {
+        let f = face();
+        let c = ctx(&f, 20);
+        // 縮小しないと 1 文字分を超える数字の組(scale_x が最小のもの)を選ぶ
+        let (pair, scale) = (0..100)
+            .map(|n| format!("{n:02}"))
+            .map(|t| {
+                let u = &crate::layout::shape_units(&c, &t)[0];
+                let sc = match u.glyphs[0].transform {
+                    GlyphTransform::Tcy { scale_x } => scale_x,
+                    _ => 1.0,
+                };
+                (t, sc)
+            })
+            .min_by(|a, b| a.1.total_cmp(&b.1))
+            .unwrap();
+        assert!(scale < 1.0, "縮小される数字の組がテスト用フォントに無い");
+        let (x0, y0, x1, y1, _, _) = ink(&pair, 80, 80);
+        assert!(x1 - x0 < 40, "{pair} 幅 {}", x1 - x0 + 1);
+        // 輪郭の外接矩形から期待する(縮小後の)インクの幅。縮小を無視すると約 10% 広がる
+        let u = &crate::layout::shape_units(&c, &pair)[0];
+        let tf = ttf_parser::Face::parse(f.data(), f.index()).unwrap();
+        let s = 40.0 / f32::from(f.units_per_em);
+        let b0 = tf
+            .glyph_bounding_box(GlyphId(u.glyphs[0].glyph_id))
+            .unwrap();
+        let bl = tf
+            .glyph_bounding_box(GlyphId(u.glyphs.last().unwrap().glyph_id))
+            .unwrap();
+        let left = u.glyphs[0].x + f32::from(b0.x_min) * s * scale;
+        let right = u.glyphs.last().unwrap().x + f32::from(bl.x_max) * s * scale;
+        let measured = (x1 - x0 + 1) as f32;
+        assert!(
+            (measured - (right - left)).abs() <= 1.2,
+            "{pair} 測定 {measured} 期待 {}",
+            right - left
+        );
+        // 縦の中心は 1 文字分の枠(上端 20、高さ 40)の中央付近
+        let cy = (y0 + y1) as f32 / 2.0;
+        assert!((cy - 40.0).abs() <= 8.0, "{pair} 縦の中心 {cy}");
     }
 }
