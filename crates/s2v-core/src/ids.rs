@@ -95,6 +95,22 @@ pub fn split_line_id_prefix(content: &str) -> (Option<LineId>, &str) {
     (None, content)
 }
 
+/// カット ID `S01-C02`(カット番号は2桁以上)。
+pub fn format_cut_id(scene: u32, n: u32) -> String {
+    format!("{}-C{n:02}", format_scene_id(scene))
+}
+
+/// ト書き ID `S01-N01`(2桁以上)。
+pub fn format_note_id(scene: u32, n: u32) -> String {
+    format!("{}-N{n:02}", format_scene_id(scene))
+}
+
+/// `[C02]`・`[N01]` の番号を読む(桁数は問わない)。
+pub fn parse_numbered_tag(s: &str, letter: char) -> Option<u32> {
+    let inner = s.strip_prefix('[')?.strip_suffix(']')?;
+    parse_digits(inner.strip_prefix(letter)?)
+}
+
 fn parse_digits(s: &str) -> Option<u32> {
     if s.is_empty() || !s.bytes().all(|b| b.is_ascii_digit()) {
         return None;
@@ -105,6 +121,18 @@ fn parse_digits(s: &str) -> Option<u32> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn cut_and_note_ids() {
+        assert_eq!(format_cut_id(1, 2), "S01-C02");
+        assert_eq!(format_note_id(12, 3), "S12-N03");
+        assert_eq!(format_cut_id(1, 123), "S01-C123");
+        assert_eq!(parse_numbered_tag("[C02]", 'C'), Some(2));
+        assert_eq!(parse_numbered_tag("[C2]", 'C'), Some(2));
+        assert_eq!(parse_numbered_tag("[N01]", 'C'), None);
+        assert_eq!(parse_numbered_tag("[C]", 'C'), None);
+        assert_eq!(parse_numbered_tag("C02", 'C'), None);
+    }
 
     #[test]
     fn line_id_display_and_file_stem() {

@@ -405,6 +405,113 @@ impl ScriptParser {
         resolved.to_string_lossy().into_owned()
     }
 
+    fn error(&mut self, line_no: usize, message: impl Into<String>) {
+        self.errors.push(ParseWarning {
+            line_no,
+            message: message.into(),
+        });
+    }
+
+    /// `[C02]` などの番号。空なら Ok(None)。書式違い・下限未満は Err(メッセージ)。
+    fn numbered(after: &str, letter: char, min: u32, what: &str) -> Result<Option<u32>, String> {
+        if after.is_empty() {
+            return Ok(None);
+        }
+        match crate::ids::parse_numbered_tag(after, letter) {
+            Some(n) if n >= min => Ok(Some(n)),
+            Some(_) if letter == 'C' => Err(format!(
+                "{what}の番号は C02 から始まります(C01 はシーンの頭の予約です): {after}"
+            )),
+            Some(_) => Err(format!("{what}の番号は {letter}01 から始まります: {after}")),
+            None => Err(format!(
+                "{what}の番号の書式が正しくありません([{letter}02] の形式): {after}"
+            )),
+        }
+    }
+
+    fn parse_cut(&mut self, after: &str, arg: &str, line_no: usize) -> Option<ScriptItem> {
+        let id = match Self::numbered(after, 'C', 2, "#cut ") {
+            Ok(id) => id,
+            Err(m) => {
+                self.error(line_no, m);
+                return None;
+            }
+        };
+        if !arg.is_empty() {
+            self.error(line_no, format!("#cut の後ろには何も書けません: {arg}"));
+            return None;
+        }
+        Some(ScriptItem::Command(ScriptCommand::Cut { id, line_no }))
+    }
+
+    fn parse_note(&mut self, after: &str, arg: &str, line_no: usize) -> Option<ScriptItem> {
+        let id = match Self::numbered(after, 'N', 1, "#note ") {
+            Ok(id) => id,
+            Err(m) => {
+                self.error(line_no, m);
+                return None;
+            }
+        };
+        if arg.is_empty() {
+            self.error(line_no, "#note の本文がありません");
+            return None;
+        }
+        Some(ScriptItem::Command(ScriptCommand::Note {
+            id,
+            text: arg.to_string(),
+            line_no,
+        }))
+    }
+
+    /// `#visual (video loop) 本文`。括弧の中が ASCII の英数字と空白だけなら印として読む。
+    fn parse_visual(&mut self, arg: &str, line_no: usize) -> Option<ScriptItem> {
+        let mut kind = None;
+        let mut looped = false;
+        let mut text = arg;
+        if let Some(rest) = arg.strip_prefix('(') {
+            if let Some(close) = rest.find(')') {
+                let inner = &rest[..close];
+                let is_tags = !inner.trim().is_empty()
+                    && inner
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == ' ' || c == '\t');
+                if is_tags {
+                    for w in inner.split_whitespace() {
+                        let k = match w {
+                            "image" => VisualKind::Image,
+                            "video" => VisualKind::Video,
+                            "loop" => {
+                                looped = true;
+                                continue;
+                            }
+                            other => {
+                                self.error(
+                                    line_no,
+                                    format!(
+                                        "#visual の印「{other}」は使えません(image・video・loop)"
+                                    ),
+                                );
+                                return None;
+                            }
+                        };
+                        if kind.is_some_and(|old| old != k) {
+                            self.error(line_no, "#visual に image と video の両方は書けません");
+                            return None;
+                        }
+                        kind = Some(k);
+                    }
+                    text = rest[close + 1..].trim();
+                }
+            }
+        }
+        Some(ScriptItem::Command(ScriptCommand::Visual {
+            kind,
+            looped,
+            text: text.to_string(),
+            line_no,
+        }))
+    }
+
     fn parse_script_line(&mut self, line: &str, line_no: usize) -> Option<ScriptItem> {
         let trimmed = line.trim();
         // 数字のみ → 同時発声(流用元と同じ)
@@ -427,6 +534,16 @@ impl ScriptParser {
                     return self.parse_paragraph(after, arg, line_no);
                 }
             }
+            if let Some(after) = cmd.strip_prefix("cut") {
+                if after.is_empty() || after.starts_with('[') {
+                    return self.parse_cut(after, arg, line_no);
+                }
+            }
+            if let Some(after) = cmd.strip_prefix("note") {
+                if after.is_empty() || after.starts_with('[') {
+                    return self.parse_note(after, arg, line_no);
+                }
+            }
             return match cmd {
                 "pause" => match arg.parse::<f64>() {
                     Ok(ms) if ms.is_finite() && ms >= 0.0 => {
@@ -442,7 +559,7 @@ impl ScriptParser {
                         None
                     }
                 },
-                "visual" => Some(parse_visual(arg)),
+                "visual" => self.parse_visual(arg, line_no),
                 "bgm_start" => Some(ScriptItem::Command(ScriptCommand::BgmStart(
                     self.resolve_asset_path("bgm_dir", "BGM", arg, line_no),
                 ))),
@@ -671,21 +788,6 @@ impl Default for ScriptParser {
     fn default() -> Self {
         Self::new()
     }
-}
-
-/// `#visual (image) 本文` を読む。
-fn parse_visual(arg: &str) -> ScriptItem {
-    let (kind, text) = if let Some(t) = arg.strip_prefix("(image)") {
-        (Some(VisualKind::Image), t.trim())
-    } else if let Some(t) = arg.strip_prefix("(video)") {
-        (Some(VisualKind::Video), t.trim())
-    } else {
-        (None, arg)
-    };
-    ScriptItem::Command(ScriptCommand::Visual {
-        kind,
-        text: text.to_string(),
-    })
 }
 
 /// カンマ区切り `key=value` 文字列から数値パラメータを抽出する。
@@ -1717,6 +1819,128 @@ A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
         );
     }
 
+    fn commands(scenes: &[Scene]) -> Vec<ScriptCommand> {
+        scenes[0]
+            .items
+            .iter()
+            .filter_map(|i| match i {
+                ScriptItem::Command(c) => Some(c.clone()),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cut_with_and_without_number() {
+        let (scenes, p) = parse_script("#cut\n#cut[C03]\n");
+        let c = commands(&scenes);
+        assert!(matches!(
+            c[0],
+            ScriptCommand::Cut {
+                id: None,
+                line_no: 8
+            }
+        ));
+        assert!(matches!(c[1], ScriptCommand::Cut { id: Some(3), .. }));
+        assert!(p.errors().is_empty(), "{:?}", p.errors());
+    }
+
+    #[test]
+    fn cut_errors() {
+        for bad in [
+            "#cut[C01]\n",
+            "#cut[C00]\n",
+            "#cut[X02]\n",
+            "#cut 名前\n",
+            "#cut[C02] 名前\n",
+        ] {
+            let (scenes, p) = parse_script(bad);
+            assert!(commands(&scenes).is_empty(), "{bad}");
+            assert_eq!(p.errors().len(), 1, "{bad}: {:?}", p.errors());
+        }
+    }
+
+    #[test]
+    fn note_with_and_without_number() {
+        let (scenes, p) =
+            parse_script("#note 翌朝、港。\n#note[N02] 二人は黙る。\n#note [回想] 十年前\n");
+        let c = commands(&scenes);
+        assert!(
+            matches!(&c[0], ScriptCommand::Note { id: None, text, .. } if text == "翌朝、港。")
+        );
+        assert!(
+            matches!(&c[1], ScriptCommand::Note { id: Some(2), text, .. } if text == "二人は黙る。")
+        );
+        assert!(
+            matches!(&c[2], ScriptCommand::Note { id: None, text, .. } if text == "[回想] 十年前")
+        );
+        assert!(p.errors().is_empty(), "{:?}", p.errors());
+    }
+
+    #[test]
+    fn note_errors() {
+        for bad in [
+            "#note\n",
+            "#note   \n",
+            "#note[N01]\n",
+            "#note[N00] x\n",
+            "#note[回想]\n",
+        ] {
+            let (scenes, p) = parse_script(bad);
+            assert!(commands(&scenes).is_empty(), "{bad}");
+            assert_eq!(p.errors().len(), 1, "{bad}: {:?}", p.errors());
+        }
+    }
+
+    #[test]
+    fn visual_tags() {
+        let (scenes, p) = parse_script(
+            "#visual (video loop) 波。\n#visual (loop) 炎\n#visual (image) 港\n#visual 補足\n",
+        );
+        let got: Vec<_> = commands(&scenes)
+            .into_iter()
+            .map(|c| match c {
+                ScriptCommand::Visual {
+                    kind, looped, text, ..
+                } => (kind, looped, text),
+                other => panic!("{other:?}"),
+            })
+            .collect();
+        assert_eq!(
+            got,
+            vec![
+                (Some(VisualKind::Video), true, "波。".to_string()),
+                (None, true, "炎".to_string()),
+                (Some(VisualKind::Image), false, "港".to_string()),
+                (None, false, "補足".to_string()),
+            ]
+        );
+        assert!(p.errors().is_empty());
+    }
+
+    #[test]
+    fn visual_tag_errors() {
+        for bad in ["#visual (image video) x\n", "#visual (vidoe) x\n"] {
+            let (scenes, p) = parse_script(bad);
+            assert!(commands(&scenes).is_empty(), "{bad}");
+            assert_eq!(p.errors().len(), 1, "{bad}");
+        }
+    }
+
+    #[test]
+    fn visual_paren_with_japanese_is_text() {
+        // ASCII の英数字と空白だけの括弧が印。それ以外は本文
+        let (scenes, p) = parse_script("#visual (朝) 港の様子\n#visual (2人) 並ぶ\n");
+        let c = commands(&scenes);
+        assert!(
+            matches!(&c[0], ScriptCommand::Visual { kind: None, looped: false, text, .. } if text == "(朝) 港の様子")
+        );
+        assert!(
+            matches!(&c[1], ScriptCommand::Visual { kind: None, text, .. } if text == "(2人) 並ぶ")
+        );
+        assert!(p.errors().is_empty());
+    }
+
     #[test]
     fn visual_kinds() {
         let (scenes, _) =
@@ -1725,7 +1949,9 @@ A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
             .items
             .iter()
             .map(|i| match i {
-                ScriptItem::Command(ScriptCommand::Visual { kind, text }) => (*kind, text.clone()),
+                ScriptItem::Command(ScriptCommand::Visual { kind, text, .. }) => {
+                    (*kind, text.clone())
+                }
                 other => panic!("{other:?}"),
             })
             .collect();

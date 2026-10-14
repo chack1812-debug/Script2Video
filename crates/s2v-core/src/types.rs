@@ -82,10 +82,24 @@ pub enum ScriptCommand {
         name: Option<String>,
         line_no: usize,
     },
-    /// `#visual (image) 本文`
+    /// `#visual (video loop) 本文`
     Visual {
         kind: Option<VisualKind>,
+        /// `loop` の印(動画の素材が短いときにループさせる)
+        looped: bool,
         text: String,
+        line_no: usize,
+    },
+    /// `#cut[C02]`。`id` はカット番号(シーンの頭の C01 は暗黙で、ここには来ない)
+    Cut {
+        id: Option<u32>,
+        line_no: usize,
+    },
+    /// `#note[N01] 本文`(ト書き)
+    Note {
+        id: Option<u32>,
+        text: String,
+        line_no: usize,
     },
     BgmStart(String),
     BgmStop,
@@ -224,7 +238,18 @@ mod tests {
             },
             ScriptCommand::Visual {
                 kind: Some(VisualKind::Image),
+                looped: false,
                 text: "港".to_string(),
+                line_no: 1,
+            },
+            ScriptCommand::Cut {
+                id: Some(2),
+                line_no: 1,
+            },
+            ScriptCommand::Note {
+                id: None,
+                text: "翌朝".to_string(),
+                line_no: 1,
             },
             ScriptCommand::BgmStart("bgm01.wav".to_string()),
             ScriptCommand::BgmStop,
@@ -236,7 +261,7 @@ mod tests {
             },
             ScriptCommand::Parallel(3),
         ];
-        assert_eq!(cmds.len(), 7);
+        assert_eq!(cmds.len(), 9);
     }
 
     #[test]

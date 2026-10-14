@@ -78,18 +78,31 @@ pub fn render_script_html(title: &str, scenes: &[Scene]) -> String {
                 h.push_str(&format!("<h2>{}</h2>\n", esc(&heading)));
                 heading_done = true;
             }
-            ScriptItem::Command(ScriptCommand::Visual { kind, text }) => {
+            ScriptItem::Command(ScriptCommand::Visual {
+                kind, looped, text, ..
+            }) => {
                 close_table(&mut h, &mut table_open);
-                let prefix = match kind {
-                    Some(VisualKind::Image) => "（画像）",
-                    Some(VisualKind::Video) => "（動画）",
-                    None => "",
+                let prefix = match (kind, looped) {
+                    (Some(VisualKind::Image), _) => "（画像）",
+                    (Some(VisualKind::Video), true) => "（動画・ループ）",
+                    (Some(VisualKind::Video), false) => "（動画）",
+                    (None, true) => "（ループ）",
+                    (None, false) => "",
                 };
                 h.push_str(&format!(
                     "<p class=\"visual\">{}{}</p>\n",
                     prefix,
                     esc(text)
                 ));
+            }
+            ScriptItem::Command(ScriptCommand::Cut { id, .. }) => {
+                close_table(&mut h, &mut table_open);
+                let label = id.map_or("C??".to_string(), |n| format!("C{n:02}"));
+                h.push_str(&format!("<p class=\"cut\">カット {label}</p>\n"));
+            }
+            ScriptItem::Command(ScriptCommand::Note { text, .. }) => {
+                close_table(&mut h, &mut table_open);
+                h.push_str(&format!("<p class=\"note\">ト書き: {}</p>\n", esc(text)));
             }
             ScriptItem::Speech {
                 id,
@@ -125,6 +138,16 @@ pub fn render_script_html(title: &str, scenes: &[Scene]) -> String {
 mod tests {
     use super::*;
     use s2v_core::ScriptParser;
+
+    #[test]
+    fn cut_note_and_loop_are_shown() {
+        let mut p = s2v_core::ScriptParser::new();
+        let scenes = p.parse_str("@scene 居間\n@cast\nA:田中\n\n@script\n#paragraph[S01]\n#visual (video loop) 波\n#cut[C02]\n#note[N01] 翌朝<港>\n").unwrap();
+        let h = render_script_html("t", &scenes);
+        assert!(h.contains("（動画・ループ）波"), "{h}");
+        assert!(h.contains("カット C02"), "{h}");
+        assert!(h.contains("ト書き: 翌朝&lt;港&gt;"), "{h}");
+    }
 
     #[test]
     fn html_contains_cast_scenes_and_lines() {

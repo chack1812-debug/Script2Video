@@ -26,6 +26,8 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
     // 台詞IDは組 (シーン, 台詞番号) で一意。同じ台詞番号が別のシーンにあってよい。
     let mut seen_lines: HashMap<(u32, u32), usize> = HashMap::new();
     let mut seen_scenes: HashMap<u32, usize> = HashMap::new();
+    let mut seen_cuts: HashMap<(u32, u32), usize> = HashMap::new();
+    let mut seen_notes: HashMap<(u32, u32), usize> = HashMap::new();
     // 現在のシーン番号。最初の #paragraph より前は 0、番号のない #paragraph の中は None
     let mut cur_scene: Option<u32> = Some(0);
     // (参照, #se が書かれたシーン, 行番号)
@@ -136,6 +138,32 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
                     pause_ms: 0.0,
                 });
             }
+            ScriptItem::Command(ScriptCommand::Cut { id, line_no })
+            | ScriptItem::Command(ScriptCommand::Note { id, line_no, .. }) => {
+                let (what, seen) = if matches!(item, ScriptItem::Command(ScriptCommand::Cut { .. }))
+                {
+                    ("カット", &mut seen_cuts)
+                } else {
+                    ("ト書き", &mut seen_notes)
+                };
+                match (id, cur_scene) {
+                    (None, _) => d.errors.push(pw(
+                        *line_no,
+                        format!(
+                            "{what}の番号がありません。先に `script2video number` を実行してください"
+                        ),
+                    )),
+                    (Some(n), Some(scene)) => {
+                        if let Some(prev) = seen.insert((scene, *n), *line_no) {
+                            d.errors.push(pw(
+                                *line_no,
+                                format!("{what}の番号が重複しています({prev} 行目と同じ)"),
+                            ));
+                        }
+                    }
+                    (Some(_), None) => {} // 番号の無い #paragraph の中(そちらがエラーになる)
+                }
+            }
             ScriptItem::Command(ScriptCommand::Pause(ms)) => {
                 if let Some(b) = block.as_mut() {
                     b.pause_ms += ms;
@@ -222,6 +250,21 @@ mod tests {
 
     fn messages(v: &[ParseWarning]) -> Vec<String> {
         v.iter().map(|w| w.message.clone()).collect()
+    }
+
+    #[test]
+    fn cut_and_note_need_numbers_and_unique_ids() {
+        let d = check("#paragraph[S01]\n[S01-L001] A:一\n#cut\n#note 翌朝\n");
+        assert_eq!(d.errors.len(), 2, "{:?}", d.errors);
+        let d = check(
+            "#paragraph[S01]\n[S01-L001] A:一\n#cut[C02]\n#cut[C02]\n#note[N01] a\n#note[N01] b\n",
+        );
+        assert_eq!(d.errors.len(), 2, "{:?}", d.errors);
+        // 別のシーンなら同じ番号でよい
+        let d = check(
+            "#paragraph[S01]\n[S01-L001] A:一\n#cut[C02]\n#paragraph[S02]\n[S02-L001] A:二\n#cut[C02]\n",
+        );
+        assert!(d.errors.is_empty(), "{:?}", d.errors);
     }
 
     #[test]

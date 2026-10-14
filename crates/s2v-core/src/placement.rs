@@ -207,7 +207,8 @@ pub fn place(
                     open = Some(OpenScene::new(id.unwrap_or(0), name.clone(), cursor));
                     first_in_scene = true;
                 }
-                ScriptCommand::Visual { kind, text } => match open.as_mut() {
+                ScriptCommand::Cut { .. } | ScriptCommand::Note { .. } => {} // Task 4 で置き換える
+                ScriptCommand::Visual { kind, text, .. } => match open.as_mut() {
                     Some(s) => {
                         s.visual_text = Some(match s.visual_text.take() {
                             Some(t) => format!("{t}\n{text}"),
