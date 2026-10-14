@@ -2,6 +2,7 @@
 
 pub mod assets;
 pub mod bubbles;
+pub mod draw;
 pub mod font;
 pub mod kinsoku;
 pub mod layout;
