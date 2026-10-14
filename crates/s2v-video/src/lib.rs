@@ -1,3 +1,6 @@
 //! 動画の合成に使う純粋な計算(コマ割り・区間・重ね画像の一覧)。
 
 pub mod frames;
+
+pub mod audio_check;
+pub mod probe;
