@@ -30,7 +30,7 @@ cargo run --release -p s2v-cli -- build 第1話.txt
 cargo run --release -p s2v-cli -- build 第1話.txt --voice-dir 収録/
 ```
 
-`build` のオプション: `--voice-dir 収録フォルダ`(省略時は台本と同じフォルダの `voices/`。無ければエラー)、`--config 設定.toml`(省略時は同梱の `config.toml`)、`--no-cache`(中間ファイルを使わない)。
+`build` のオプション: `--voice-dir 収録フォルダ`(省略時は台本と同じフォルダの `voices/`。無い・フォルダでないときはエラー。相対パスは台本フォルダではなく現在のフォルダからの相対、既定の `voices` だけが台本フォルダからの相対)、`--config 設定.toml`(省略時は同梱の `config.toml`)、`--no-cache`(中間ファイルを使わない)。
 
 台本の書式は [台本仕様.md](台本仕様.md)、設計は [docs/superpowers/specs/2026-10-12-script2video-design.md](docs/superpowers/specs/2026-10-12-script2video-design.md) を参照。
 
@@ -64,7 +64,7 @@ cargo run --release -p s2v-cli -- build 第1話.txt --voice-dir 収録/
 | `Process.log` | 処理の記録・警告・エラー |
 | `work/` | 中間ファイル(削除してよい) |
 
-次の場合は、何も書かずに終了コード 2 で止まります: 収録フォルダ(`--voice-dir`、省略時は `voices/`)が `work/`・`tracks/`・`timeline/` のどれかと同じ場所、台本のファイル名が `full_dialogue.wav`・`Process.log`・`output.mp4` のどれか(`voices.txt` などは問題ありません)。
+次の場合は、何も書かず・消さずに終了コード 2 で止まります: 収録フォルダ(`--voice-dir`、省略時は `voices/`)が `work/`・`tracks/`・`timeline/` のどれかと同じ場所(相対パス・存在しないパス・大文字小文字違いも同じ場所とみなします)、台本のファイル名が `full_dialogue.wav`・`Process.log`・`output.mp4` のどれか(大文字小文字は区別しません。`voices.txt` などは問題ありません)、`work/`・`tracks/`・`timeline/`(と既定の `voices/`)がリンク(シンボリックリンク・ジャンクション)または台本フォルダの外を指している場合。
 
 ## ①a の完了条件の確認
 

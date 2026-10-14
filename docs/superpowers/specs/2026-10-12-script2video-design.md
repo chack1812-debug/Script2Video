@@ -85,7 +85,7 @@ Cargo ワークスペース。
 |-work/                 中間ファイル(resampled/ lines/ lines_prefade/ cache.json)
 ```
 
-`output.mp4` は ④最終合成が出力する。①は作らず、消さず、触れない。`voices/` は読むだけ。`build` は、収録フォルダが `work/`・`tracks/`・`timeline/` と同じ場所のとき、および台本のファイル名が `full_dialogue.wav`・`Process.log`・`output.mp4` のとき、何も書かずに終了コード 2 で止まる。失敗時に消すのは最終成果物(`full_dialogue.wav`、`tracks/*.wav`、`timeline/` の3ファイル)だけ。
+`output.mp4` は ④最終合成が出力する。①は作らず、消さず、触れない。`voices/` は読むだけ。`build` は、収録フォルダが `work/`・`tracks/`・`timeline/` と同じ場所のとき(相対・存在しないパス・大文字小文字違いも同じ場所とみなす)、台本のファイル名が `full_dialogue.wav`・`Process.log`・`output.mp4` のとき(大文字小文字は区別しない)、および `work/`・`tracks/`・`timeline/`(と既定の `voices/`)がリンクまたは台本フォルダの外を指しているとき、何も書かず・消さずに終了コード 2 で止まる。相対パスの `--voice-dir` は、台本フォルダではなく**現在のフォルダ**(コマンドを実行した場所)からの相対とみなす。省略時の既定 `voices` だけが台本フォルダからの相対。失敗時に消すのは最終成果物(`full_dialogue.wav`、`tracks/*.wav`、`timeline/` の3ファイル)だけ。
 
 1. **パース**。台本を読み、役・シーン・台詞・コマンドの列を得る。
 2. **照合**。`--voice-dir`(省略時は台本フォルダの `voices/`)の収録ファイルを、ファイル名から**テイク**(台詞の範囲+トラック)に解釈し、台詞に対応付ける(台本仕様 §3)。不足・重複・形式エラーを集める。同期の検査は、取り込み後(手順3)に行う。
@@ -352,7 +352,7 @@ Cargo ワークスペース。
 
 ## 9. ④最終合成(契約のみ)
 
-入力: `full_dialogue.wav` + `timeline.json` + `assets/` + `bubbles.json`。出力: 1本の動画(mp4)。`s2v-video`(ffmpeg)を流用して、シーンごとの素材の割り当て、素材が短い場合の静止/ループ、立ち絵、吹き出しの重ね、字幕を合成する。詳細は④の spec で決める。
+入力(台本フォルダからの相対): `full_dialogue.wav` + `timeline/timeline.json` + `assets/` + `bubbles.json`。出力: 1本の動画(mp4)。`s2v-video`(ffmpeg)を流用して、シーンごとの素材の割り当て、素材が短い場合の静止/ループ、立ち絵、吹き出しの重ね、字幕を合成する。詳細は④の spec で決める。
 
 ## 10. テスト方針(①)
 
