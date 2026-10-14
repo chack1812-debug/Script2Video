@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 use ordered_float::OrderedFloat;
 use rand::{rngs::SmallRng, SeedableRng};
@@ -14,13 +14,19 @@ type IrKey = (OrderedFloat<f64>, usize);
 type StereoIr = [Vec<f32>; 2];
 
 /// dry と wet の混合比。`apply` と音量補償(processor)の両方がこの関数を使い、食い違いを防ぐ。
+/// 0.01 刻みに量子化して [0, 0.9] に収める(補償のキーを有限個にし、測った値と掛ける値を一致させる)。
+/// 非有限な入力は NaN を返す(呼び出し側が Err にする)。
 pub(crate) fn actual_wet(
     reverb_wet: f64,
     wet_base: f64,
     avg_dist: f64,
     wet_distance_slope: f64,
 ) -> f64 {
-    (reverb_wet * wet_base * (1.0 + wet_distance_slope * avg_dist)).min(0.9)
+    let raw = reverb_wet * wet_base * (1.0 + wet_distance_slope * avg_dist);
+    if !raw.is_finite() {
+        return f64::NAN;
+    }
+    ((raw.clamp(0.0, 0.9) * 100.0).round() / 100.0).min(0.9)
 }
 
 /// 量子化(4桁)した値。キャッシュのキーに使う。
@@ -28,10 +34,15 @@ pub(crate) fn round4(v: f64) -> f64 {
     (v * 10000.0).round() / 10000.0
 }
 
-/// (rt60, pre_delay) をキーとした stereo IR キャッシュ ([ir_l, ir_r])
+fn poisoned() -> anyhow::Error {
+    anyhow::anyhow!("残響 IR のキャッシュが使えません(別スレッドの処理が異常終了しました)")
+}
+
+/// (rt60, pre_delay) をキーとした stereo IR キャッシュ ([ir_l, ir_r])。
+/// IR は丸めた rt60(4桁)から生成する(キーと IR が一致する)。
 pub struct IrCache {
     sample_rate: u32,
-    cache: Mutex<HashMap<IrKey, StereoIr>>,
+    cache: Mutex<HashMap<IrKey, Arc<StereoIr>>>,
 }
 
 impl IrCache {
@@ -42,20 +53,26 @@ impl IrCache {
         }
     }
 
-    pub fn prewarm(&self, params: &[(f64, usize)]) {
+    pub fn prewarm(&self, params: &[(f64, usize)]) -> anyhow::Result<()> {
         for &(rt60, pre_delay) in params {
-            self.compute_if_needed(rt60, pre_delay);
+            self.compute_if_needed(rt60, pre_delay)?;
         }
+        Ok(())
     }
 
-    pub fn compute_if_needed(&self, rt60: f64, pre_delay: usize) {
+    /// IR を(無ければ)生成して返す。生成はロックの外で行う。
+    fn get_or_build(&self, rt60: f64, pre_delay: usize) -> anyhow::Result<Arc<StereoIr>> {
         let key = (OrderedFloat(round4(rt60)), pre_delay);
-        let mut cache = self.cache.lock().unwrap();
-        if cache.contains_key(&key) {
-            return;
+        if let Some(ir) = self.cache.lock().map_err(|_| poisoned())?.get(&key) {
+            return Ok(Arc::clone(ir));
         }
-        let ir = build_ir(rt60, pre_delay, self.sample_rate);
-        cache.insert(key, ir);
+        let ir = Arc::new(build_ir(key.0.into_inner(), pre_delay, self.sample_rate));
+        let mut cache = self.cache.lock().map_err(|_| poisoned())?;
+        Ok(Arc::clone(cache.entry(key).or_insert(ir)))
+    }
+
+    pub fn compute_if_needed(&self, rt60: f64, pre_delay: usize) -> anyhow::Result<()> {
+        self.get_or_build(rt60, pre_delay).map(|_| ())
     }
 
     /// IR を使って stereo バッファにリバーブをかける (in-place)
@@ -69,25 +86,27 @@ impl IrCache {
         wet_base: f64,
         avg_dist: f64,
         wet_distance_slope: f64,
-    ) {
-        let actual_wet = actual_wet(reverb_wet, wet_base, avg_dist, wet_distance_slope) as f32;
-        self.apply_with_wet(stereo, rt60, pre_delay, actual_wet);
+    ) -> anyhow::Result<()> {
+        let actual_wet = actual_wet(reverb_wet, wet_base, avg_dist, wet_distance_slope);
+        self.apply_with_wet(stereo, rt60, pre_delay, actual_wet as f32)
     }
 
     /// `actual_wet`(`actual_wet()` で求めた混合比)を直接指定して適用する (in-place)。
+    /// IR は Arc を複製してロックを放してから畳み込む。
     pub(crate) fn apply_with_wet(
         &self,
         stereo: &mut [[f32; 2]],
         rt60: f64,
         pre_delay: usize,
         actual_wet: f32,
-    ) {
-        if actual_wet <= 0.0 || stereo.is_empty() {
-            return;
+    ) -> anyhow::Result<()> {
+        if !actual_wet.is_finite() || !(0.0..=0.9).contains(&actual_wet) {
+            anyhow::bail!("残響の混合比が範囲外です: {actual_wet}");
         }
-        let key = (OrderedFloat(round4(rt60)), pre_delay);
-        let cache = self.cache.lock().unwrap();
-        let Some(ir) = cache.get(&key) else { return };
+        if actual_wet <= 0.0 || stereo.is_empty() {
+            return Ok(());
+        }
+        let ir = self.get_or_build(rt60, pre_delay)?;
 
         for ch in 0..2 {
             let dry: Vec<f32> = stereo.iter().map(|s| s[ch]).collect();
@@ -96,6 +115,19 @@ impl IrCache {
                 s[ch] = (1.0 - actual_wet) * s[ch] + actual_wet * REVERB_WET_GAIN * wet[i];
             }
         }
+        Ok(())
+    }
+
+    /// テスト用: 別スレッドでロックを握ったまま panic させ、キャッシュの Mutex を汚染する。
+    #[cfg(test)]
+    pub(crate) fn poison_for_test(&self) {
+        std::thread::scope(|s| {
+            let h = s.spawn(|| {
+                let _g = self.cache.lock().unwrap();
+                panic!("poison the IR cache");
+            });
+            assert!(h.join().is_err());
+        });
     }
 }
 
@@ -174,7 +206,7 @@ pub(crate) fn sosfilt_single_section(sos: &[f64; 6], input: &[f64]) -> Vec<f64> 
 /// シード固定の乱数でリバーブ IR を生成する
 fn build_ir(rt60: f64, pre_delay: usize, sample_rate: u32) -> [Vec<f32>; 2] {
     let fs = sample_rate as f64;
-    let rv_time = rt60;
+    let rv_time = round4(rt60);
     let n = (fs * rv_time) as usize;
 
     let seed = (round4(rt60) * 10000.0) as u64 & 0xFFFF_FFFF;
@@ -219,24 +251,26 @@ mod tests {
     #[test]
     fn ir_cache_builds_entry() {
         let cache = IrCache::new(48000);
-        cache.compute_if_needed(1.0, 240);
-        let guard = cache.cache.lock().unwrap();
+        cache.compute_if_needed(1.0, 240).unwrap();
+        let guard = cache.cache.lock().expect("テスト内でロックは汚染されない");
         assert!(guard.contains_key(&(OrderedFloat(round4(1.0)), 240)));
     }
 
     #[test]
     fn prewarm_fills_multiple_entries() {
         let cache = IrCache::new(48000);
-        cache.prewarm(&[(0.5, 240), (1.0, 240), (2.0, 480)]);
-        let guard = cache.cache.lock().unwrap();
+        cache
+            .prewarm(&[(0.5, 240), (1.0, 240), (2.0, 480)])
+            .unwrap();
+        let guard = cache.cache.lock().expect("テスト内でロックは汚染されない");
         assert_eq!(guard.len(), 3);
     }
 
     #[test]
     fn ir_has_two_channels() {
         let cache = IrCache::new(48000);
-        cache.compute_if_needed(1.0, 240);
-        let guard = cache.cache.lock().unwrap();
+        cache.compute_if_needed(1.0, 240).unwrap();
+        let guard = cache.cache.lock().expect("テスト内でロックは汚染されない");
         let ir = &guard[&(OrderedFloat(round4(1.0)), 240)];
         assert!(!ir[0].is_empty());
         assert!(!ir[1].is_empty());
@@ -245,12 +279,14 @@ mod tests {
     #[test]
     fn apply_with_zero_wet_leaves_signal_unchanged() {
         let cache = IrCache::new(48000);
-        cache.compute_if_needed(1.0, 240);
+        cache.compute_if_needed(1.0, 240).unwrap();
         let original: Vec<[f32; 2]> = (0..100)
             .map(|i| [i as f32 * 0.01, i as f32 * 0.01])
             .collect();
         let mut signal = original.clone();
-        cache.apply(&mut signal, 1.0, 240, 0.0, 0.8, 1.0, 0.1);
+        cache
+            .apply(&mut signal, 1.0, 240, 0.0, 0.8, 1.0, 0.1)
+            .unwrap();
         for (a, b) in original.iter().zip(signal.iter()) {
             assert!((a[0] - b[0]).abs() < 1e-6);
         }
@@ -259,7 +295,7 @@ mod tests {
     #[test]
     fn apply_with_wet_modifies_signal() {
         let cache = IrCache::new(48000);
-        cache.compute_if_needed(1.0, 240);
+        cache.compute_if_needed(1.0, 240).unwrap();
         let n = 2400_usize;
         let mut signal: Vec<[f32; 2]> = (0..n)
             .map(|i| {
@@ -268,7 +304,9 @@ mod tests {
             })
             .collect();
         let before = signal[100][0];
-        cache.apply(&mut signal, 1.0, 240, 1.0, 0.8, 1.0, 0.1);
+        cache
+            .apply(&mut signal, 1.0, 240, 1.0, 0.8, 1.0, 0.1)
+            .unwrap();
         // リバーブ後は少なくとも何らかの変化があるはず
         let changed = signal.iter().any(|s| (s[0] - before).abs() > 1e-4);
         assert!(changed, "apply should modify signal");
@@ -346,13 +384,17 @@ mod tests {
                 .collect()
         };
         let cache = IrCache::new(48000);
-        cache.compute_if_needed(1.0, 240);
+        cache.compute_if_needed(1.0, 240).unwrap();
 
         let dry = make_signal();
         let mut s_small = make_signal();
         let mut s_large = make_signal();
-        cache.apply(&mut s_small, 1.0, 240, 0.3, 0.8, 5.0, 0.1);
-        cache.apply(&mut s_large, 1.0, 240, 0.3, 0.8, 5.0, 0.5);
+        cache
+            .apply(&mut s_small, 1.0, 240, 0.3, 0.8, 5.0, 0.1)
+            .unwrap();
+        cache
+            .apply(&mut s_large, 1.0, 240, 0.3, 0.8, 5.0, 0.5)
+            .unwrap();
 
         let dev = |sig: &Vec<[f32; 2]>| -> f64 {
             sig.iter()
@@ -378,13 +420,17 @@ mod tests {
                 .collect()
         };
         let cache = IrCache::new(48000);
-        cache.compute_if_needed(1.0, 240);
+        cache.compute_if_needed(1.0, 240).unwrap();
 
         let dry = make_signal();
         let mut s_near = make_signal();
         let mut s_far = make_signal();
-        cache.apply(&mut s_near, 1.0, 240, 0.3, 0.8, 1.0, 0.1);
-        cache.apply(&mut s_far, 1.0, 240, 0.3, 0.8, 5.0, 0.1);
+        cache
+            .apply(&mut s_near, 1.0, 240, 0.3, 0.8, 1.0, 0.1)
+            .unwrap();
+        cache
+            .apply(&mut s_far, 1.0, 240, 0.3, 0.8, 5.0, 0.1)
+            .unwrap();
 
         let dev = |sig: &Vec<[f32; 2]>| -> f64 {
             sig.iter()
@@ -401,7 +447,7 @@ mod tests {
     #[test]
     fn compute_and_apply_with_rt60_predelay_key() {
         let cache = IrCache::new(48000);
-        cache.compute_if_needed(1.5, 480);
+        cache.compute_if_needed(1.5, 480).unwrap();
         let mut signal: Vec<[f32; 2]> = (0..4800)
             .map(|i| {
                 let v = (2.0 * std::f32::consts::PI * 440.0 * i as f32 / 48000.0).sin() * 0.5;
@@ -409,7 +455,9 @@ mod tests {
             })
             .collect();
         let before = signal[2000][0];
-        cache.apply(&mut signal, 1.5, 480, 1.0, 0.8, 1.0, 0.1);
+        cache
+            .apply(&mut signal, 1.5, 480, 1.0, 0.8, 1.0, 0.1)
+            .unwrap();
         assert!(
             signal.iter().any(|s| (s[0] - before).abs() > 1e-4),
             "apply は信号を変化させること"
@@ -419,12 +467,14 @@ mod tests {
     #[test]
     fn apply_wet_base_zero_leaves_signal_unchanged() {
         let cache = IrCache::new(48000);
-        cache.compute_if_needed(1.0, 240);
+        cache.compute_if_needed(1.0, 240).unwrap();
         let original: Vec<[f32; 2]> = (0..200)
             .map(|i| [i as f32 * 0.01, i as f32 * 0.01])
             .collect();
         let mut signal = original.clone();
-        cache.apply(&mut signal, 1.0, 240, 1.0, 0.0, 1.0, 0.1);
+        cache
+            .apply(&mut signal, 1.0, 240, 1.0, 0.0, 1.0, 0.1)
+            .unwrap();
         for (a, b) in original.iter().zip(signal.iter()) {
             assert!((a[0] - b[0]).abs() < 1e-6);
         }
@@ -433,11 +483,13 @@ mod tests {
     #[test]
     fn cached_ir_channels_have_unit_energy() {
         let cache = IrCache::new(48000);
-        cache.prewarm(&[(0.3, 100), (1.0, 240), (2.5, 480)]);
-        let guard = cache.cache.lock().unwrap();
+        cache
+            .prewarm(&[(0.3, 100), (1.0, 240), (2.5, 480)])
+            .unwrap();
+        let guard = cache.cache.lock().expect("テスト内でロックは汚染されない");
         assert_eq!(guard.len(), 3);
         for ir in guard.values() {
-            for ch in ir {
+            for ch in ir.iter() {
                 let e: f64 = ch.iter().map(|&v| (v as f64) * (v as f64)).sum();
                 assert!((e - 1.0).abs() < 1e-3, "IR エネルギー={e}");
             }
@@ -447,7 +499,7 @@ mod tests {
     #[test]
     fn apply_is_linear_in_the_signal() {
         let cache = IrCache::new(48000);
-        cache.compute_if_needed(0.5, 100);
+        cache.compute_if_needed(0.5, 100).unwrap();
         let mk = |f: f32| -> Vec<[f32; 2]> {
             (0..3000)
                 .map(|i| {
@@ -463,9 +515,9 @@ mod tests {
             .map(|(a, b)| [a[0] + b[0], a[1] + b[1]])
             .collect();
         let (mut rx, mut ry) = (x.clone(), y.clone());
-        cache.apply(&mut sum, 0.5, 100, 0.6, 0.8, 1.0, 0.1);
-        cache.apply(&mut rx, 0.5, 100, 0.6, 0.8, 1.0, 0.1);
-        cache.apply(&mut ry, 0.5, 100, 0.6, 0.8, 1.0, 0.1);
+        cache.apply(&mut sum, 0.5, 100, 0.6, 0.8, 1.0, 0.1).unwrap();
+        cache.apply(&mut rx, 0.5, 100, 0.6, 0.8, 1.0, 0.1).unwrap();
+        cache.apply(&mut ry, 0.5, 100, 0.6, 0.8, 1.0, 0.1).unwrap();
         for i in 0..sum.len() {
             assert!((sum[i][0] - rx[i][0] - ry[i][0]).abs() < 1e-4);
             assert!((sum[i][1] - rx[i][1] - ry[i][1]).abs() < 1e-4);
