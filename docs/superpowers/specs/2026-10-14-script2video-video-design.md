@@ -1,6 +1,6 @@
 # Script2Video 映像工程(②③④)設計書
 
-日付: 2026-10-14 / 状態: 承認済み(2026-10-14、節ごとに Human が承認)。Codex(gpt-5.6-sol)のレビューを反映(同日) / 前提: [設計書(①)](2026-10-12-script2video-design.md)、[台本仕様.md](../../../台本仕様.md)
+日付: 2026-10-14 / 状態: 承認済み(2026-10-14、節ごとに Human が承認)。Codex(gpt-5.6-sol)のレビューと再レビューを反映(同日) / 前提: [設計書(①)](2026-10-12-script2video-design.md)、[台本仕様.md](../../../台本仕様.md)
 
 本書は、①の設計書 §7〜§9(契約のみ)を置き換える。②プロンプト生成、③吹き出し・ト書きの配置、④最終合成を定める。①の `timeline.json` は本書の §3 で v3 に拡張する。
 
@@ -23,7 +23,7 @@ Human の決定(2026-10-14):
 | 描画方式 | Rust で吹き出し・ト書きを PNG に描き(縦書きの組版を含む)、④はそれを ffmpeg で重ね、③の GUI は同じ PNG を表示する。描画のコードを1つにして、プレビューと完成動画の見た目を一致させる |
 | 古い完成動画 | `build` が前回の成果物を無効にする時点で、`output.mp4` を `output.stale.mp4` に改名する |
 | 同名シーンの素材共用 | 行わない(Script2Voice との違い)。素材はカット ID の名前だけで探す |
-| 実装の順 | 計画 2a(④)→ 2b(②)→ 2c(③) |
+| 実装の順 | ④(計画 2a・2b)→ ②(2c)→ ③(2d)。§10 |
 
 ## 2. コマンドと構成
 
@@ -42,8 +42,9 @@ Human の決定(2026-10-14):
 | クレート | 役割 |
 |---|---|
 | `s2v-core`(既存) | `#cut`・`#note` の解析と採番、カットとト書きの時刻 |
-| `s2v-export`(既存) | `timeline.json` v3 の書き出し |
-| `s2v-render`(新規) | `timeline.json` v3 の読み込みと検証、縦書きの組版、吹き出し・ト書きの PNG の描画、自動配置、`bubbles.json` の型と検証、素材の照合。③と④が共用する |
+| `s2v-timeline`(新規) | `timeline.json` v3 の**公開の型**(serde の Serialize と Deserialize)と検証 `validate()`(§3.6)。書き出す側(`s2v-export`)も読む側(`prompts`・`bubbles`・`render`)も、この型だけを使う |
+| `s2v-export`(既存) | `timeline.json` v3 の書き出し(`s2v-timeline` の型を組み立てて書く。書く前に `validate()` を通す) |
+| `s2v-render`(新規) | 縦書きの組版、吹き出し・ト書きの PNG の描画、自動配置、`bubbles.json` の型と検証、素材の照合。③と④が共用する |
 | `s2v-video`(新規) | ffmpeg による合成(④)。Script2Voice の `s2v-video` の考え方を参考に、新しく書く |
 | `s2v-bubbles`(新規) | ③のローカルサーバーと埋め込みの HTML/JS/CSS |
 | `s2v-cli`(既存) | コマンド `prompts`・`bubbles`・`render` の追加、台本フォルダのロック、Process.log の追記 |
@@ -70,7 +71,7 @@ Human の決定(2026-10-14):
 ```
 
 - `build` が `tracks/` で書き換え・削除するのは、自分の出力する wav(`dialogue.wav`・`bgm.wav`・`se.wav`)だけで、素材には触れない。`bubbles.json`・`prompts/` にも触れない。
-- `build` は、前回の成果物を無効にする時点(コミットポイント。①の設計書 §5.2)で `output.mp4` があれば `output.stale.mp4` に改名する(前の `output.stale.mp4` は上書き)。改名できなければ エラー 2(コミットポイントの前なので何も変えない)。
+- `build` は、前回の成果物を無効にする時点(コミットポイント。①の設計書 §5.2)で `output.mp4` があれば `output.stale.mp4` に改名する(前の `output.stale.mp4` は上書き)。改名できなければ エラー 2 で、`output.mp4` と前回の最終成果物は変更しない(ロックの取得と `Process.log` の作り直しは、それより前に済んでいる)。
 - 削除・作り直しをする場所(`prompts/` の生成ファイル、`work/render/`)は、既存の安全検査(①の `layout`)の対象に加える。リンク(シンボリックリンク・ジャンクション)や台本フォルダの外を指していれば、何も消さずに エラー 2。再帰的な削除は、検査を通った固定のパス(`work/render/`)に限る。
 
 ### 2.3 ロックとログ
@@ -187,7 +188,9 @@ v2 からの変更点を示す。`schema_version` は 3。
 
 ### 3.6 v3 の不変条件
 
-`s2v-render` に v3 の読み込みと検証を置き、`prompts`・`bubbles`・`render` は必ずこれを通す。違反は エラー 2。`build` の書き出しのテストでも同じ検証を使う。
+`s2v-timeline` の `validate()` が検査する。`prompts`・`bubbles`・`render` は読み込み時に必ずこれを通し、違反は エラー 2。`build` は書き出す前にこれを通し、違反は内部の誤りとして エラー 2(`timeline.json` を書かない)。
+
+v3 は、`s2v-timeline` の型として全フィールドを定義する(①の設計書 §6 の v2 のフィールドに、本節と §3.5 の変更を加えたもの)。型は `deny_unknown_fields` を使わず、未知のフィールドは読み捨てる。
 
 - ID の書式: シーン `^S\d+$`、カット `^S\d+-C\d+$`、ト書き `^S\d+-N\d+$`、台詞 `^S\d+-L\d+$`(桁数は問わない)。カット・ト書き・台詞の ID のシーン部分は、所属するシーンの ID と一致する。
 - 一意: シーン・カット・ト書き・台詞の ID は、それぞれ重複しない。
@@ -195,7 +198,13 @@ v2 からの変更点を示す。`schema_version` は 3。
 - 範囲: すべての時刻は `0 ≤ start_ms ≤ end_ms ≤ duration_ms` の整数。
 - カット: 各シーンに1つ以上あり、最初は `<シーンID>-C01`。シーンの中でカットは隙間なく続く(`cuts[k].end_ms == cuts[k+1].start_ms`)。最初のシーンの最初のカットは 0 から始まり、シーン i の最後のカットの終わりはシーン i+1 の最初のカットの始めに等しく、最後のシーンの最後のカットは `duration_ms` で終わる。
 - ト書き: シーンの中で `start_ms` が単調非減少。各ト書きの `end_ms` は次のト書きの `start_ms` 以下。シーンの映像区間の内側にある。
-- 未知のフィールドは無視する(将来の追加のため)。`schema_version` は 3 だけを受け入れる。
+- 参照: `lines[].scene` は `scenes[].id` のどれか。`lines[].cast` は `cast[].name` のどれか。`lines[].take` は `takes[].id` のどれか。`lines` を台本の並びにたどったとき、所属シーンの `scenes` での位置は減らない。
+- 台詞: `missing: false` なら `src_start_ms ≤ src_end_ms` と `measured_lufs`・ゲインが有限値。`missing: true` なら `reason` が null でなく、`src_*`・`measured_lufs`・ゲインが null。
+- シーン: `index` は 0(`S00`)または台本の並びの番号で、並びに沿って増える。`silent: true` のシーンには台詞が無い。
+- イベント: `start_ms` は `0 ≤ start_ms ≤ duration_ms`。
+- 数値: 時刻・長さは i64 に収まる非負の整数。浮動小数は有限値。
+- `schema_version` は 3 だけを受け入れる。
+- 実装時に、既存の `build` の出力(①のゴールデン)がこれらをすべて満たすことをテストで確かめる。満たさない項目が見つかったら、不変条件を緩めるか `build` を直すかを Human に確認する。
 
 ## 4. ④最終合成(`render`)
 
@@ -204,8 +213,8 @@ v2 からの変更点を示す。`schema_version` は 3。
 1. **ロックと検査**: ロックを取る(§2.3)。鮮度の検査(§2.4)。`bubbles.json` があれば読んで検証する(§5.2)。壊れている → エラー 2。無ければ全項目を自動配置にする。ffmpeg・ffprobe を探し(設定のパス、無ければ PATH)、版が 6.0 以上であることを確かめる(無い・古い → エラー 2)。フォントを検査する(§6.4)。
 2. **素材の照合**(§4.3)。不足があれば一覧を出して エラー 2。`default_image` が設定されていれば代わりに使い、警告にとどめる。
 3. **作業フォルダ**: `work/render/` を作り直す(§2.2 の検査の後)。古い中間ファイルは使い回さない。
-4. **吹き出し・ト書きの描画**: 表示する全項目(長さ 0 でないもの)の配置を決め(`bubbles.json` の値、無ければ自動配置 §4.4)、`s2v-render` で透明な PNG を `work/render/overlays/ov_0001.png` …(ASCII の連番)に描く。
-5. **カットごとの区間ファイル**: 長さ 0 でないカットごとに ffmpeg を1回呼び、映像だけの区間ファイル `work/render/seg/seg_0001.mp4` …を作る(§4.5)。
+4. **区間の分割と重ね画像**: 表示する全項目(長さ 0 でないもの)の配置を決め(`bubbles.json` の値、無ければ自動配置 §4.4)、§4.2 の規則で動画全体を**区間**に分ける。区間ごとに、表示中の全項目を1枚に合成した画面の大きさの透明な PNG(**重ね画像**)を `s2v-render` で `work/render/seg/ov_0001.png` …(ASCII の連番)に描く。表示中の項目が無い区間は重ね画像を持たない。
+5. **区間ファイル**: 区間ごとに ffmpeg を1回呼び、映像だけの区間ファイル `work/render/seg/seg_0001.mp4` …を作る(§4.5)。区間どうしは独立なので、設定 `jobs` の数まで同時に実行する。
 6. **連結と音声**: 区間ファイルを連結し(§4.5)、`full_dialogue.wav` を AAC にして多重化し、`work/render/output.tmp.mp4` に書く。
 7. **出力の検証**: `output.tmp.mp4` を ffprobe で検証する(§4.6)。通らなければ エラー 2 で、`output.mp4` は変更しない。
 8. **置き換え**: 検証を通った `output.tmp.mp4` を `output.mp4` へ rename で置き換える(Rust の `std::fs::rename` は Windows では既存のファイルを置き換える `MoveFileExW(MOVEFILE_REPLACE_EXISTING)` を使う)。置き換えに失敗したら エラー 2 で、元の `output.mp4` はそのまま残る。成功したら `output.stale.mp4` は消さない(人が消す)。
@@ -213,8 +222,9 @@ v2 からの変更点を示す。`schema_version` は 3。
 ### 4.2 時刻とコマ
 
 - `frame(t) = floor((t × fps + 500) / 1000)`(t はミリ秒の整数。四捨五入で、0.5 は切り上げ)。動画全体のコマ数は `ceil(duration_ms × fps / 1000)`。
-- カットの区間ファイルのコマ数は `frame(end) − frame(start)`(最後のカットだけは 全体のコマ数 − `frame(start)`)。コマ数が 0 になるカットは作らない。境目の絶対時刻を1回だけ丸めるので、カットが多くても誤差は積み重ならず、区間のコマ数の合計は全体のコマ数に等しい。
-- 吹き出し・ト書きは、コマ f が `frame(表示開始) ≦ f < frame(表示終了)` のとき表示する。区間ファイルの中では、区間の先頭からの相対コマ番号で指定する。
+- カットはコマ `[frame(start), frame(end))` を占める(最後のカットの終わりは全体のコマ数)。吹き出し・ト書きは、コマ `[frame(表示開始), frame(表示終了))` に表示する。どちらも空(始め ≧ 終わり)なら映像に現れない。
+- **区間**: 全体のコマ `[0, 全体のコマ数)` を、すべてのカットの境目と、すべての項目の表示の始めと終わりのコマで区切る。1つの区間の中では、カット(背景)も表示中の項目の組も変わらない。境目は絶対時刻を1回だけ丸めたコマ番号なので、区間がいくつあっても誤差は積み重ならず、区間のコマ数の合計は全体のコマ数に等しい。
+- 区間は、属するカットと、そのカットの先頭から区間の先頭までのコマ数(**カット内の開始コマ** s)を持つ。動画の素材は、カットの先頭を素材の先頭に合わせ、区間ではそこから s コマ目以降を使う(区間に分けても、動画の再生は途切れずにつながる)。
 
 ### 4.3 素材の照合
 
@@ -235,31 +245,33 @@ v2 からの変更点を示す。`schema_version` は 3。
 
 ### 4.5 ffmpeg の手順
 
-ffmpeg は引数の配列で直接起動する(シェルを経由しない)。作業フォルダ(カレントディレクトリ)は `work/render/seg/`。素材のパスは絶対パスで引数に渡す(日本語を含んでよい)。重ねる PNG と区間ファイルは ASCII の相対名で扱う。フィルタは区間ごとにファイル(`seg_0001.filter`)に書き、ffmpeg 7 以上では `-/filter_complex seg_0001.filter`、6.x では `-filter_complex_script seg_0001.filter` で渡す(コマンドラインの長さの制限を避ける)。
+ffmpeg は引数の配列で直接起動する(シェルを経由しない)。作業フォルダ(カレントディレクトリ)は `work/render/seg/`。素材のパスは絶対パスで引数に渡す(日本語を含んでよい)。重ね画像と区間ファイルは ASCII の相対名で扱う。1回の ffmpeg の入力は、背景と重ね画像の高々2つなので、コマンドラインは短い。フィルタは引数 `-filter_complex` で渡す。
 
-**区間ファイル**(コマ数 N):
+**区間ファイル**(コマ数 N、カット内の開始コマ s):
 
 - 背景の入力: 画像は `-loop 1 -framerate <fps> -i <素材>`。動画は `-i <素材>`(`loop` のときは前に `-stream_loop -1`)。
-- 背景のフィルタ: `setpts=PTS-STARTPTS` → `fps=<fps>` → 画面への収め方(`contain`: `scale=W:H:force_original_aspect_ratio=decrease,pad=W:H:(ow-iw)/2:(oh-ih)/2:color=<background>`、`cover`: `scale=W:H:force_original_aspect_ratio=increase,crop=W:H`)→ `setsar=1` → `format=yuv420p` → 動画で `loop` でなければ `tpad=stop_mode=clone:stop=-1` → `trim=end_frame=N` → `setpts=N/(<fps>*TB)`。
-- 重ね: 区間の時間に表示が重なる PNG ごとに `-loop 1 -framerate <fps> -i ../overlays/ov_XXXX.png` を加え、`overlay=x=<x>:y=<y>:eof_action=repeat:enable='between(n,<a>,<b>)'` で順に重ねる(a・b は区間内の相対コマ番号で、b は表示の最後のコマ)。重ねる順は、ト書き → 吹き出し(開始時刻の順)。
+- 背景のフィルタ: `setpts=PTS-STARTPTS` → `fps=<fps>` → 画面への収め方(`contain`: `scale=W:H:force_original_aspect_ratio=decrease:out_color_matrix=bt709:out_range=tv,pad=W:H:(ow-iw)/2:(oh-ih)/2:color=<background>`、`cover`: `scale=W:H:force_original_aspect_ratio=increase:out_color_matrix=bt709:out_range=tv,crop=W:H`)→ `setsar=1` → `format=yuv420p` → 動画で `loop` でなければ `tpad=stop_mode=clone:stop=-1` → `trim=start_frame=s:end_frame=s+N` → `setpts=PTS-STARTPTS`。
+- 色: 画像は sRGB とみなし、動画は素材の色情報に従う(色情報が無い動画は BT.709 とみなす)。どちらも `scale` で BT.709・リミテッドレンジ(tv)に変換する。
+- 重ね(重ね画像がある区間だけ): `-loop 1 -framerate <fps> -i ov_XXXX.png` を加え、`[1:v]setpts=PTS-STARTPTS,format=rgba[o];[bg][o]overlay=x=0:y=0:eof_action=repeat:repeatlast=1:shortest=0:format=auto` で重ねる。区間の中で表示は変わらないので、`enable` の式は使わない。
 - 出力: `-map [v] -an -frames:v N -fps_mode cfr -c:v libx264 -preset <preset> -crf <crf> -profile:v high -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -video_track_timescale <fps×1000> seg_XXXX.mp4`。全区間で同じ値を使う。
 
-**連結**: ffprobe で全区間の codec・profile・pix_fmt・幅・高さ・SAR・time base・フレームレート・コマ数(N と一致)を確かめる。
+**連結**: ffprobe で全区間を確かめる。ストリームが映像1本だけ、codec・codec tag・profile・level・pix_fmt・field order・幅・高さ・SAR・色(range・space・transfer・primaries)・time base・フレームレートが全区間で一致し、コマ数が N、長さが `N/fps` 秒に等しいこと。
 
-- すべて一致すれば、`concat.txt`(UTF-8、BOM なし、LF。各行 `file 'seg_0001.mp4'` の ASCII の相対名だけ)を作り、`-f concat -safe 0 -i concat.txt -c:v copy` で連結する。
-- 一致しなければ、`-c:v libx264`(同じ設定)で再エンコードして連結する。どちらを使ったかは Process.log に書く。
+- すべて満たせば、`concat.txt`(UTF-8、BOM なし、LF。各行 `file 'seg_0001.mp4'` の ASCII の相対名だけ)を作り、`-f concat -safe 0 -i concat.txt -c:v copy` で連結する。
+- 満たさない区間があれば、内部の誤り(全区間を同じ設定で作っているので、起きないはずのこと)として エラー 2 にし、食い違った項目と区間を Process.log に書く。再エンコードによる救済はしない。
 
-**多重化**: 連結した映像と `full_dialogue.wav` を `-map 0:v -map 1:a -c:v copy -c:a aac -b:a <audio_bitrate> -ar 48000 -ac 2 -movflags +faststart` で `output.tmp.mp4` にする。`-shortest` は使わない(映像のコマ数は音声の長さを切り上げているので、映像の方が1コマ未満だけ長い)。
+**多重化**: 連結した映像と `full_dialogue.wav` を `-map 0:v -map 1:a -c:v copy -c:a aac -profile:a aac_low -b:a <audio_bitrate> -ar 48000 -ac 2 -movflags +faststart` で `output.tmp.mp4` にする。`-shortest` は使わない(映像のコマ数は音声の長さを切り上げているので、映像の方が1コマ未満だけ長い)。
 
-**性能**: 区間ごとに素材を開き直すので、カット数に比例して時間がかかる。カット数・重ねる PNG の数に上限は設けない。性能の目安は §8 の試験で測り、Process.log に区間ごとの所要時間を書く。
+**性能**: 区間の数は、おおよそ カット数 + 吹き出し・ト書きの数 × 2。区間ごとに素材を開き直す(動画の素材は、カットの先頭から s コマ分を読み飛ばす)ので、時間は区間の数とカットの長さに比例する。`jobs` で並列に実行する。区間の数に上限は設けない。§8 の性能試験に合格の基準を置く。Process.log に区間ごとの所要時間を書く。
 
 ### 4.6 出力の検証
 
 ffprobe で `output.tmp.mp4` を確かめる。
 
+- ストリームが映像1本と音声1本だけ。
 - 映像: H.264、幅・高さ・フレームレートが設定どおり、コマ数が全体のコマ数に等しい。
-- 音声: AAC、48000 Hz、2ch。`start_time` の絶対値が 1 AAC フレーム(1024/48000 秒)以内。長さと `duration_ms` の差が 1 AAC フレーム + 1ms 以内。
-- 映像と音声の長さの差が 1 コマ + 1 AAC フレーム以内。
+- 音声: AAC-LC、48000 Hz、2ch。さらに、ffmpeg で音声を PCM に復号して(edit list とエンコーダーの遅延の処理は ffmpeg の復号に任せる)サンプル数を数え、`full_dialogue.wav` のサンプル数との差が 1024 サンプル以内であること。
+- 映像の長さ(コマ数 ÷ fps)と音声の長さ(復号したサンプル数 ÷ 48000)の差が、1 コマ + 1024 サンプル以内。
 
 ### 4.7 設定(`config.toml` の `[render]`)
 
@@ -273,6 +285,7 @@ ffprobe で `output.tmp.mp4` を確かめる。
 | `background` | "#000000" | `contain` の余白 |
 | `default_image` | なし | 素材が無いときの代わりの画像(絶対パス、または台本フォルダからの相対) |
 | `ffmpeg` / `ffprobe` | なし(PATH) | 実行ファイルのパス |
+| `jobs` | 0 | 区間ファイルを同時に作る数(1〜64。0 は CPU の論理コア数の半分、最低 1) |
 | `font_path` / `font_index` | "C:\\Windows\\Fonts\\YuGothM.ttc" / 0 | 縦書きに使うフォント。既定は Windows 用(他の OS では設定が必要) |
 | `font_size` | 44 | 文字の大きさ(px) |
 | `line_spacing` | 0.4 | 列の間隔(文字の大きさに対する比) |
@@ -362,21 +375,28 @@ ffprobe で `output.tmp.mp4` を確かめる。
 - **Origin**: `POST` は `Origin` が `http://127.0.0.1:<port>` か `http://localhost:<port>` であることを要求する(無い・違う → 403)。CORS のヘッダーは返さない。
 - **POST の本文**: `Content-Type: application/json` だけを受け、1 MiB まで。
 - **応答のヘッダー**: `Content-Security-Policy: default-src 'none'; script-src 'self'; style-src 'self'; img-src 'self' blob:; media-src 'self'; connect-src 'self'; frame-ancestors 'none'; base-uri 'none'; form-action 'none'`、`X-Content-Type-Options: nosniff`、`Referrer-Policy: no-referrer`、`Cache-Control: no-store`。
-- **メディア**: 要求のパスをファイルシステムのパスとして解釈しない。カット ID から、起動時の照合(§4.3。リンクと `tracks/` の外を拒否済み)の結果のファイルを引く。配信の直前に、そのファイルがリンクでないことを再び確かめる。
-- **Range**(メディアのみ): `bytes=a-b`・`bytes=a-`・`bytes=-n` の1つの範囲だけを受ける。正しければ 206 と `Content-Range: bytes a-b/長さ`。範囲が複数・書式違い・満たせない・数値があふれる → 416 と `Content-Range: bytes */長さ`。Range が無ければ 200。メディアの応答には常に `Accept-Ranges: bytes` を付ける。
+- **メディア**: 要求のパスをファイルシステムのパスとして解釈しない。起動時の照合(§4.3。リンクと `tracks/` の外を拒否済み)で、各カットの素材と `full_dialogue.wav` を**開いてハンドルを保持**し、配信はそのハンドルから読む(照合と配信の間にファイルが差し替えられても、照合したファイルの内容だけを返す。起動後に置いた素材は、`bubbles` を起動し直すと反映される)。`Content-Type` は拡張子で決める(`image/png`・`image/jpeg`・`image/webp`・`video/mp4`・`video/quicktime`・`video/webm`・`audio/wav`)。`GET` と `HEAD` に応じる(`HEAD` は本文を返さず、ヘッダーは `GET` と同じ)。
+- **Range**(メディアのみ。RFC 9110 に従う): `bytes=a-b`・`bytes=a-`・`bytes=-n` の1つの範囲だけを受ける。長さ L のファイルで、`b ≥ L` なら `b = L−1` に切り詰める。`bytes=-n` は末尾の n バイト(`n > L` なら全体)。満たせる範囲なら 206 と `Content-Range: bytes a-b/L`、`Content-Length: b−a+1`。範囲が複数・書式違い・数値があふれる・`a ≥ L`・`bytes=-0`・L が 0 → 416 と `Content-Range: bytes */L`、`Content-Length: 0`、本文なし。Range が無ければ 200 で全体。メディアの応答には常に `Accept-Ranges: bytes` を付ける。
 
 ## 6. 描画部品(`s2v-render`)
 
 ### 6.1 縦書きの組版
 
-- **単位**: 書記素クラスタ(Unicode の拡張書記素。`unicode-segmentation`)を1文字として扱う。結合文字・異体字セレクタは前の文字と一体で扱う。
-- **整形**: フォントを `ttf-parser` で読み、全角の文字の連なりを `rustybuzz` で縦書き方向(`Direction::TopToBottom`)に整形し、`vert` 機能を明示して有効にする(`vrt2` は使わない)。句読点・括弧・長音などの縦書き用の字形と位置は、フォントの `vert` と縦書きの寸法(`vhea`/`vmtx`)に従う。
+- **整形**: フォントのバイト列と `font_index` を、`ttf-parser` と `rustybuzz` の両方に同じ値で渡す。全角の文字の連なりを `rustybuzz` で縦書き方向(`Direction::TopToBottom`)に整形する。縦書き用の機能は、選んだフェイスの GSUB に `vrt2` があれば `vrt2`、無ければ `vert` を明示して有効にする(OpenType の推奨どおり、`vrt2` を優先する)。句読点・括弧・長音などの縦書き用の字形と位置は、その機能と縦書きの寸法(`vhea`/`vmtx`)に従う。
+- **単位**: 書記素クラスタ(Unicode の拡張書記素。`unicode-segmentation`)を基本の単位とする。整形の結果、1つの字形のクラスタが複数の書記素にまたがるとき(合字など)は、それらの書記素を1つの単位にまとめる。結合文字・異体字セレクタは前の文字と一体になる。単位の高さは、その単位に属する字形の縦の送り幅の合計。
 - **半角の英数字**: 連続する半角数字が2文字以下なら**縦中横**(横書きで整形し、1文字分の枠の中央に収める。幅が1文字分を超えるときは横に縮める)。それ以外の半角の英数字・記号の連なり(3文字以上の数字を含む)は、横書きで整形して時計回りに 90° 回転して並べる(長さは整形した幅)。
 - **列**: 列は右から左へ並べる。1列には、枠の内側の高さに収まるだけ文字を入れる。
 - **禁則**:
   - 列の頭に置かない文字(行頭禁則): `、。,.・:;?!ー」』)】〉》〕ぁぃぅぇぉっゃゅょゎァィゥェォッャュョヮヵヶ々〜` とその半角・全角の対応する記号。
   - 列の末尾に置かない文字(行末禁則): `「『(【〈《〔`。
-  - 手順: 列の末尾が行末禁則の文字なら、それを次の列へ送る。次の列の頭が行頭禁則の文字になるなら、現在の列の最後の文字を次の列へ送る(追い出し)。追い出しは1つの列で2文字まで。それでも解消しなければ、そのまま置く。
+  - 手順(決定的。`layout` と `min_size` は同じ手順を使う):
+    1. **詰め込み**: 単位を先頭から順に、列の高さが内側の高さを超えない限り現在の列に入れる。入らなければ新しい列を始める(1つの単位が高さを超えるときは、その単位だけの列にする)。
+    2. **修復**: 列の境目を、最初の列(右端)と2番目の列の境目から順に1つずつ処理する。境目 k(列 k と列 k+1 の間)について:
+       - 列 k の末尾が行末禁則の単位で、列 k に2つ以上の単位があれば、末尾の単位を列 k+1 の頭へ移す。
+       - 列 k+1 の頭が行頭禁則の単位である間、列 k に2つ以上の単位があり、この境目での移動が合計2回未満なら、列 k の末尾の単位を列 k+1 の頭へ移す(追い出し)。
+       - この境目での移動が終わっても禁則が残っていれば、この境目の移動をすべて取り消し、詰め込みの結果に戻す。
+       - 列 k+1 が内側の高さを超えたら、超えた分の末尾の単位を列 k+2 の頭へ順に移す(列 k+2 が無ければ作る)。その後、次の境目 k+1 を処理する。
+    3. 最後の境目まで処理したら終わる。
 - **フォントに無い文字**: `.notdef` の字形で描き、警告する(絵文字も同じ。初版では対応しない)。
 - **全角空白**: 1文字分の空きとして扱う。
 
@@ -395,6 +415,7 @@ pub struct LayoutContext<'a> {
 - `layout(ctx, text, inner_w, inner_h) -> Layout`: 列と字形の配置(位置・回転)。
 - `min_size(ctx, kind, text) -> (w, h)`: 1列の高さの上限のもとで列数が最小になる組版の、余白を含む外形の大きさ。手動で大きさを決めたときも、`w`・`h` がこれ以上であることを要求する。
 - `render(ctx, spec) -> Overlay`: 項目1つの透明な RGBA 画像と、その左上の画面上の位置。画像は尻尾を含む外接矩形で、画面の内側に限る(§5.2 の上限により、画面の大きさを超えない)。
+- `composite(overlays, canvas) -> RgbaImage`: 区間に表示中の項目を、画面の大きさの透明な画像に合成する(§4.1 の重ね画像)。重ねる順は、ト書き → 吹き出し(表示開始の順、同時なら台本の並び)。GUI のプレビューも、同じ `render` の結果をこの順に重ねる。
 - 描画は `tiny-skia`。字形の輪郭を `ttf-parser` から取り出してパスにする。
 - **同じ結果になる範囲**: 同じフォントのバイト列・同じクレートの版・同じ設定・同じ実行環境なら、同じ画素になる。テストはリポジトリに置いたテスト用のフォントで画素を固定する。
 
@@ -408,7 +429,7 @@ pub struct LayoutContext<'a> {
 起動時(`render`・`bubbles`)に次を確かめる。どれかに外れれば エラー 2 で、外れた項目を表示する。
 
 - ファイルが読める。TTC なら `font_index` が収録数の範囲内(範囲外なら収録数と各フェイスの名前を表示する)。
-- `vhea`・`vmtx` がある。GSUB に `vert` 機能がある。
+- `vhea`・`vmtx` がある。GSUB に `vrt2` か `vert` の機能がある(どちらを使うかを Process.log に書く)。
 - 表示する全文字のうち、フォントに無いものは警告(§6.1)。
 
 ## 7. ②プロンプト生成(`prompts`)
@@ -434,22 +455,26 @@ pub struct LayoutContext<'a> {
   - `build` のコミットポイントでの `output.mp4` → `output.stale.mp4` の改名(前の stale の上書き、改名の失敗)。
 - **s2v-render**:
   - 組版の結果を数値で固定する(列数、字形の位置、禁則の送りと追い出し、追い出しの上限、縦中横、回転、結合文字・異体字セレクタ)。
-  - テスト用のフォントで、句読点・括弧・長音・小書きの仮名の `vert` 後の字形 ID と送り幅・位置を固定する。
+  - テスト用のフォントで、句読点・括弧・長音・小書きの仮名の `vrt2`(または `vert`)適用後の字形 ID と送り幅・位置を固定する。
   - 最小の大きさ。小さな PNG の画素比較。
   - 自動配置(重ならないこと、手動配置を避けること、置けないときの警告)。
   - `bubbles.json` の検証(上限・あふれ・種類・縦横比・最小への拡大・存在しない ID)。
   - 素材の照合(拡張子の大小、重複、種類違い、リンク)。
-  - フォントの検査(範囲外の `font_index`、`vert` が無いフォント)。
-  - テスト用のフォントは、OFL のフォントから必要な文字と `vert` を残した部分集合を作り、ライセンスの文書と一緒にリポジトリに置く(システムのフォントに依存しない)。
+  - フォントの検査(範囲外の `font_index`、`vrt2`・`vert` が無いフォント、`vrt2` があるときにそれが選ばれること)。
+  - 組版の修復の手順(追い出しの取り消し、修復による列のあふれの連鎖、最後の列)。`min_size` と `layout` が同じ列分けになること。
+  - 合成(`composite`)の重ねる順。
+  - テスト用のフォントは、OFL のフォントから必要な文字と `vrt2`・`vert` を残した部分集合を作り、ライセンスの文書と一緒にリポジトリに置く(システムのフォントに依存しない)。
 - **render**:
-  - コマの丸め(多数のカットで合計が全体のコマ数に一致することを、ランダムな入力で確かめる)。
-  - ffmpeg の引数とフィルタの組み立て(画像・動画・loop・contain/cover・重ね・コマ番号)。
+  - コマの丸めと区間の分割(多数のカット・項目で、区間のコマ数の合計が全体のコマ数に一致し、各区間の中で背景と表示中の項目の組が変わらないことを、ランダムな入力で確かめる)。
+  - ffmpeg の引数とフィルタの組み立て(画像・動画・loop・contain/cover・重ね画像の有無・カット内の開始コマ)。
+  - 動画の素材のカットが区間に分かれても、つなぎ目でコマが飛ばない・重ならないこと(結合テストで、コマ番号を焼き込んだテスト用の動画を使って確かめる)。
   - **ffmpeg を使う結合テスト**(短い台本、単色の画像、数秒の動画、吹き出し付き、日本語を含むパス): mp4 を作り、§4.6 の検証を通ること、指定の時刻のコマを取り出して吹き出しの画素があること。ffmpeg が無ければテストは**失敗**する。環境変数 `S2V_SKIP_FFMPEG_TESTS=1` のときだけ飛ばす。
   - 検証や置き換えに失敗したとき、元の `output.mp4` が変わらないこと。
-  - 区間ファイルが合わないときの再エンコードへの切り替え。
-  - 性能試験(`#[ignore]`、手動で実行): 200 カット・1000 吹き出しの台本で完走し、所要時間を記録する。
+  - 区間ファイルの検査に外れたとき エラー 2 になること(検査の関数に、食い違った ffprobe の結果を与える単体テスト)。
+  - 音声の検証(復号したサンプル数の比較)。
+  - 性能試験(`#[ignore]`、手動で実行): 200 カット・1000 吹き出し・長さ 30 分の台本(素材は画像)を、既定の設定でこの開発機で 20 分以内、`script2video` のプロセスのメモリが 1 GiB 以内で完走すること。所要時間とメモリを記録する。
 - **prompts**: 出力の Markdown のゴールデン(登場人物の判定(カットをまたぐ台詞を含む)、`#visual` の無いカット、長さ 0 のカット、自分の作ったファイル以外を消さないこと)。
-- **bubbles のサーバー**: トークンとクッキー、Host、Origin、Content-Type、本文の大きさ、CSP などのヘッダー、メディアの照合(リンク、カット ID の不正)、Range(単一・複数・書式違い・満たせない・あふれ)、保存と `.bak`、最小より小さい・offset の逆転・上限超過の拒否、埋め込みの JS に `innerHTML` が無いこと。画面の操作は Chrome の自動操作で確認する(台詞に `<script>` などを含む台本で、文字として表示されること)。
+- **bubbles のサーバー**: トークンとクッキー、Host、Origin、Content-Type、本文の大きさ、CSP などのヘッダー、メディアの照合(リンク、カット ID の不正)、Range(単一・末尾の切り詰め・`bytes=-n`・`bytes=-0`・複数・書式違い・満たせない・あふれ・空のファイル、206 と 416 の `Content-Length`)、`HEAD`、`Content-Type`、起動後に素材を差し替えても照合時の内容が返ること、保存と `.bak`、最小より小さい・offset の逆転・上限超過の拒否、埋め込みの JS に `innerHTML` が無いこと。画面の操作は Chrome の自動操作で確認する(台詞に `<script>` などを含む台本で、文字として表示されること)。
 - **ロック**: 2つ目のコマンドがロックを取れずに エラー 2 になること。
 - 検証コマンド: `cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace`。
 
@@ -464,9 +489,12 @@ pub struct LayoutContext<'a> {
 
 | 計画 | 範囲 | Risk |
 |---|---|---|
-| 2a | §2.2〜2.4(改名・安全検査・ロック・ログ・鮮度)、§3(台本・採番・v3)、§6(s2v-render)、§4(render)、§5.2 の `bubbles.json` の型と検証 | High(`timeline.json` と台本の書式の変更、出力の置き換え、外部プロセス) |
-| 2b | §7(prompts) | Low |
-| 2c | §5(bubbles のサーバーと画面) | High(ローカルサーバーの安全) |
+| 2a | §2.2〜2.4(改名・安全検査・ロック・ログ・鮮度)、§3(台本・採番・`s2v-timeline` と v3・`build` の書き出し) | High(`timeline.json` と台本の書式の変更) |
+| 2b | §6(s2v-render)、§5.2 の `bubbles.json` の型と検証、§4(render) | High(出力の置き換え、外部プロセス) |
+| 2c | §7(prompts) | Low |
+| 2d | §5(bubbles のサーバーと画面) | High(ローカルサーバーの安全) |
+
+計画 2a・2b の中のタスクは、依存の順(共通の v3 の型 → 解析・採番 → 配置の時刻 → 書き出しと `build` → 組版と描画 → 区間の分割 → ffmpeg)に分け、各タスクで既存のテスト(v2 のゴールデンなど)を更新する。現在の実装からの主な変更点: ワークスペースへのクレートの追加、`ScriptCommand` への `Cut`・`Note` と `Visual` の `loop`、配置のシーン単位の visual からカット単位への変更、`.ids` の未知のキーの保持と一時ファイル経由の書き換え、`build` のコミットポイントでの改名、`ProcLog` の追記。
 
 - 各計画は spec → 計画 → 実装の順で、計画ごとに Beads で起票する。High の計画は Codex(gpt-5.6-terra、medium)に辛口のレビューを依頼する。
 - 各計画の終わりに、Human が実際の動画・画面で確認する。
