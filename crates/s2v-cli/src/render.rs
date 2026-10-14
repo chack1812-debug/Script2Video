@@ -416,7 +416,7 @@ fn place_items(
     cfg: &RenderConfig,
     face: &FontFace,
     warnings: &mut Vec<String>,
-) -> BTreeMap<String, Placed> {
+) -> (BTreeMap<String, Placed>, BTreeSet<String>) {
     let canvas = Canvas {
         w: cfg.width,
         h: cfg.height,
@@ -481,8 +481,32 @@ fn place_items(
         },
     );
     warnings.extend(auto_warnings);
+    // 自動配置が画面の大きさに切り詰めた項目(min_size より小さく置かれたもの)
+    let clipped: BTreeSet<String> = layout_items
+        .iter()
+        .filter(|li| {
+            auto.get(&li.id)
+                .is_some_and(|a| a.w < li.size.0 || a.h < li.size.1)
+        })
+        .map(|li| li.id.clone())
+        .collect();
     placed.extend(auto);
-    placed
+    (placed, clipped)
+}
+
+/// 項目を 1 つ描く。切り詰めた自動項目(`clipped`)だけ、収まらなくても入る部分を描く。
+/// それ以外は枠に収まらなければ Err。
+fn draw_one(
+    ctx: &LayoutContext,
+    style: &Style,
+    spec: &ItemSpec,
+    clipped: bool,
+) -> Result<Overlay, String> {
+    if clipped {
+        render_clipped(ctx, style, spec)
+    } else {
+        render_item(ctx, style, spec)
+    }
 }
 
 /// 重ね画像を描いて `seg` に PNG として書く。
@@ -491,6 +515,7 @@ fn write_overlays(
     files: &BTreeMap<Vec<String>, String>,
     items: &[Item],
     placed: &BTreeMap<String, Placed>,
+    clipped: &BTreeSet<String>,
     cfg: &RenderConfig,
     face: &FontFace,
 ) -> Result<(), String> {
@@ -513,13 +538,8 @@ fn write_overlays(
             h: p.h,
             tail: p.tail.map(|t| (t.dx, t.dy)),
         };
-        // 自動配置が画面に切り詰めた項目(警告済み)は、入る部分だけを描く
-        let ov = if fits(&ctx, &it.text, p.w, p.h) {
-            render_item(&ctx, &style, &spec)
-        } else {
-            render_clipped(&ctx, &style, &spec)
-        }
-        .map_err(|e| format!("{id}: {e}"))?;
+        let ov = draw_one(&ctx, &style, &spec, clipped.contains(id.as_str()))
+            .map_err(|e| format!("{id}: {e}"))?;
         drawn.insert(id.as_str(), (p.x, p.y, ov));
     }
     for (set, name) in files {
@@ -601,7 +621,7 @@ fn render_main(
     warnings.extend(missing_glyph_warnings(&face, &items));
 
     // 6. 大きさと位置
-    let placed = place_items(&items, &manual, cfg, &face, &mut warnings);
+    let (placed, clipped) = place_items(&items, &manual, cfg, &face, &mut warnings);
     for w in &warnings {
         log.warn(w);
     }
@@ -718,7 +738,7 @@ fn render_main(
 
     // 9. 重ね画像と一覧
     let (files, per_cut) = assign_overlay_files(&plans);
-    write_overlays(&seg, &files, &items, &placed, cfg, &face)?;
+    write_overlays(&seg, &files, &items, &placed, &clipped, cfg, &face)?;
     let settings = EncodeSettings {
         width: cfg.width,
         height: cfg.height,
@@ -1026,6 +1046,56 @@ mod tests {
             vec!["ov_empty.png", "ov_0001.png", "ov_empty.png", "ov_0001.png"]
         );
         assert_eq!(per_cut[1][1], (5, "ov_0002.png".to_string()));
+    }
+
+    #[test]
+    fn only_clipped_items_may_overflow_the_frame() {
+        let face = FontFace::load(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../s2v-render/tests/fonts/test-vrt2.ttf"),
+            0,
+        )
+        .unwrap();
+        let cfg = RenderConfig::default();
+        let ctx = render_ctx(&face, &cfg, ItemKind::Note);
+        let style = Style::note(&cfg);
+        let spec = ItemSpec {
+            kind: ItemKind::Note,
+            text: "一二三四五",
+            w: 60,
+            h: 60,
+            tail: None,
+        };
+        // 切り詰めた印が無ければ、収まらない項目は Err(終了コード 2)
+        assert!(draw_one(&ctx, &style, &spec, false).is_err());
+        assert!(draw_one(&ctx, &style, &spec, true).is_ok());
+    }
+
+    #[test]
+    fn place_items_marks_only_items_shrunk_to_the_screen() {
+        let face = FontFace::load(
+            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+                .join("../s2v-render/tests/fonts/test-vrt2.ttf"),
+            0,
+        )
+        .unwrap();
+        let cfg = RenderConfig {
+            width: 320,
+            height: 180,
+            ..RenderConfig::default()
+        };
+        let item = |id: &str, text: &str| Item {
+            id: id.into(),
+            kind: ItemKind::Bubble,
+            text: text.into(),
+            start_ms: 0,
+            end_ms: 1000,
+            order: 0,
+        };
+        let items = vec![item("S01-L001", "あ"), item("S01-L002", &"あ".repeat(500))];
+        let mut w = Vec::new();
+        let (_, clipped) = place_items(&items, &BTreeMap::new(), &cfg, &face, &mut w);
+        assert_eq!(clipped.into_iter().collect::<Vec<_>>(), vec!["S01-L002"]);
     }
 
     #[test]
