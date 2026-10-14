@@ -190,8 +190,10 @@ pub fn place(
     let mut first_in_scene = true;
     let mut open: Option<OpenScene> = None;
     let mut closed: Vec<OpenScene> = Vec::new();
-    let mut spans: HashMap<u32, (i64, i64)> = HashMap::new();
-    let mut deferred_se: Vec<(String, SeAnchor, f64)> = Vec::new();
+    // 台詞ID (シーン, 台詞番号) -> (開始, 終了)。台詞番号はシーンごとに1から数える
+    let mut spans: HashMap<(u32, u32), (i64, i64)> = HashMap::new();
+    // (ファイル, 位置指定, gain, #se が書かれたシーン)。短縮形 L003 は書かれたシーンで解決する
+    let mut deferred_se: Vec<(String, SeAnchor, f64, u32)> = Vec::new();
     let mut parallel_left = 0usize;
     let mut parallel_anchor: Option<i64> = None;
 
@@ -251,7 +253,12 @@ pub fn place(
                         start: cursor,
                         gain_db: *gain_db,
                     }),
-                    Some(a) => deferred_se.push((path.clone(), *a, *gain_db)),
+                    Some(a) => deferred_se.push((
+                        path.clone(),
+                        *a,
+                        *gain_db,
+                        open.as_ref().map_or(0, |s| s.id),
+                    )),
                 },
             },
             ScriptItem::Speech {
@@ -306,7 +313,12 @@ pub fn place(
                         s
                     }
                 } else if let Some(r) = at {
-                    match spans.get(&r.line) {
+                    // シーンを省略した at= は、この台詞と同じシーンの台詞を指す
+                    let target = LineId {
+                        scene: r.scene.unwrap_or(id.scene),
+                        line: r.line,
+                    };
+                    match spans.get(&(target.scene, target.line)) {
                         Some(&(s, _)) => {
                             let t = s.saturating_add(ms_to_samples(r.offset_ms as f64));
                             if t < 0 {
@@ -320,8 +332,11 @@ pub fn place(
                             }
                         }
                         None => {
-                            p.errors
-                                .push(format!("at= の基準の台詞 L{:03} が見つかりません", r.line));
+                            p.errors.push(format!(
+                                "{}: at= の基準の台詞 {} が見つかりません",
+                                id.display(),
+                                target.display()
+                            ));
                             cursor.saturating_add(gap)
                         }
                     }
@@ -336,7 +351,7 @@ pub fn place(
                     parallel_left -= 1;
                 }
                 let end = start.saturating_add(len);
-                spans.insert(id.line, (start, end));
+                spans.insert((id.scene, id.line), (start, end));
                 cursor = cursor.max(end);
                 last_end = end;
                 prev_cast = Some(cast_name.as_str());
@@ -363,18 +378,23 @@ pub fn place(
     }
 
     // 台詞を基準にした SE(書かれた位置とは無関係に、指定した台詞を基準に置く)
-    for (path, anchor, gain_db) in deferred_se {
-        let (r, base) = match anchor {
-            SeAnchor::Start(r) => (r, spans.get(&r.line).map(|v| v.0)),
-            SeAnchor::End(r) => (r, spans.get(&r.line).map(|v| v.1)),
+    for (path, anchor, gain_db, se_scene) in deferred_se {
+        let (r, at_end) = match anchor {
+            SeAnchor::Start(r) => (r, false),
+            SeAnchor::End(r) => (r, true),
         };
-        let Some(base) = base else {
+        let target = LineId {
+            scene: r.scene.unwrap_or(se_scene),
+            line: r.line,
+        };
+        let Some(&(span_start, span_end)) = spans.get(&(target.scene, target.line)) else {
             p.errors.push(format!(
-                "#se の基準の台詞 L{:03} が見つかりません: {path}",
-                r.line
+                "#se の基準の台詞 {} が見つかりません: {path}",
+                target.display()
             ));
             continue;
         };
+        let base = if at_end { span_end } else { span_start };
         let mut start = base.saturating_add(ms_to_samples(r.offset_ms as f64));
         if start < 0 {
             p.warnings.push(format!(
@@ -466,21 +486,30 @@ mod tests {
         (ms(l.start), ms(l.end))
     }
 
+    fn line_in(p: &Placement, scene: u32, line: u32) -> (f64, f64) {
+        let l = p
+            .lines
+            .iter()
+            .find(|l| l.id == LineId { scene, line })
+            .unwrap();
+        (ms(l.start), ms(l.end))
+    }
+
     #[test]
     fn first_line_at_zero_and_gaps_follow_pause_rules() {
-        let s = scenes("#paragraph[S01]\n[S01-L001] A:一\n[S01-L002] A:二\n[S01-L003] B:三\n#paragraph[S02]\n[S02-L004] A:四\n");
+        let s = scenes("#paragraph[S01]\n[S01-L001] A:一\n[S01-L002] A:二\n[S01-L003] B:三\n#paragraph[S02]\n[S02-L001] A:四\n");
         let src = present(&[
             (1, 1, 1000.0),
             (1, 2, 1000.0),
             (1, 3, 1000.0),
-            (2, 4, 1000.0),
+            (2, 1, 1000.0),
         ]);
         let p = place(&flatten(&s), &src, 200);
         assert!(p.errors.is_empty(), "{:?}", p.errors);
-        assert_eq!(line_ms(&p, 1), (0.0, 1000.0));
-        assert_eq!(line_ms(&p, 2), (1500.0, 2500.0));
-        assert_eq!(line_ms(&p, 3), (2800.0, 3800.0));
-        assert_eq!(line_ms(&p, 4), (4800.0, 5800.0));
+        assert_eq!(line_in(&p, 1, 1), (0.0, 1000.0));
+        assert_eq!(line_in(&p, 1, 2), (1500.0, 2500.0));
+        assert_eq!(line_in(&p, 1, 3), (2800.0, 3800.0));
+        assert_eq!(line_in(&p, 2, 1), (4800.0, 5800.0));
         assert_eq!(p.scenes.len(), 2);
         assert_eq!((ms(p.scenes[0].start), ms(p.scenes[0].end)), (0.0, 3800.0));
         assert_eq!(p.scenes[1].index, 2);
@@ -503,14 +532,14 @@ mod tests {
 
     #[test]
     fn silent_scene_takes_pause_time_without_paragraph_pause() {
-        let s = scenes("#paragraph[S01]\n[S01-L001] A:一\n#paragraph[S02] 間\n#pause 2000\n#paragraph[S03]\n[S03-L002] A:二\n");
-        let src = present(&[(1, 1, 1000.0), (3, 2, 1000.0)]);
+        let s = scenes("#paragraph[S01]\n[S01-L001] A:一\n#paragraph[S02] 間\n#pause 2000\n#paragraph[S03]\n[S03-L001] A:二\n");
+        let src = present(&[(1, 1, 1000.0), (3, 1, 1000.0)]);
         let p = place(&flatten(&s), &src, 200);
         let s2 = &p.scenes[1];
         assert!(s2.silent);
         assert_eq!((ms(s2.start), ms(s2.end)), (1000.0, 3000.0));
         assert_eq!(s2.name.as_deref(), Some("間"));
-        assert_eq!(line_ms(&p, 2), (4000.0, 5000.0));
+        assert_eq!(line_in(&p, 3, 1), (4000.0, 5000.0));
         assert!(!p.scenes[2].silent);
     }
 
@@ -570,13 +599,13 @@ mod tests {
 
     #[test]
     fn scene_start_regression_is_an_error_but_same_time_is_allowed() {
-        let bad = scenes("#paragraph[S01]\n#pause 3000\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L002] B(overlap=3500):二\n");
-        let src = present(&[(1, 1, 1000.0), (2, 2, 1000.0)]);
+        let bad = scenes("#paragraph[S01]\n#pause 3000\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L001] B(overlap=3500):二\n");
+        let src = present(&[(1, 1, 1000.0), (2, 1, 1000.0)]);
         let p = place(&flatten(&bad), &src, 200);
-        assert_eq!(line_ms(&p, 1), (3000.0, 4000.0));
+        assert_eq!(line_in(&p, 1, 1), (3000.0, 4000.0));
         assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
 
-        let same = scenes("#paragraph[S01]\n#pause 3000\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L002] B(at=L001):二\n");
+        let same = scenes("#paragraph[S01]\n#pause 3000\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L001] B(at=S01-L001):二\n");
         let p = place(&flatten(&same), &src, 200);
         assert!(p.errors.is_empty(), "{:?}", p.errors);
     }
@@ -684,7 +713,7 @@ mod tests {
 [S01-L002] A:二
 [S01-L003] B:三
 #paragraph[S02]
-[S02-L004] A:四
+[S02-L001] A:四
 ",
         );
         s[0].pause_config = PauseConfig {
@@ -696,12 +725,12 @@ mod tests {
             (1, 1, 1000.0),
             (1, 2, 1000.0),
             (1, 3, 1000.0),
-            (2, 4, 1000.0),
+            (2, 1, 1000.0),
         ]);
         let p = place(&flatten(&s), &src, 200);
-        assert_eq!(line_ms(&p, 2), (1000.0, 2000.0));
-        assert_eq!(line_ms(&p, 3), (2000.0, 3000.0));
-        assert_eq!(line_ms(&p, 4), (3000.0, 4000.0));
+        assert_eq!(line_in(&p, 1, 2), (1000.0, 2000.0));
+        assert_eq!(line_in(&p, 1, 3), (2000.0, 3000.0));
+        assert_eq!(line_in(&p, 2, 1), (3000.0, 4000.0));
         assert_invariants(&p);
     }
 
@@ -716,8 +745,86 @@ mod tests {
         let src = present(&[(1, 1, 1000.0), (1, 2, 1000.0)]);
         let p = place(&flatten(&s), &src, 200);
         assert_eq!(p.errors.len(), 1, "{:?}", p.errors);
-        assert!(p.errors[0].contains("L009"), "{:?}", p.errors);
+        assert!(p.errors[0].contains("S01-L009"), "{:?}", p.errors);
         assert_eq!(line_ms(&p, 2), (1500.0, 2500.0));
+    }
+
+    #[test]
+    fn same_line_number_in_two_scenes_is_placed_independently() {
+        let s = scenes("#paragraph[S01]\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L001] B:二\n");
+        let src = present(&[(1, 1, 1000.0), (2, 1, 2000.0)]);
+        let p = place(&flatten(&s), &src, 200);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(line_in(&p, 1, 1), (0.0, 1000.0));
+        assert_eq!(line_in(&p, 2, 1), (2000.0, 4000.0));
+    }
+
+    #[test]
+    fn short_at_resolves_inside_its_own_scene() {
+        let s = scenes(
+            "#paragraph[S01]\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L001] A:二\n[S02-L002] B(at=L001+100):三\n",
+        );
+        let src = present(&[(1, 1, 1000.0), (2, 1, 1000.0), (2, 2, 1000.0)]);
+        let p = place(&flatten(&s), &src, 200);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        // S02-L001 は 2000ms から。S01-L001(0ms)ではなくそちらを基準にする
+        assert_eq!(line_in(&p, 2, 1), (2000.0, 3000.0));
+        assert_eq!(line_in(&p, 2, 2).0, 2100.0);
+    }
+
+    #[test]
+    fn full_form_at_reaches_a_line_in_another_scene() {
+        let s = scenes(
+            "#paragraph[S01]\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L001] A:二\n[S02-L002] B(at=S01-L001+100):三\n",
+        );
+        let src = present(&[(1, 1, 1000.0), (2, 1, 1000.0), (2, 2, 1000.0)]);
+        let p = place(&flatten(&s), &src, 200);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(line_in(&p, 2, 2).0, 100.0);
+    }
+
+    #[test]
+    fn unknown_line_reference_is_an_error_naming_the_full_id() {
+        let s = scenes(
+            "#paragraph[S01]\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L001] B(at=L005):二\n#se a.wav at=S09-L001\n",
+        );
+        let src = present(&[(1, 1, 1000.0), (2, 1, 1000.0)]);
+        let p = place(&flatten(&s), &src, 200);
+        assert_eq!(p.errors.len(), 2, "{:?}", p.errors);
+        assert!(
+            p.errors.iter().any(|e| e.contains("S02-L005")),
+            "{:?}",
+            p.errors
+        );
+        assert!(
+            p.errors.iter().any(|e| e.contains("S09-L001")),
+            "{:?}",
+            p.errors
+        );
+    }
+
+    #[test]
+    fn se_anchors_resolve_short_form_in_the_scene_where_the_se_is_written() {
+        let s = scenes(
+            "#paragraph[S01]\n[S01-L001] A:一\n#se a.wav at=L001+10\n#paragraph[S02]\n[S02-L001] B:二\n#se b.wav end=L001-100\n#se c.wav at=S01-L001+500\n#se d.wav end=S02-L001\n",
+        );
+        let src = present(&[(1, 1, 1000.0), (2, 1, 2000.0)]);
+        let p = place(&flatten(&s), &src, 200);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        let at = |name: &str| {
+            p.events
+                .iter()
+                .find_map(|e| match e {
+                    PlacedEvent::Se { path, start, .. } if path.ends_with(name) => Some(ms(*start)),
+                    _ => None,
+                })
+                .unwrap()
+        };
+        // S02-L001 は 2000ms〜4000ms
+        assert_eq!(at("a.wav"), 10.0);
+        assert_eq!(at("b.wav"), 3900.0);
+        assert_eq!(at("c.wav"), 500.0);
+        assert_eq!(at("d.wav"), 4000.0);
     }
 
     #[test]
@@ -788,5 +895,36 @@ mod tests {
             PlacedEvent::Se { start, .. } => assert_eq!(ms(*start), 4000.0),
             e => panic!("{e:?}"),
         }
+    }
+
+    #[test]
+    fn scene_zero_references_resolve_in_scene_zero() {
+        // S00-L001: 0〜1000ms、S00-L002: at=L001+100 -> 100ms から
+        // S01-L001: S00 の終了 1100ms + paragraph 1000ms = 2100ms 以降。at=S00-L001+100 -> 100ms
+        let s = scenes(
+            "[S00-L001] A:一\n#se a.wav at=L001+10\n[S00-L002] B(at=L001+100):二\n#paragraph[S01]\n[S01-L001] A:三\n[S01-L002] B(at=S00-L001+200):四\n",
+        );
+        let src = present(&[
+            (0, 1, 1000.0),
+            (0, 2, 1000.0),
+            (1, 1, 1000.0),
+            (1, 2, 1000.0),
+        ]);
+        let p = place(&flatten(&s), &src, 200);
+        assert!(p.errors.is_empty(), "{:?}", p.errors);
+        assert_eq!(line_in(&p, 0, 1), (0.0, 1000.0));
+        assert_eq!(line_in(&p, 0, 2), (100.0, 1100.0));
+        // S01-L001 は cursor(1100) + paragraph(1000) = 2100ms
+        assert_eq!(line_in(&p, 1, 1), (2100.0, 3100.0));
+        assert_eq!(line_in(&p, 1, 2).0, 200.0);
+        let se = p
+            .events
+            .iter()
+            .find_map(|e| match e {
+                PlacedEvent::Se { start, .. } => Some(ms(*start)),
+                _ => None,
+            })
+            .unwrap();
+        assert_eq!(se, 10.0);
     }
 }

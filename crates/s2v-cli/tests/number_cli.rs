@@ -23,7 +23,7 @@ fn number_rewrites_script_and_writes_bak_ids_and_html() {
     assert_eq!(fs::read_to_string(work.join("第1話.bak")).unwrap(), SCRIPT);
     assert!(fs::read_to_string(work.join("第1話.ids"))
         .unwrap()
-        .contains("max_line=2"));
+        .contains("max_line.S01=2"));
     assert!(fs::read_to_string(work.join("第1話.html"))
         .unwrap()
         .contains("S01-L002"));
@@ -163,7 +163,7 @@ fn ids_high_water_is_continued() {
     let dir = tempfile::tempdir().unwrap();
     let script = dir.path().join("h.txt");
     fs::write(&script, SCRIPT).unwrap();
-    fs::write(dir.path().join("h.ids"), "max_line=10\nmax_scene=4\n").unwrap();
+    fs::write(dir.path().join("h.ids"), "max_scene=4\nmax_line.S05=10\n").unwrap();
     assert_eq!(run_number(&script), Outcome::Ok);
     let text = fs::read_to_string(&script).unwrap();
     assert!(
@@ -178,6 +178,50 @@ fn ids_high_water_is_continued() {
     let text = fs::read_to_string(&script).unwrap();
     assert!(text.contains("[S05-L013] A:新しい"), "{text}");
     assert!(!text.contains("L012"), "{text}");
+}
+
+#[test]
+fn old_format_ids_is_ignored_without_error() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("o.txt");
+    fs::write(&script, SCRIPT).unwrap();
+    // ①a の形式(全体で1つの max_line)。読み捨てられ、台詞番号はシーンごとに1から数える
+    fs::write(dir.path().join("o.ids"), "max_line=9\nmax_scene=0\n").unwrap();
+    assert_eq!(run_number(&script), Outcome::Ok);
+    let text = fs::read_to_string(&script).unwrap();
+    assert!(
+        text.contains("#paragraph[S01] 朝\n[S01-L001] A:おはよう\n[S01-L002] B:おはよう\n"),
+        "{text}"
+    );
+    let ids = fs::read_to_string(dir.path().join("o.ids")).unwrap();
+    assert!(ids.contains("max_line.S01=2"), "{ids}");
+    assert!(!ids.contains("max_line=9"), "{ids}");
+}
+
+#[test]
+fn numbering_restarts_per_scene_and_scene_mismatch_is_refused() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("p.txt");
+    let head = "@scene 居間\n@cast\nA:田中\n\n@script\n";
+    fs::write(
+        &script,
+        format!("{head}#paragraph\nA:一\n#paragraph\nA:二\n"),
+    )
+    .unwrap();
+    assert_eq!(run_number(&script), Outcome::Ok);
+    let text = fs::read_to_string(&script).unwrap();
+    assert!(
+        text.contains("#paragraph[S01]\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L001] A:二\n"),
+        "{text}"
+    );
+
+    let bad = dir.path().join("m.txt");
+    let src = format!("{head}#paragraph[S01]\n[S02-L001] A:一\n");
+    fs::write(&bad, &src).unwrap();
+    assert_eq!(run_number(&bad), Outcome::Failed);
+    assert_eq!(fs::read_to_string(&bad).unwrap(), src);
+    assert!(!dir.path().join("m.ids").exists());
+    assert!(!dir.path().join("m.bak").exists());
 }
 
 #[test]
@@ -248,7 +292,7 @@ fn ids_write_failure_leaves_script_untouched() {
     let script = dir.path().join("r.txt");
     fs::write(&script, SCRIPT).unwrap();
     let ids = dir.path().join("r.ids");
-    fs::write(&ids, "max_line=0\nmax_scene=0\n").unwrap();
+    fs::write(&ids, "max_scene=0\nmax_line.S01=0\n").unwrap();
     let _guard = make_readonly(&ids);
 
     assert_eq!(run_number(&script), Outcome::Failed);

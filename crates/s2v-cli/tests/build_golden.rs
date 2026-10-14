@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 
 use s2v_cli::{run_build, BuildArgs, Outcome};
 
-const SCRIPT: &str = "@scene 居間\n@pause\nsentence 500\ncast 300\nparagraph 1000\n@cast\nA:田中,pan=-30\n\nB:佐藤,pan=30\n\n@script\n#paragraph[S01] 朝\n#visual (image) 朝の居間。\n[S01-L001] A:おはよう。\n[S01-L002] B:おはよう。\n[S01-L003] A(overlap=200):今日は早いね。\n#paragraph[S02] 夜\n#pause 2000\n#paragraph[S03]\n[S03-L004] B:おやすみ。\n";
+const SCRIPT: &str = "@scene 居間\n@pause\nsentence 500\ncast 300\nparagraph 1000\n@cast\nA:田中,pan=-30\n\nB:佐藤,pan=30\n\n@script\n#paragraph[S01] 朝\n#visual (image) 朝の居間。\n[S01-L001] A:おはよう。\n[S01-L002] B:おはよう。\n[S01-L003] A(overlap=200):今日は早いね。\n#paragraph[S02] 夜\n#pause 2000\n#paragraph[S03]\n[S03-L001] B:おやすみ。\n";
 
 /// 200ms 無音 + 1000ms の 440Hz(振幅 0.1)+ 300ms 無音、16bit モノラル 48kHz。
 fn write_voice(path: &Path) {
@@ -83,7 +83,7 @@ fn wav_frames(path: &Path) -> u32 {
 #[test]
 fn golden_timeline_and_outputs() {
     let f = fixture(SCRIPT);
-    for id in ["S01_L001", "S01_L002", "S03_L004"] {
+    for id in ["S01_L001", "S01_L002", "S03_L001"] {
         write_voice(&f.voices.join(format!("{id}.wav")));
     }
     assert_eq!(
@@ -184,6 +184,30 @@ fn golden_timeline_and_outputs() {
         fs::read(f.voices.join("S01_L001.wav")).unwrap(),
         fs::read(&again).unwrap()
     );
+}
+
+#[test]
+fn same_line_number_in_two_scenes_builds_distinct_lines_and_takes() {
+    let f = fixture(
+        "@scene 居間\n@cast\nA:田中\n\nB:佐藤\n\n@script\n#paragraph[S01]\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L001] B:二\n[S02-L002] A(at=L001+100):三\n#se pop.wav at=S01-L001+50\n",
+    );
+    write_voice(&f.voices.join("S01_L001.wav"));
+    write_voice(&f.voices.join("S02_L001.wav"));
+    write_voice(&f.voices.join("S02_L002.wav"));
+    let outcome = run_build(&args(&f, None, false));
+    assert_ne!(outcome, Outcome::Failed);
+    let v = read_json(&f.dir.join("timeline").join("timeline.json"));
+    let lines = v["lines"].as_array().unwrap();
+    let ids: Vec<_> = lines.iter().map(|l| l["id"].as_str().unwrap()).collect();
+    assert_eq!(ids, ["S01-L001", "S02-L001", "S02-L002"]);
+    let takes: Vec<_> = lines.iter().map(|l| l["take"].as_str().unwrap()).collect();
+    assert_eq!(takes, ["S01_L001", "S02_L001", "S02_L002"]);
+    // どの台詞にも収録ファイルが対応している(別シーンの同番号を取り違えない)
+    assert!(lines.iter().all(|l| l["missing"] != true), "{lines:?}");
+    // at=L001+100 は S02-L001 の開始に対する差分(S01-L001 ではない)
+    let start = |i: usize| lines[i]["start_ms"].as_i64().unwrap();
+    assert_eq!(start(2), start(1) + 100);
+    assert!(start(1) > start(0));
 }
 
 #[test]
@@ -389,8 +413,8 @@ fn assert_all_final_artifacts(out: &Path) {
 }
 
 /// シーンの開始が前のシーンより早くなる(配置エラーになる)台本。
-const REGRESSION_SCRIPT: &str = "@scene 居間\n@cast\nA:田中\n\nB:佐藤\n\n@script\n#paragraph[S01]\n#pause 3000\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L002] B(overlap=3500):二\n";
-const REGRESSION_OK_SCRIPT: &str = "@scene 居間\n@cast\nA:田中\n\nB:佐藤\n\n@script\n#paragraph[S01]\n#pause 3000\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L002] B:二\n";
+const REGRESSION_SCRIPT: &str = "@scene 居間\n@cast\nA:田中\n\nB:佐藤\n\n@script\n#paragraph[S01]\n#pause 3000\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L001] B(overlap=3500):二\n";
+const REGRESSION_OK_SCRIPT: &str = "@scene 居間\n@cast\nA:田中\n\nB:佐藤\n\n@script\n#paragraph[S01]\n#pause 3000\n[S01-L001] A:一\n#paragraph[S02]\n[S02-L001] B:二\n";
 
 #[test]
 fn placement_error_after_good_build_removes_stale_artifacts() {
@@ -527,7 +551,7 @@ fn bom_and_crlf_script_gives_same_timeline_as_lf() {
     let lf = fixture(SCRIPT);
     let crlf = fixture(SCRIPT);
     for f in [&lf, &crlf] {
-        for id in ["S01_L001", "S01_L002", "S03_L004"] {
+        for id in ["S01_L001", "S01_L002", "S03_L001"] {
             write_voice(&f.voices.join(format!("{id}.wav")));
         }
     }
@@ -545,7 +569,7 @@ fn bom_and_crlf_script_gives_same_timeline_as_lf() {
 /// dump_prefade = true で 3 台詞を build し、出力フォルダを返す。
 fn prefade_build() -> (Fixture, PathBuf) {
     let f = fixture(SCRIPT);
-    for id in ["S01_L001", "S01_L002", "S03_L004"] {
+    for id in ["S01_L001", "S01_L002", "S03_L001"] {
         write_voice(&f.voices.join(format!("{id}.wav")));
     }
     let cfg = f.dir.join("prefade.toml");
@@ -1009,4 +1033,23 @@ fn linked_work_subfolders_pointing_outside_are_refused_without_writing_or_deleti
         assert!(!f.dir.join("Process.log").exists(), "{sub}");
         assert!(!f.dir.join("timeline").exists(), "{sub}");
     }
+}
+
+#[test]
+fn scene_zero_line_before_first_paragraph_builds() {
+    let f = fixture(
+        "@scene 居間\n@cast\nA:田中\n\nB:佐藤\n\n@script\n[S00-L001] A:前置き\n#paragraph[S01]\n[S01-L001] B(at=S00-L001+100):本編\n",
+    );
+    write_voice(&f.voices.join("S00_L001.wav"));
+    write_voice(&f.voices.join("S01_L001.wav"));
+    assert_ne!(run_build(&args(&f, None, false)), Outcome::Failed);
+    let v = read_json(&f.dir.join("timeline").join("timeline.json"));
+    let lines = v["lines"].as_array().unwrap();
+    assert_eq!(lines[0]["id"], "S00-L001");
+    assert_eq!(lines[1]["id"], "S01-L001");
+    assert_eq!(lines[0]["take"], "S00_L001");
+    assert_eq!(
+        lines[1]["start_ms"].as_i64().unwrap(),
+        lines[0]["start_ms"].as_i64().unwrap() + 100
+    );
 }

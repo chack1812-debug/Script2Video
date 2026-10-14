@@ -1,5 +1,7 @@
 # Script2Video ①a(単独ファイル)実装計画
 
+> **履歴上の注意(2026-10-14)**: この計画は ①a 実装時点のもの。その後、台詞番号は「台本全体で一意」から**シーンごとに1から振り直す**方式に変更された(台詞IDは (シーン番号, 台詞番号) の組で一意。`at=`/`#se` の参照は同じシーンなら `L003`、別シーンなら `S01-L003`、`.ids` はシーンごとの最大番号を記録)。また出力は台本フォルダ直下の構成(voices/timeline/tracks/work)に変更された。現行の仕様は `台本仕様.md` と設計書を正とし、この計画のコード断片は再利用しないこと。
+
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
 **Goal:** 1台詞1ファイルで収録した肉声から、`script2video number`(採番・台本HTML)と `script2video build`(48kHz 変換・無音削除・ラウドネス正規化・配置・音響処理・ミックス・`timeline.json` v2・SRT・FCPXML)を動かす。

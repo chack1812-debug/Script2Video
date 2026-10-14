@@ -62,7 +62,7 @@ pub fn run_number(script: &Path) -> Outcome {
         }
     };
 
-    let numbered = match number_script(&text, record) {
+    let numbered = match number_script(&text, &record) {
         Ok(n) => n,
         Err(errors) => {
             for e in errors {
