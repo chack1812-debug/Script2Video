@@ -1,0 +1,25 @@
+[package]
+name = "s2v-cli"
+version = "0.1.0"
+edition = "2021"
+
+[[bin]]
+name = "script2video"
+path = "src/main.rs"
+
+[lib]
+path = "src/lib.rs"
+
+[dependencies]
+s2v-core = { path = "../s2v-core" }
+s2v-audio = { path = "../s2v-audio" }
+s2v-export = { path = "../s2v-export" }
+anyhow.workspace = true
+serde.workspace = true
+serde_json = "1"
+clap = { version = "4", features = ["derive"] }
+sha2 = "0.10"
+hound = "3"
+
+[dev-dependencies]
+tempfile = "3"
