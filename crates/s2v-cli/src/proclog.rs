@@ -17,6 +17,20 @@ impl ProcLog {
         Ok(Self::from_writer(Box::new(File::create(path)?)))
     }
 
+    /// 追記で開き、区切りの行 `== <command> <時刻>(UTC) ==` を書く(prompts・bubbles・render 用)。
+    pub fn append(path: &Path, command: &str) -> anyhow::Result<Self> {
+        let f = std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(path)?;
+        let mut log = Self::from_writer(Box::new(f));
+        let r = writeln!(log.out, "== {command} {} ==", utc_now()).and_then(|()| log.out.flush());
+        if let Err(e) = r {
+            log.write_error = Some(e);
+        }
+        Ok(log)
+    }
+
     pub fn from_writer(out: Box<dyn Write>) -> Self {
         Self {
             out,
@@ -63,6 +77,36 @@ impl ProcLog {
     }
 }
 
+/// 1970-01-01 からの日数をグレゴリオ暦の (年, 月, 日) にする(Howard Hinnant の civil_from_days)。
+fn civil_from_days(days: i64) -> (i64, u32, u32) {
+    let z = days + 719_468;
+    let era = z.div_euclid(146_097);
+    let doe = z.rem_euclid(146_097);
+    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = (doy - (153 * mp + 2) / 5 + 1) as u32;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 } as u32;
+    let y = yoe + era * 400 + i64::from(m <= 2);
+    (y, m, d)
+}
+
+/// 現在の UTC を `YYYY-MM-DD HH:MM:SS(UTC)` にする(ローカル時刻は標準ライブラリで取れない)。
+fn utc_now() -> String {
+    let secs = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+    let (y, mo, d) = civil_from_days(secs.div_euclid(86_400));
+    let s = secs.rem_euclid(86_400);
+    format!(
+        "{y:04}-{mo:02}-{d:02} {:02}:{:02}:{:02}(UTC)",
+        s / 3600,
+        s % 3600 / 60,
+        s % 60
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -85,6 +129,26 @@ mod tests {
         assert_eq!(log.warning_count(), 1);
         let e = log.check().unwrap_err().to_string();
         assert!(e.contains("書き込み失敗"), "{e}");
+    }
+
+    #[test]
+    fn append_keeps_previous_content_and_writes_a_header() {
+        let d = tempfile::tempdir().unwrap();
+        let p = d.path().join("Process.log");
+        std::fs::write(&p, "[INFO] build\n").unwrap();
+        let mut log = ProcLog::append(&p, "render").unwrap();
+        log.info("ok");
+        drop(log);
+        let text = std::fs::read_to_string(&p).unwrap();
+        assert!(text.starts_with("[INFO] build\n== render "), "{text}");
+        assert!(text.ends_with("[INFO] ok\n"), "{text}");
+    }
+
+    #[test]
+    fn civil_from_days_matches_known_dates() {
+        assert_eq!(civil_from_days(0), (1970, 1, 1));
+        assert_eq!(civil_from_days(19_000), (2022, 1, 8));
+        assert_eq!(civil_from_days(-1), (1969, 12, 31));
     }
 
     #[test]

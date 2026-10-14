@@ -325,3 +325,29 @@ fn number_assigns_cut_and_note_numbers_and_records_them_in_ids() {
     assert_eq!(run_number(&script), Outcome::Ok);
     assert_eq!(fs::read_to_string(&script).unwrap(), text);
 }
+
+#[test]
+fn number_rejects_reserved_script_name_and_writes_nothing() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("bubbles.json");
+    fs::write(&script, SCRIPT).unwrap();
+    assert_eq!(run_number(&script), Outcome::Failed);
+    assert_eq!(fs::read_to_string(&script).unwrap(), SCRIPT);
+    assert!(!dir.path().join("bubbles.ids").exists());
+    assert!(!dir.path().join("bubbles.bak").exists());
+    assert!(!dir.path().join("bubbles.html").exists());
+    assert!(!dir.path().join(".script2video.lock").exists());
+}
+
+#[test]
+fn number_fails_while_the_folder_is_locked() {
+    let dir = tempfile::tempdir().unwrap();
+    let script = dir.path().join("l.txt");
+    fs::write(&script, SCRIPT).unwrap();
+    let held = s2v_cli::lock::ScriptLock::acquire(dir.path()).unwrap();
+    assert_eq!(run_number(&script), Outcome::Failed);
+    assert_eq!(fs::read_to_string(&script).unwrap(), SCRIPT);
+    assert!(!dir.path().join("l.ids").exists());
+    drop(held);
+    assert_eq!(run_number(&script), Outcome::Ok);
+}

@@ -8,6 +8,8 @@ use s2v_core::numbering::{number_script, IdsRecord};
 use s2v_core::ScriptParser;
 use s2v_export::render_script_html;
 
+use crate::fsutil::write_atomic;
+use crate::lock::ScriptLock;
 use crate::Outcome;
 
 /// 行番号が付く問題は「N 行目: 」を前置する。行番号 0 は台本全体の問題(番号の枯渇など)。
@@ -29,6 +31,11 @@ fn collides_with_script(script: &Path) -> Option<&'static str> {
 }
 
 pub fn run_number(script: &Path) -> Outcome {
+    // 何かを書く前に、台本のファイル名が出力側の予約名でないか確認する
+    if let Err(e) = crate::layout::check_reserved_name(script) {
+        eprintln!("[ERROR] {e}");
+        return Outcome::Failed;
+    }
     // 何かを読み書きする前に、出力先が台本自身を指していないか確認する
     if let Some(ext) = collides_with_script(script) {
         eprintln!(
@@ -37,6 +44,19 @@ pub fn run_number(script: &Path) -> Outcome {
         );
         return Outcome::Failed;
     }
+
+    // 同じ台本フォルダでの同時実行を防ぐ。関数の終わりまで保持する
+    let dir = match script.parent() {
+        Some(p) if !p.as_os_str().is_empty() => p,
+        _ => Path::new("."),
+    };
+    let _lock = match ScriptLock::acquire(dir) {
+        Ok(l) => l,
+        Err(e) => {
+            eprintln!("[ERROR] {e}");
+            return Outcome::Failed;
+        }
+    };
 
     let bytes = match fs::read(script) {
         Ok(b) => b,
@@ -82,7 +102,7 @@ pub fn run_number(script: &Path) -> Outcome {
     // 書き込み順: .ids(使用済み最大番号 = 高水位)→ .bak → 台本 → HTML。
     // 台本を書き換えた後で .ids が失敗すると、新しく付けた番号が記録されず、
     // その行を後で削除したときに番号が再利用されてしまう。だから .ids を最初に書く。
-    if let Err(e) = fs::write(&ids_path, numbered.record.to_text()) {
+    if let Err(e) = write_atomic(&ids_path, numbered.record.to_text().as_bytes()) {
         eprintln!("[ERROR] .ids を書けません: {e}");
         eprintln!("[ERROR] 台本は書き換えていません");
         return Outcome::Failed;
@@ -92,7 +112,7 @@ pub fn run_number(script: &Path) -> Outcome {
             eprintln!("[ERROR] .bak を書けません: {e}");
             return Outcome::Failed;
         }
-        if let Err(e) = fs::write(script, numbered.text.as_bytes()) {
+        if let Err(e) = write_atomic(script, numbered.text.as_bytes()) {
             eprintln!("[ERROR] 台本を書けません: {e}");
             return Outcome::Failed;
         }

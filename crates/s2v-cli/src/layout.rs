@@ -8,8 +8,29 @@ use anyhow::bail;
 /// `work/` の中のフォルダ(これらもリンクで台本フォルダの外へ出してはいけない)。
 pub const WORK_SUBDIRS: [&str; 3] = ["resampled", "lines", "lines_prefade"];
 
-/// 台本のファイル名にできない、出力側の名前(大文字小文字は区別しない)。
-pub const RESERVED_NAMES: [&str; 3] = ["full_dialogue.wav", "Process.log", "output.mp4"];
+/// 台本のファイル名にできない、出力側の名前(大文字小文字は区別しない。映像工程設計書 §2.2)。
+pub const RESERVED_NAMES: [&str; 8] = [
+    "full_dialogue.wav",
+    "Process.log",
+    "output.mp4",
+    "output.stale.mp4",
+    "bubbles.json",
+    "bubbles.json.bak",
+    ".script2video.lock",
+    "prompts",
+];
+
+/// 台本のファイル名が予約名なら Err。どのコマンドも、何かを書く前に呼ぶ。
+pub fn check_reserved_name(script: &Path) -> anyhow::Result<()> {
+    let name = script
+        .file_name()
+        .map(|n| n.to_string_lossy().into_owned())
+        .unwrap_or_default();
+    if RESERVED_NAMES.iter().any(|r| name.eq_ignore_ascii_case(r)) {
+        bail!("台本のファイル名 {name} は出力ファイルと同じ名前です。台本の名前を変えてください");
+    }
+    Ok(())
+}
 /// 収録フォルダにできない、出力側のフォルダ名。
 pub const OUTPUT_DIRS: [&str; 3] = ["work", "tracks", "timeline"];
 
@@ -125,13 +146,7 @@ pub fn check_contained(root: &Path, name: &str) -> anyhow::Result<()> {
 
 /// 配置の確認。何かを書く前に呼ぶ。
 pub fn check_layout(script: &Path, voice_dir: Option<&Path>, cwd: &Path) -> anyhow::Result<()> {
-    let name = script
-        .file_name()
-        .map(|n| n.to_string_lossy().into_owned())
-        .unwrap_or_default();
-    if RESERVED_NAMES.iter().any(|r| name.eq_ignore_ascii_case(r)) {
-        bail!("台本のファイル名 {name} は出力ファイルと同じ名前です。台本の名前を変えてください");
-    }
+    check_reserved_name(script)?;
     let root = script_folder(script, cwd);
     if let Some(v) = voice_dir {
         let v_norm = normalize_path(v, cwd);
@@ -242,6 +257,11 @@ mod tests {
             "Full_Dialogue.WAV",
             "OUTPUT.MP4",
             "output.mp4",
+            "Output.Stale.MP4",
+            "BUBBLES.JSON",
+            "bubbles.json.bak",
+            ".script2video.lock",
+            "Prompts",
         ] {
             assert!(
                 check_layout(&t.path().join(n), None, t.path()).is_err(),

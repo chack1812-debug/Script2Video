@@ -645,6 +645,7 @@ dependencies = [
  "s2v-audio",
  "s2v-core",
  "s2v-export",
+ "s2v-timeline",
  "serde",
  "serde_json",
  "sha2",
