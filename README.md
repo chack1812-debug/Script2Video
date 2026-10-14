@@ -5,6 +5,7 @@
 ```
 script2video number <台本.txt>
 script2video build <台本.txt> [--voice-dir <収録フォルダ>] [--config <設定.toml>] [--no-cache]
+script2video render <台本.txt> [--config <設定.toml>]
 ```
 
 ## 終了コード
@@ -59,6 +60,53 @@ script2video build 第1話.txt --voice-dir 収録/
 詳しくは [台本仕様.md](台本仕様.md) の §2.8(`#cut`・`#visual`)・§2.9(`#note`)を参照。
 
 台本の書式は [台本仕様.md](台本仕様.md)、設計は [docs/superpowers/specs/2026-10-12-script2video-design.md](docs/superpowers/specs/2026-10-12-script2video-design.md) と、映像工程の設計 [docs/superpowers/specs/2026-10-14-script2video-video-design.md](docs/superpowers/specs/2026-10-14-script2video-video-design.md) を参照。
+
+## render(動画を作る)
+
+`build` の出力と `tracks/` の素材から、吹き出し・ト書き・音声を合成して `output.mp4` を作る。
+
+```bash
+script2video render 第1話.txt
+script2video render 第1話.txt --config config.toml
+```
+
+前提: ffmpeg と ffprobe が 6.0 以上で、PATH にある(または `[render] ffmpeg` / `ffprobe` で場所を指定)。git の日付版(2023 年以降)も受け付ける。版を読み取れないときは警告を出して続ける。`build` を先に実行し、台本・収録を変えたら `build` をやり直す(台本や音声が `timeline/timeline.json` と食い違うと失敗する)。
+
+素材は台本フォルダの `tracks/` に置く。カットごとに 1 つで、名前はカット ID から決まる。シーンの最初のカット(`S01-C01`)は `S01`、それ以降は `S01_C02` のように `_C番号` を付ける。
+
+```
+tracks/S01.png         S01-C01 の画像
+tracks/S01_C02.mp4     S01-C02 の動画
+```
+
+拡張子は画像が `png`・`jpg`・`jpeg`、動画が `mp4`・`mov`・`webm`(大文字小文字は区別しない。WebP は不可)。動画は最後のコマで止まり、台本で `#visual (video loop)` と書いたカットだけループする。素材が無いカットは、`[render] default_image` があれば警告つきでそれに置き換え、無ければ失敗する。
+
+吹き出しとト書きは縦書きで、画面に自動配置する。台本フォルダに `bubbles.json` があれば、そこに書かれた項目の位置・大きさを使う。自動配置の吹き出しが長すぎて収まらないときは、画面に収まる大きさに切り詰めて警告を出す(終了コード 1)。`bubbles.json` で手動に置いた項目が収まらないときは失敗する。フォントに無い文字は、項目ごとに警告を出して代わりの字形で描く。
+
+出力は台本フォルダの `output.mp4`(H.264 + AAC、`-movflags +faststart`)。中間ファイルは `work/render/` に作る(削除してよい)。失敗したときは `output.mp4` を変えない。
+
+終了コードは `build` と同じ: `0` 成功、`1` 警告あり(出力はできている)、`2` 失敗。
+
+主な失敗の理由:
+
+- 素材が足りない・同じカットに複数ある(拡張子違いを含む)・画像のカットに動画が置かれているなど種類が台本と違う
+- 動画の素材が HDR や BT.2020 など、BT.709 以外の色で明示されている
+- `font_path` のフォントが読めない・縦書きに必要な機能が無い
+- 台本・音声が `timeline.json` と食い違う、または版が違う(`build` をやり直す)
+- 設定値の範囲外、`bubbles.json` の誤り、ffmpeg が使えない・出力の検査に通らない
+
+`config.toml` の `[render]` の主な設定(全項目は同梱の `config.toml` を参照):
+
+| キー | 既定 | 意味 |
+|---|---|---|
+| `width` / `height` | 1920 / 1080 | 解像度(偶数) |
+| `fps` | 30 | フレームレート |
+| `fit` | `contain` | 素材の収め方(`contain` は余白あり、`cover` は切り取り) |
+| `default_image` | なし | 素材が無いときの代わりの画像(絶対パス、または台本フォルダからの相対) |
+| `font_path` | `C:\Windows\Fonts\YuGothM.ttc` | 縦書きに使うフォント(他の OS では指定が必要) |
+| `jobs` | 1 | カットを同時に作る ffmpeg の数 |
+
+性能試験(手動、30 分以上かかることがある): `cargo test -p s2v-cli --release --test render_perf -- --ignored --nocapture`
 
 ## 出力(台本フォルダ)
 
