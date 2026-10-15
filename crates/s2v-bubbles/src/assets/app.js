@@ -3,6 +3,7 @@
 import { createApi } from "./api.js";
 import { Editor, FrameFetcher, ImageCache, withKind } from "./model.js";
 import { assetFrame, cutAt, itemsAt } from "./timeline.js";
+import { attachEditing } from "./editor_ui.js";
 import { mountView } from "./view.js";
 
 const SESSION_LOST_TEXT = "セッションが切れました。bubbles を起動し直してください";
@@ -154,6 +155,7 @@ async function main() {
       selected: ui.selected,
       onMissing: requestImage,
     });
+    if (ext.editing) ext.editing.sync();
   }
 
   function refreshChrome() {
@@ -195,8 +197,12 @@ async function main() {
       const r = await api.quit();
       setStatus(r.ok ? "終了しました。このタブは閉じてかまいません" : (r.errors || []).join(" / "));
     },
-    onRevertAuto() {},
-    onNumberCommit() {},
+    onRevertAuto(id) {
+      if (ext.editing) ext.editing.revertAuto(id);
+    },
+    onNumberCommit(id, field, value) {
+      if (ext.editing) ext.editing.commitNumber(id, field, value);
+    },
   };
 
   function seek(n) {
@@ -207,6 +213,9 @@ async function main() {
 
   view = mountView(document.body, state, handlers);
   view.setWarnings(state.warnings);
+  // player は Task 6 が ext.player に入れる。それまでは呼ばれても何もしない
+  const playerProxy = { stop: () => ext.player?.stop?.(), seek: (n) => ext.player?.seek?.(n) };
+  ext.editing = attachEditing({ view, editor, state, ui, player: playerProxy, cache, redraw, toast: setStatus });
   setStatus(
     "シーン " + state.scenes.length + " 件、項目 " + state.items.length + " 件、警告 " + state.warnings.length + " 件",
   );

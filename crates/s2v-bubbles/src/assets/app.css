@@ -38,3 +38,7 @@ button { padding: 4px 14px; }
 .num-row { display: flex; flex-direction: column; margin-bottom: 6px; font-size: 12px; }
 .num-input { padding: 2px 4px; }
 .revert { margin-top: 8px; }
+.overlay .drag-outline { position: absolute; border: 2px solid #4fc3f7; background: rgba(79, 195, 247, 0.12); pointer-events: none; z-index: 100000; }
+.overlay .handle { position: absolute; width: 10px; height: 10px; margin: -5px 0 0 -5px; background: #ffeb3b; border: 1px solid #333333; pointer-events: none; z-index: 100001; }
+.overlay .handle.tail { border-radius: 50%; background: #ff7043; }
+.preview { touch-action: none; }

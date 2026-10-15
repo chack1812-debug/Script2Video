@@ -8,6 +8,8 @@ const NUMBER_FIELDS = [
   ["y", "Y"],
   ["w", "幅"],
   ["h", "高さ"],
+  ["tail_dx", "尻尾 dx"],
+  ["tail_dy", "尻尾 dy"],
   ["start_offset_ms", "開始のずれ(ms)"],
   ["end_offset_ms", "終了のずれ(ms)"],
 ];
@@ -273,10 +275,13 @@ export function mountView(root, state, handlers) {
     numTitle.textContent = item ? item.id : "項目を選んでください";
     for (const [field] of NUMBER_FIELDS) {
       const input = inputs.get(field);
-      input.disabled = !item;
-      if (!item) input.value = "";
-      else if (field.endsWith("_ms")) input.value = String((item.manual && item.manual[field]) || 0);
-      else input.value = String(item.placed[field]);
+      const p = item ? item.placed : null;
+      const isTail = field === "tail_dx" || field === "tail_dy";
+      const off = !item || (isTail && !p.tail);
+      input.disabled = off;
+      if (off) input.value = "";
+      else if (isTail) input.value = String(field === "tail_dx" ? p.tail.dx : p.tail.dy);
+      else input.value = String(p[field] || 0);
     }
     revertBtn.disabled = !(item && item.manual);
   }
@@ -315,6 +320,8 @@ export function mountView(root, state, handlers) {
     setNumbers,
     setFrame,
     setPlaying,
+    /** 数値の欄の入力要素(field → input)。editor_ui.js がキー操作を足す。 */
+    numberInputs: () => inputs,
     previewElement: () => box,
     overlayLayer: () => overlay,
     /** 動画の背景の要素(無ければ null)。再生(player.js)が使う。 */

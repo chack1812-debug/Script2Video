@@ -36,6 +36,16 @@ const PAGES: &[(&str, &str, &str)] = &[
     ("/model.js", include_str!("assets/model.js"), JS_TYPE),
     ("/api.js", include_str!("assets/api.js"), JS_TYPE),
     ("/view.js", include_str!("assets/view.js"), JS_TYPE),
+    (
+        "/edit_calc.js",
+        include_str!("assets/edit_calc.js"),
+        JS_TYPE,
+    ),
+    (
+        "/editor_ui.js",
+        include_str!("assets/editor_ui.js"),
+        JS_TYPE,
+    ),
 ];
 
 /// メディアのスレッドの同時数の上限。
