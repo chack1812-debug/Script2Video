@@ -143,7 +143,7 @@ fn base_args() -> Vec<String> {
 }
 
 /// 入力ごとに `-i` の直前へ置く入力オプション。ネットワークなどの file 以外のプロトコルで読ませない。
-const PROTOCOL_WHITELIST: [&str; 2] = ["-protocol_whitelist", "file"];
+pub const PROTOCOL_WHITELIST: [&str; 2] = ["-protocol_whitelist", "file"];
 
 fn strs(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()

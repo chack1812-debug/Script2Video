@@ -1,32 +1,23 @@
 //! 出力の音声の検証(設計書 §4.6)。純粋な計算だけで、プロセスは起動しない。
 
+use crate::ffmpeg::PROTOCOL_WHITELIST;
 use realfft::RealFftPlanner;
 
 /// 出力の音声を PCM(f32le、48k、モノラル)に復号する ffmpeg の引数。
 pub fn decode_args(path: &str) -> Vec<String> {
-    [
-        "-nostdin",
-        "-hide_banner",
-        "-n",
-        "-v",
-        "error",
-        "-protocol_whitelist",
-        "file",
-        "-i",
-        path,
-        "-map",
-        "0:a",
-        "-ac",
-        "1",
-        "-ar",
-        "48000",
-        "-f",
-        "f32le",
-        "-",
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
+    let mut a: Vec<String> = ["-nostdin", "-hide_banner", "-n", "-v", "error"]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+    a.extend(PROTOCOL_WHITELIST.iter().map(|s| s.to_string()));
+    a.extend(
+        [
+            "-i", path, "-map", "0:a", "-ac", "1", "-ar", "48000", "-f", "f32le", "-",
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    a
 }
 
 /// f32le のバイト列を読む(端数のバイトは捨てる)。
