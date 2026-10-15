@@ -6,6 +6,7 @@ pub mod fsutil;
 pub mod layout;
 pub mod lock;
 pub mod number;
+pub mod prepare;
 pub mod proclog;
 pub mod prompts;
 pub mod prompts_md;
