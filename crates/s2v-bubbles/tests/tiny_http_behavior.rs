@@ -69,12 +69,8 @@ fn unblock_makes_recv_return() {
     });
     let started = Instant::now();
     let r = server.recv();
-    // Err か None のどちらでも「戻った」ことが分かればよい。結果の種類を表示する。
-    let kind = match &r {
-        Ok(_) => "Ok(Request)",
-        Err(_) => "Err",
-    };
-    eprintln!("unblock 後の recv の結果: {kind}");
+    // 0.12 の recv は Result。unblock 後は Err で戻る(Ok(Request) では通さない)。
+    assert!(r.is_err(), "unblock 後の recv は Err のはずが Ok だった");
     assert!(started.elapsed() < Duration::from_secs(5));
     t.join().unwrap();
 }
