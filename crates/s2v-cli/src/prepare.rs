@@ -63,7 +63,7 @@ pub struct PreparedAsset {
     pub kind: AssetKind,
     pub looped: bool,
     pub background: Background,
-    /// 素材の ffprobe の映像ストリーム(`asset_frames` の計算に使う)。
+    /// 動画の素材の ffprobe の映像ストリーム(`asset_frames` の計算に使う)。画像は None。
     pub video: Option<Stream>,
 }
 
@@ -347,7 +347,7 @@ fn resolve_assets(
                 kind,
                 looped: *looped,
                 background,
-                video: Some(video.clone()),
+                video: (kind == AssetKind::Video).then(|| video.clone()),
             },
         );
     }

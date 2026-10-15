@@ -32,13 +32,24 @@ fn write_voice(path: &Path) {
 
 /// 素材なしの台本フォルダを作り、build を通す。(一時フォルダ, 台本, 設定)
 fn project_without_assets() -> (tempfile::TempDir, PathBuf, PathBuf) {
+    project(SIMPLE)
+}
+
+fn project(body: &str) -> (tempfile::TempDir, PathBuf, PathBuf) {
     let tmp = tempfile::tempdir().unwrap();
     let dir = tmp.path().join("台本 テスト");
     fs::create_dir_all(dir.join("voices")).unwrap();
     fs::create_dir_all(dir.join("tracks")).unwrap();
     let script = dir.join("第1話.txt");
-    fs::write(&script, format!("{HEADER}{SIMPLE}")).unwrap();
-    write_voice(&dir.join("voices").join("S01_L001.wav"));
+    fs::write(&script, format!("{HEADER}{body}")).unwrap();
+    for line in body.lines() {
+        if let Some((id, _)) = line.strip_prefix('[').and_then(|r| r.split_once(']')) {
+            write_voice(
+                &dir.join("voices")
+                    .join(format!("{}.wav", id.replace('-', "_"))),
+            );
+        }
+    }
     let font = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
         .unwrap()
@@ -103,4 +114,56 @@ fn missing_assets_policy() {
         "{:?}",
         p.warnings
     );
+}
+
+#[test]
+fn video_stream_is_kept_only_for_video_assets() {
+    if skip() {
+        return;
+    }
+    let body = "#paragraph[S01] 朝
+#visual (image) 朝。
+[S01-L001] A:おはよう。
+#paragraph[S02] 昼
+#visual (video) 昼。
+[S02-L001] A:おはよう。
+";
+    let (_tmp, script, config) = project(body);
+    let pf = preflight(&script, Some(&config)).unwrap();
+    let tracks = pf.dir.join("tracks");
+    let mut pm = tiny_skia::Pixmap::new(320, 180).unwrap();
+    pm.fill(tiny_skia::Color::from_rgba8(200, 20, 20, 255));
+    fs::write(tracks.join("S01.png"), pm.encode_png().unwrap()).unwrap();
+    let out = std::process::Command::new("ffmpeg")
+        .args([
+            "-nostdin",
+            "-hide_banner",
+            "-n",
+            "-v",
+            "error",
+            "-f",
+            "lavfi",
+            "-i",
+        ])
+        .arg("color=c=blue:s=320x180:r=30:d=1")
+        .args(["-pix_fmt", "yuv420p", "-c:v", "libx264"])
+        .arg(tracks.join("S02.mp4"))
+        .output()
+        .expect("ffmpeg を起動できません");
+    assert!(
+        out.status.success(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
+    let mut log = ProcLog::from_writer(Box::new(Vec::<u8>::new()));
+    let p = prepare(
+        &script,
+        &pf.config.render,
+        &pf.dir,
+        MissingAssets::Error,
+        &mut log,
+    )
+    .unwrap();
+    assert!(p.assets["S01-C01"].video.is_none());
+    assert!(p.assets["S02-C01"].video.is_some());
 }
