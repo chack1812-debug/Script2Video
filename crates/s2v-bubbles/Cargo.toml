@@ -19,3 +19,4 @@ getrandom = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+tiny-skia = "0.12"

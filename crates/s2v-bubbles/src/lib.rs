@@ -2,3 +2,5 @@
 
 pub mod range;
 pub mod security;
+
+pub mod frame;

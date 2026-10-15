@@ -779,6 +779,7 @@ dependencies = [
  "serde",
  "serde_json",
  "tempfile",
+ "tiny-skia",
  "tiny_http",
 ]
 
