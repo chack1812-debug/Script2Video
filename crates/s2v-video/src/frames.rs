@@ -62,8 +62,12 @@ pub fn asset_frames(duration_ts: i64, time_base: &str, fps: u32) -> Option<i64> 
     if duration_ts <= 0 || num <= 0 || den <= 0 {
         return None;
     }
-    let v = (duration_ts as i128 * num * fps as i128).div_euclid(den);
-    (v > 0).then_some(v as i64)
+    // あふれる入力(極大の time_base など)は None にする
+    let v = (duration_ts as i128)
+        .checked_mul(num)?
+        .checked_mul(fps as i128)?
+        .div_euclid(den);
+    i64::try_from(v).ok().filter(|&v| v > 0)
 }
 
 /// カットのコマ n に表示する素材の中のコマ(最後のコマで止める、loop ならループする)。
@@ -207,6 +211,13 @@ mod tests {
         assert_eq!(asset_frames(0, "1/90000", 30), None);
         assert_eq!(asset_frames(100, "x", 30), None);
         assert_eq!(asset_frames(100, "1/0", 30), None);
+        // 乗算があふれる(i128 を超える)ときは None
+        assert_eq!(
+            asset_frames(i64::MAX, &format!("{}/1", i128::MAX), 30),
+            None
+        );
+        // 結果が i64 の範囲外のときは None
+        assert_eq!(asset_frames(i64::MAX, "1000000000/1", 30), None);
     }
 
     #[test]
