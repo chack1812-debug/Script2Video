@@ -4,5 +4,6 @@ pub mod api;
 pub mod media;
 pub mod range;
 pub mod security;
+pub mod server;
 
 pub mod frame;

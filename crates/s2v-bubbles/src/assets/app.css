@@ -1,0 +1,5 @@
+body { font-family: sans-serif; margin: 16px; }
+.status { min-height: 1.5em; }
+.buttons button { margin-right: 8px; padding: 4px 16px; }
+li { margin: 2px 0; }
+.warn { color: #a00000; }

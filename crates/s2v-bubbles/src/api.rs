@@ -167,6 +167,42 @@ fn asset_json(a: &SessionAsset) -> Value {
     })
 }
 
+/// カットのコマの範囲 `[n0, n1)`。コマ数 0 のカットは plan_cuts に含まれないので `[n0, n0]` にする。
+fn cut_pair(
+    plans: &[s2v_video::frames::CutPlan],
+    c: &s2v_timeline::CutEntry,
+    fps: u32,
+) -> [i64; 2] {
+    match plans.iter().find(|p| p.cut_id == c.id) {
+        Some(p) => [p.start_frame, p.start_frame + p.frames],
+        None => {
+            let n0 = frame(c.start_ms, fps);
+            [n0, n0]
+        }
+    }
+}
+
+/// カット `cut_id` のコマの範囲 `[n0, n1)`(`/api/state` の `frames` と同じ値。`/media/frame` の n の検査に使う)。
+/// カットの範囲は項目の表示時刻に依らない。
+pub fn cut_frames(s: &Session, cut_id: &str) -> Option<[i64; 2]> {
+    let fps = s.cfg.fps;
+    let cuts: Vec<(String, i64, i64)> = s
+        .timeline
+        .scenes
+        .iter()
+        .flat_map(|sc| sc.cuts.iter())
+        .map(|c| (c.id.clone(), c.start_ms, c.end_ms))
+        .collect();
+    let plans = plan_cuts(&cuts, &[], s.timeline.duration_ms, fps);
+    let c = s
+        .timeline
+        .scenes
+        .iter()
+        .flat_map(|sc| sc.cuts.iter())
+        .find(|c| c.id == cut_id)?;
+    Some(cut_pair(&plans, c, fps))
+}
+
 /// `/api/state` の応答。
 pub fn state_json(s: &Session, manual: &BTreeMap<String, Placed>) -> Value {
     let fps = s.cfg.fps;
@@ -192,14 +228,7 @@ pub fn state_json(s: &Session, manual: &BTreeMap<String, Placed>) -> Value {
                 .cuts
                 .iter()
                 .map(|c| {
-                    // コマ数 0 のカットは plan_cuts に含まれない。[n0, n0] にする
-                    let frames = match plans.iter().find(|p| p.cut_id == c.id) {
-                        Some(p) => [p.start_frame, p.start_frame + p.frames],
-                        None => {
-                            let n0 = frame(c.start_ms, fps);
-                            [n0, n0]
-                        }
-                    };
+                    let frames = cut_pair(&plans, c, fps);
                     json!({
                         "id": c.id,
                         "frames": frames,
