@@ -142,7 +142,7 @@ pub fn check_html(source: &str) -> Vec<String> {
         if name == "style" {
             out.push("禁止: <style>".to_string());
         }
-        let mut src: Option<String> = None;
+        let mut has_src = false;
         let mut k = name_len;
         while k < tag.len() {
             if tag[k].is_whitespace() || tag[k] == '/' {
@@ -193,17 +193,18 @@ pub fn check_html(source: &str) -> Vec<String> {
             {
                 out.push(format!("禁止: イベントハンドラ属性 {key} (<{name}>)"));
             }
-            if key == "src" && src.is_none() {
-                src = Some(val);
+            if (key == "src" || key == "href") && (!val.starts_with('/') || val.starts_with("//")) {
+                out.push(format!(
+                    "禁止: 同じオリジンでない {key}=\"{val}\" (<{name}>)"
+                ));
+            }
+            if key == "src" && !has_src {
+                has_src = true;
             }
         }
         if name == "script" {
-            match src {
-                None => out.push("禁止: src の無い <script>".to_string()),
-                Some(v) if !v.starts_with('/') || v.starts_with("//") => {
-                    out.push(format!("禁止: 同じオリジンでない <script src=\"{v}\">"))
-                }
-                _ => {}
+            if !has_src {
+                out.push("禁止: src の無い <script>".to_string());
             }
         }
     }

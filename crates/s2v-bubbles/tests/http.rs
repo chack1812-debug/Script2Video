@@ -1044,6 +1044,9 @@ fn forbidden_checker_detects_violations() {
         "<script>alert(1)</script>",
         "<script src=\"https://cdn.example/x.js\"></script>",
         "<script src=\"//cdn.example/x.js\"></script>",
+        "<link rel=\"stylesheet\" href=\"https://cdn.example/x.css\">",
+        "<link href=\"//cdn/x.css\">",
+        "<img src=\"https://x/y.png\">",
     ] {
         assert!(!forbidden::check_html(bad).is_empty(), "{bad}");
     }

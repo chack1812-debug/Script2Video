@@ -10,7 +10,8 @@ test("forbidden_checker_detects_violations", () => {
     assert.ok(checkJs(bad).length > 0, bad);
   }
   for (const bad of ["<div onclick=\"x\">", "<DIV\nONLOAD=x>", "<p style = \"a\">", "<STYLE>p{}</STYLE>",
-    "<script>alert(1)</script>", "<script src=\"https://cdn.example/x.js\"></script>", "<script src=\"//cdn.example/x.js\"></script>"]) {
+    "<script>alert(1)</script>", "<script src=\"https://cdn.example/x.js\"></script>", "<script src=\"//cdn.example/x.js\"></script>",
+    "<link rel=\"stylesheet\" href=\"https://cdn.example/x.css\">", "<link href=\"//cdn/x.css\">", "<img src=\"https://x/y.png\">"]) {
     assert.ok(checkHtml(bad).length > 0, bad);
   }
 });

@@ -69,16 +69,13 @@ export function checkHtml(source) {
       const key = a[1].toLowerCase();
       const val = a[2] === undefined ? "" : a[2].replace(/^["']|["']$/g, "");
       if (!attrs.has(key)) attrs.set(key, val);
+      if ((key === "src" || key === "href") && (!val.startsWith("/") || val.startsWith("//"))) {
+        out.push(`禁止: 同じオリジンでない ${key}="${val}" (<${name}>)`);
+      }
       if (key === "style") out.push(`禁止: style 属性 (<${name}>)`);
       if (/^on[a-z]+$/.test(key)) out.push(`禁止: イベントハンドラ属性 ${key} (<${name}>)`);
     }
-    if (name === "script") {
-      if (!attrs.has("src")) out.push("禁止: src の無い <script>");
-      else {
-        const src = attrs.get("src");
-        if (!src.startsWith("/") || src.startsWith("//")) out.push(`禁止: 同じオリジンでない <script src="${src}">`);
-      }
-    }
+    if (name === "script" && !attrs.has("src")) out.push("禁止: src の無い <script>");
   }
   return out;
 }
