@@ -724,3 +724,140 @@ fn unknown_path_404_and_method_405() {
         assert_eq!(r.status, 405, "{m} {path}");
     }
 }
+
+#[test]
+fn post_checks_apply_to_every_path() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_default(dir.path());
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    for path in ["/media/audio", "/app.js", "/unknown", "/api/state"] {
+        let r = Req::new("POST", path, p).cookie(&c).json("{}").send(p);
+        assert_eq!(r.status, 403, "{path}");
+    }
+    let r = Req::new("POST", "/media/audio", p)
+        .cookie(&c)
+        .origin(&origin_of(p))
+        .content_type("text/plain")
+        .send(p);
+    assert_eq!(r.status, 415);
+    let r = Req::new("POST", "/media/audio", p)
+        .cookie(&c)
+        .origin(&origin_of(p))
+        .content_type("application/json")
+        .content_length((1 << 20) + 1)
+        .send(p);
+    assert_eq!(r.status, 413);
+    // 検査を通れば 404 / 405
+    let ok = |path| {
+        Req::new("POST", path, p)
+            .cookie(&c)
+            .origin(&origin_of(p))
+            .json("{}")
+            .send(p)
+            .status
+    };
+    assert_eq!(ok("/unknown"), 404);
+    assert_eq!(ok("/media/audio"), 405);
+}
+
+#[test]
+fn quit_returns_even_if_media_is_held() {
+    let dir = tempfile::tempdir().unwrap();
+    let mut srv = big_audio_server(dir.path());
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    let _held = hold_audio(p, &c);
+    assert_eq!(post_json(p, &c, "/api/quit", "{}").status, 200);
+    let j = srv.join.take().unwrap();
+    let t = Instant::now();
+    while !j.is_finished() {
+        assert!(t.elapsed() < Duration::from_secs(7), "run が戻りません");
+        std::thread::sleep(Duration::from_millis(20));
+    }
+    assert!(j.join().unwrap().0.is_ok());
+}
+
+/// 引数を無視して数秒眠る実行ファイル(ffmpeg の代わり)。
+fn sleeper(dir: &std::path::Path) -> String {
+    #[cfg(windows)]
+    {
+        let p = dir.join("sleeper.cmd");
+        std::fs::write(&p, "@echo off\r\nping -n 4 127.0.0.1 >nul 2>&1\r\n").unwrap();
+        p.to_string_lossy().into_owned()
+    }
+    #[cfg(not(windows))]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let p = dir.join("sleeper.sh");
+        std::fs::write(&p, "#!/bin/sh\nsleep 3\n").unwrap();
+        std::fs::set_permissions(&p, std::fs::Permissions::from_mode(0o755)).unwrap();
+        p.to_string_lossy().into_owned()
+    }
+}
+
+#[test]
+fn frame_worker_busy_is_503_then_recovers() {
+    use s2v_bubbles::api::SessionAsset;
+    use s2v_render::assets::AssetKind;
+    let dir = tempfile::tempdir().unwrap();
+    let (vpath, vfile) = locked_file(dir.path(), "v.mp4", 100);
+    let mut assets = BTreeMap::new();
+    assets.insert(
+        "S01-C01".to_string(),
+        SessionAsset {
+            cut_id: "S01-C01".into(),
+            kind: AssetKind::Video,
+            looped: false,
+            frames: Some(90),
+            matrix: "bt709".into(),
+            range: "tv".into(),
+            path: vpath,
+        },
+    );
+    let media = BTreeMap::from([("S01-C01".to_string(), vfile)]);
+    let (_, audio) = locked_file(dir.path(), "full_dialogue.wav", 100);
+    let worker = s2v_bubbles::frame::FrameWorker::start_with(
+        sleeper(dir.path()),
+        Duration::from_secs(10),
+        32 << 20,
+    );
+    let srv = start_with_worker(
+        session_in(dir.path(), "あいう", assets),
+        media,
+        audio,
+        Some(worker),
+    );
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    let first = {
+        let c = c.clone();
+        std::thread::spawn(move || {
+            Req::new("GET", "/media/frame/S01-C01?n=3", p)
+                .cookie(&c)
+                .send(p)
+                .status
+        })
+    };
+    std::thread::sleep(Duration::from_millis(500));
+    // 1 本目の応答を待っている間の 2 本目は、即座に 503(主スレッドも止まらない)
+    let t = Instant::now();
+    let r = Req::new("GET", "/media/frame/S01-C01?n=4", p)
+        .cookie(&c)
+        .send(p);
+    assert_eq!(r.status, 503);
+    assert!(t.elapsed() < Duration::from_secs(1));
+    assert_common_headers(&r);
+    assert_eq!(
+        post_json(p, &c, "/api/layout", r#"{"manual":{}}"#).status,
+        200
+    );
+    // 眠るだけで画像を出さない(空の出力で成功扱いの 200 か 500)。503 ではない
+    let s1 = first.join().unwrap();
+    assert!(s1 == 200 || s1 == 500, "{s1}");
+    // 終わった後の 3 本目は 503 にならない(500)
+    let r = Req::new("GET", "/media/frame/S01-C01?n=5", p)
+        .cookie(&c)
+        .send(p);
+    assert!(r.status == 200 || r.status == 500, "{}", r.status);
+}

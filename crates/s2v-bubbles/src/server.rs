@@ -38,6 +38,9 @@ pub struct ServeOptions {
     /// 指定がなければ OS が決める。
     pub port: Option<u16>,
     pub ffmpeg: String,
+    /// テスト用の差し込み口: 指定すればこの frame のワーカーを使う(`ffmpeg` は使わない)。
+    #[doc(hidden)]
+    pub frame_worker: Option<FrameWorker>,
 }
 
 /// 主スレッドへの知らせ(トークンを含めない)。
@@ -129,7 +132,9 @@ impl Server {
             media: media.into_iter().map(|(k, v)| (k, Arc::new(v))).collect(),
             audio: Arc::new(audio),
             slots: Slots::new(MAX_MEDIA_THREADS),
-            frame: FrameWorker::start(opts.ffmpeg),
+            frame: opts
+                .frame_worker
+                .unwrap_or_else(|| FrameWorker::start(opts.ffmpeg)),
             quit: Arc::new(AtomicBool::new(false)),
             active: Arc::new(AtomicUsize::new(0)),
             log_tx,
@@ -159,6 +164,7 @@ impl Server {
 
     /// 受け付けのループ。`/api/quit` か `QuitHandle::quit` で終了の手順を行って戻る。
     /// ロックを外すのは呼び出し側(この関数が戻った後)。
+    /// 戻った後に残ったメディアのスレッドは、呼び出し側がプロセスを終えることで片づく。
     pub fn run(self, log: &mut dyn FnMut(LogEvent)) -> Result<(), String> {
         let mut fatal: Option<String> = None;
         let mut errors = 0u32;
@@ -266,6 +272,30 @@ impl Server {
             return self.deny(req, path, "クッキーがありません");
         }
 
+        // 7. POST は全てのパスで、振り分けの前に Origin → Content-Type → 本文の大きさを検査する
+        let mut body = None;
+        if method == Method::Post {
+            if !origin_ok(one_header(&req, "Origin"), self.port) {
+                return self.deny(req, path, "Origin が違います");
+            }
+            if !json_content_type_ok(one_header(&req, "Content-Type")) {
+                reply_error(req, 415, "Content-Type は application/json にしてください");
+                return Flow::Continue;
+            }
+            match read_body(&mut req) {
+                Ok(b) => body = Some(b),
+                Err(status) => {
+                    let msg = if status == 413 {
+                        "本文が大きすぎます"
+                    } else {
+                        "本文を読めません"
+                    };
+                    reply_error(req, status, msg);
+                    return Flow::Continue;
+                }
+            }
+        }
+
         match path {
             // 4. 画面
             "/" => self.page(req, &method, INDEX_HTML, "text/html; charset=utf-8"),
@@ -286,27 +316,7 @@ impl Server {
                 if method != Method::Post {
                     return method_not_allowed(req, "POST");
                 }
-                // 7. POST
-                if !origin_ok(one_header(&req, "Origin"), self.port) {
-                    return self.deny(req, path, "Origin が違います");
-                }
-                if !json_content_type_ok(one_header(&req, "Content-Type")) {
-                    reply_error(req, 415, "Content-Type は application/json にしてください");
-                    return Flow::Continue;
-                }
-                let body = match read_body(&mut req) {
-                    Ok(b) => b,
-                    Err(status) => {
-                        let msg = if status == 413 {
-                            "本文が大きすぎます"
-                        } else {
-                            "本文を読めません"
-                        };
-                        reply_error(req, status, msg);
-                        return Flow::Continue;
-                    }
-                };
-                self.post(req, path, &body)
+                self.post(req, path, &body.unwrap_or_default())
             }
             _ => {
                 if let Some(id) = path.strip_prefix("/media/asset/") {

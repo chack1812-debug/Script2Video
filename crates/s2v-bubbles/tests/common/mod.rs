@@ -153,6 +153,15 @@ impl Drop for Running {
 }
 
 pub fn start(session: Session, media: BTreeMap<String, LockedFile>, audio: LockedFile) -> Running {
+    start_with_worker(session, media, audio, None)
+}
+
+pub fn start_with_worker(
+    session: Session,
+    media: BTreeMap<String, LockedFile>,
+    audio: LockedFile,
+    frame_worker: Option<s2v_bubbles::frame::FrameWorker>,
+) -> Running {
     let server = Server::bind(
         session,
         media,
@@ -160,6 +169,7 @@ pub fn start(session: Session, media: BTreeMap<String, LockedFile>, audio: Locke
         ServeOptions {
             port: None,
             ffmpeg: "ffmpeg".to_string(),
+            frame_worker,
         },
     )
     .expect("待ち受けできません");
