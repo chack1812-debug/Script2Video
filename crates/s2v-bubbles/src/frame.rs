@@ -17,6 +17,8 @@ pub const FRAME_TIMEOUT: Duration = Duration::from_secs(10);
 /// ffmpeg の標準出力(PNG)の上限。
 pub const FRAME_MAX_BYTES: usize = 32 << 20;
 
+/// PNG の先頭 8 バイト。
+const PNG_SIGNATURE: &[u8] = &[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A];
 /// 標準エラーの末尾として返す行数。
 const STDERR_TAIL_LINES: usize = 20;
 /// 標準エラーとして保持する末尾のバイト数(それより前は捨てる)。
@@ -257,6 +259,10 @@ fn run_job(
                 if !status.success() {
                     return Err(FrameError::Failed(stderr_tail(&err)));
                 }
+                // 空や PNG でない出力を成功として返さない
+                if !data.starts_with(PNG_SIGNATURE) {
+                    return Err(FrameError::Failed("PNG ではない出力".into()));
+                }
                 return Ok(data);
             }
             Ok(None) => {}
@@ -417,6 +423,33 @@ mod tests {
         assert!(t.elapsed() < Duration::from_secs(5), "{:?}", t.elapsed());
         assert!(matches!(rx.recv().unwrap(), Err(FrameError::Failed(_))));
     }
+
+    #[cfg(windows)]
+    #[test]
+    fn empty_or_non_png_output_fails() {
+        let w = FrameWorker::start_with("powershell".into(), Duration::from_secs(20), 1 << 20);
+        for script in ["exit 0", "[Console]::Out.Write('hello')"] {
+            let rx = w.try_submit(ps(script)).unwrap();
+            match rx.recv().unwrap() {
+                Err(FrameError::Failed(m)) => assert!(m.contains("PNG"), "{m}"),
+                other => panic!("{script}: {other:?}"),
+            }
+        }
+        w.shutdown();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn png_signature_output_succeeds() {
+        let w = FrameWorker::start_with("powershell".into(), Duration::from_secs(20), 1 << 20);
+        let rx = w.try_submit(ps(PNG_SCRIPT)).unwrap();
+        let out = rx.recv().unwrap().expect("成功");
+        assert_eq!(&out[..8], PNG_SIGNATURE);
+        w.shutdown();
+    }
+
+    #[cfg(windows)]
+    const PNG_SCRIPT: &str = "$o=[Console]::OpenStandardOutput(); $b=[byte[]](0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,1,2,3); $o.Write($b,0,$b.Length); $o.Flush()";
 
     #[test]
     fn missing_executable_fails() {

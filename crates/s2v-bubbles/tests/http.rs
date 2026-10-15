@@ -852,12 +852,69 @@ fn frame_worker_busy_is_503_then_recovers() {
         post_json(p, &c, "/api/layout", r#"{"manual":{}}"#).status,
         200
     );
-    // 眠るだけで画像を出さない(空の出力で成功扱いの 200 か 500)。503 ではない
-    let s1 = first.join().unwrap();
-    assert!(s1 == 200 || s1 == 500, "{s1}");
+    // 眠るだけで画像を出さないので 1 本目は 500(空の出力を成功にしない)
+    assert_eq!(first.join().unwrap(), 500);
     // 終わった後の 3 本目は 503 にならない(500)
     let r = Req::new("GET", "/media/frame/S01-C01?n=5", p)
         .cookie(&c)
         .send(p);
-    assert!(r.status == 200 || r.status == 500, "{}", r.status);
+    assert_eq!(r.status, 500);
+}
+
+/// PNG の署名で始まる出力をする実行ファイル(ffmpeg の代わり)。
+#[cfg(windows)]
+fn png_emitter(dir: &std::path::Path) -> String {
+    let p = dir.join("png.cmd");
+    std::fs::write(
+        &p,
+        "@echo off
+powershell -NoProfile -Command \"$o=[Console]::OpenStandardOutput(); $b=[byte[]](0x89,0x50,0x4E,0x47,0x0D,0x0A,0x1A,0x0A,1,2,3); $o.Write($b,0,$b.Length); $o.Flush()\"
+",
+    )
+    .unwrap();
+    p.to_string_lossy().into_owned()
+}
+
+#[cfg(windows)]
+#[test]
+fn frame_endpoint_returns_png_signature_from_worker() {
+    use s2v_bubbles::api::SessionAsset;
+    use s2v_render::assets::AssetKind;
+    let dir = tempfile::tempdir().unwrap();
+    let (vpath, vfile) = locked_file(dir.path(), "v.mp4", 100);
+    let assets = BTreeMap::from([(
+        "S01-C01".to_string(),
+        SessionAsset {
+            cut_id: "S01-C01".into(),
+            kind: AssetKind::Video,
+            looped: false,
+            frames: Some(90),
+            matrix: "bt709".into(),
+            range: "tv".into(),
+            path: vpath,
+        },
+    )]);
+    let media = BTreeMap::from([("S01-C01".to_string(), vfile)]);
+    let (_, audio) = locked_file(dir.path(), "full_dialogue.wav", 100);
+    let worker = s2v_bubbles::frame::FrameWorker::start_with(
+        png_emitter(dir.path()),
+        Duration::from_secs(20),
+        32 << 20,
+    );
+    let srv = start_with_worker(
+        session_in(dir.path(), "あいう", assets),
+        media,
+        audio,
+        Some(worker),
+    );
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    let r = Req::new("GET", "/media/frame/S01-C01?n=3", p)
+        .cookie(&c)
+        .send(p);
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(r.header("Content-Type"), Some("image/png"));
+    assert!(r
+        .body
+        .starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]));
 }
