@@ -17,7 +17,7 @@ use std::collections::BTreeMap;
 use std::io::{self, Cursor, Read};
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::mpsc::{channel, Receiver, Sender};
-use std::sync::{Arc, Weak};
+use std::sync::{Arc, Mutex, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
@@ -41,6 +41,9 @@ pub struct ServeOptions {
     /// テスト用の差し込み口: 指定すればこの frame のワーカーを使う(`ffmpeg` は使わない)。
     #[doc(hidden)]
     pub frame_worker: Option<FrameWorker>,
+    /// テスト用の差し込み口: true の間、応答のスレッドの生成を失敗させる。
+    #[doc(hidden)]
+    pub fail_spawn: Option<Arc<AtomicBool>>,
 }
 
 /// 主スレッドへの知らせ(トークンを含めない)。
@@ -96,6 +99,7 @@ pub struct Server {
     active: Arc<AtomicUsize>,
     log_tx: Sender<LogEvent>,
     log_rx: Receiver<LogEvent>,
+    fail_spawn: Arc<AtomicBool>,
 }
 
 enum Flow {
@@ -139,6 +143,7 @@ impl Server {
             active: Arc::new(AtomicUsize::new(0)),
             log_tx,
             log_rx,
+            fail_spawn: opts.fail_spawn.unwrap_or_default(),
         })
     }
 
@@ -219,6 +224,39 @@ impl Server {
         match fatal {
             Some(m) => Err(m),
             None => Ok(()),
+        }
+    }
+
+    /// 要求をスレッドへ渡す。スレッドを始められなければ要求を取り戻して返す(呼び出し側が 500 を返す)。
+    fn spawn_with_request(
+        &self,
+        name: &str,
+        req: Request,
+        f: impl FnOnce(Request) + Send + 'static,
+    ) -> Result<(), Request> {
+        let cell = Arc::new(Mutex::new(Some(req)));
+        let inner = Arc::clone(&cell);
+        let result = if self.fail_spawn.load(Ordering::SeqCst) {
+            Err(io::Error::other("スレッドの生成の失敗(注入)"))
+        } else {
+            thread::Builder::new()
+                .name(name.to_string())
+                .spawn(move || {
+                    let req = inner.lock().ok().and_then(|mut g| g.take());
+                    if let Some(req) = req {
+                        f(req);
+                    }
+                })
+        };
+        match result {
+            Ok(_) => Ok(()),
+            Err(e) => {
+                self.note(LogEvent::Error(format!(
+                    "応答のスレッドを始められません: {e}"
+                )));
+                let req = cell.lock().ok().and_then(|mut g| g.take());
+                Err(req.expect("始められなかったスレッドは要求を取っていない"))
+            }
         }
     }
 
@@ -361,17 +399,14 @@ impl Server {
         };
         let range = one_header(&req, "Range").map(str::to_string);
         let active = ActiveGuard::new(&self.active);
-        let spawned = thread::Builder::new()
-            .name("bubbles-media".into())
-            .spawn(move || {
-                let _slot = slot;
-                let _active = active;
-                respond_media(req, &file, is_head, range.as_deref());
-            });
-        if let Err(e) = spawned {
-            self.note(LogEvent::Error(format!(
-                "メディアのスレッドを始められません: {e}"
-            )));
+        let spawned = self.spawn_with_request("bubbles-media", req, move |req| {
+            let _slot = slot;
+            let _active = active;
+            respond_media(req, &file, is_head, range.as_deref());
+        });
+        if let Err(req) = spawned {
+            // 枠と数えは、捨てられたクロージャとともに返済済み
+            reply_error(req, 500, "応答のスレッドを始められません");
         }
         Flow::Continue
     }
@@ -421,28 +456,24 @@ impl Server {
         let active = ActiveGuard::new(&self.active);
         let tx = self.log_tx.clone();
         let id = id.to_string();
-        let spawned = thread::Builder::new()
-            .name("bubbles-frame".into())
-            .spawn(move || {
-                let _active = active;
-                match rx.recv() {
-                    Ok(Ok(png)) => reply_bytes(req, 200, "image/png", &[], png),
-                    Ok(Err(e)) => {
-                        let _ = tx.send(LogEvent::Error(format!("/media/frame/{id}: {e:?}")));
-                        reply_error(req, 500, "コマを取り出せません");
-                    }
-                    Err(_) => {
-                        let _ = tx.send(LogEvent::Error(format!(
-                            "/media/frame/{id}: ワーカーが応答せず止まりました"
-                        )));
-                        reply_error(req, 500, "コマを取り出せません");
-                    }
+        let spawned = self.spawn_with_request("bubbles-frame", req, move |req| {
+            let _active = active;
+            match rx.recv() {
+                Ok(Ok(png)) => reply_bytes(req, 200, "image/png", &[], png),
+                Ok(Err(e)) => {
+                    let _ = tx.send(LogEvent::Error(format!("/media/frame/{id}: {e:?}")));
+                    reply_error(req, 500, "コマを取り出せません");
                 }
-            });
-        if let Err(e) = spawned {
-            self.note(LogEvent::Error(format!(
-                "コマのスレッドを始められません: {e}"
-            )));
+                Err(_) => {
+                    let _ = tx.send(LogEvent::Error(format!(
+                        "/media/frame/{id}: ワーカーが応答せず止まりました"
+                    )));
+                    reply_error(req, 500, "コマを取り出せません");
+                }
+            }
+        });
+        if let Err(req) = spawned {
+            reply_error(req, 500, "応答のスレッドを始められません");
         }
         Flow::Continue
     }

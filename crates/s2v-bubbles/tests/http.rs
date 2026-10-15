@@ -918,3 +918,91 @@ fn frame_endpoint_returns_png_signature_from_worker() {
         .body
         .starts_with(&[0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A]));
 }
+
+#[test]
+fn media_spawn_failure_is_500_and_slot_returns() {
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let (_, audio) = locked_file(dir.path(), "full_dialogue.wav", 4096);
+    let fail = Arc::new(AtomicBool::new(true));
+    let srv = start_full(
+        session_in(dir.path(), "あいう", BTreeMap::new()),
+        BTreeMap::new(),
+        audio,
+        None,
+        Some(Arc::clone(&fail)),
+    );
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    // 枠の数(8)より多く失敗させても、枠は返っている
+    for _ in 0..10 {
+        let r = Req::new("GET", "/media/audio", p).cookie(&c).send(p);
+        assert_eq!(r.status, 500);
+        assert_common_headers(&r);
+        assert!(r.json()["error"].is_string());
+    }
+    fail.store(false, Ordering::SeqCst);
+    let r = Req::new("GET", "/media/audio", p).cookie(&c).send(p);
+    assert_eq!(r.status, 200);
+    assert_eq!(r.body.len(), 4096);
+}
+
+#[cfg(windows)]
+#[test]
+fn frame_spawn_failure_is_500_and_next_request_succeeds() {
+    use s2v_bubbles::api::SessionAsset;
+    use s2v_render::assets::AssetKind;
+    use std::sync::atomic::{AtomicBool, Ordering};
+    use std::sync::Arc;
+    let dir = tempfile::tempdir().unwrap();
+    let (vpath, vfile) = locked_file(dir.path(), "v.mp4", 100);
+    let assets = BTreeMap::from([(
+        "S01-C01".to_string(),
+        SessionAsset {
+            cut_id: "S01-C01".into(),
+            kind: AssetKind::Video,
+            looped: false,
+            frames: Some(90),
+            matrix: "bt709".into(),
+            range: "tv".into(),
+            path: vpath,
+        },
+    )]);
+    let media = BTreeMap::from([("S01-C01".to_string(), vfile)]);
+    let (_, audio) = locked_file(dir.path(), "full_dialogue.wav", 100);
+    let worker = s2v_bubbles::frame::FrameWorker::start_with(
+        png_emitter(dir.path()),
+        Duration::from_secs(20),
+        32 << 20,
+    );
+    let fail = Arc::new(AtomicBool::new(true));
+    let srv = start_full(
+        session_in(dir.path(), "あいう", assets),
+        media,
+        audio,
+        Some(worker),
+        Some(Arc::clone(&fail)),
+    );
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    let r = Req::new("GET", "/media/frame/S01-C01?n=3", p)
+        .cookie(&c)
+        .send(p);
+    assert_eq!(r.status, 500);
+    assert_common_headers(&r);
+    fail.store(false, Ordering::SeqCst);
+    // ワーカーが先の仕事を終えるまでは 503 になりうる
+    let deadline = Instant::now() + Duration::from_secs(15);
+    loop {
+        let r = Req::new("GET", "/media/frame/S01-C01?n=4", p)
+            .cookie(&c)
+            .send(p);
+        if r.status == 200 {
+            break;
+        }
+        assert_eq!(r.status, 503);
+        assert!(Instant::now() < deadline, "回復しません");
+        std::thread::sleep(Duration::from_millis(100));
+    }
+}
