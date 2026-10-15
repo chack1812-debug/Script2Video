@@ -34,6 +34,28 @@ test("api_session_lost_on_403", async () => {
   assert.equal(r.status, 403);
   assert.equal(lost, 1);
   assert.equal(await api.head("/media/asset/C"), 403);
+  assert.equal(lost, 2);
+});
+
+test("api_all_requests_are_same_origin", async () => {
+  const seen = [];
+  const f = async (url, init) => {
+    seen.push([url, init]);
+    return url.startsWith("/media/") && init.method === "GET" ? new Response(new Uint8Array([1]), { status: 200 }) : url === "/api/layout" ? resp(200, []) : url === "/api/render" ? new Response(new Uint8Array([1]), { status: 200, headers: { "X-S2V-Origin": "0,0" } }) : resp(200, {});
+  };
+  const api = createApi(f, () => {});
+  await api.getState();
+  await api.render({});
+  await api.layout({});
+  await api.save({});
+  await api.frame("C", 1);
+  await api.head("/media/asset/C");
+  await api.quit();
+  assert.equal(seen.length, 7);
+  for (const [url, init] of seen) {
+    assert.equal(init.credentials, "same-origin", url);
+    if (init.method === "POST") assert.equal(init.headers["Content-Type"], "application/json", url);
+  }
 });
 
 test("api_requests_use_same_origin_and_json", async () => {
