@@ -7,6 +7,7 @@ pub mod layout;
 pub mod lock;
 pub mod number;
 pub mod proclog;
+pub mod prompts_md;
 pub mod render;
 pub mod verify;
 pub mod work;
