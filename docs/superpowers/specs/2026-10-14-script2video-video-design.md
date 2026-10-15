@@ -399,7 +399,7 @@ ffprobe で `output.tmp.mp4` を確かめる。
 - 本文が変わり、保存されている大きさでは `fits` が偽になった → 幅と高さをそれぞれ `max(保存値, min_size の値)` に広げ(右下へ。画面からはみ出すなら内側へ寄せる)、警告する(`min_size` 以上なら必ず収まる)。
 - `timeline.json` に存在しない ID → 警告して無視する。ファイルからは消さない(採番の都合で一時的に消えることがあるため)。
 - 未知のキー、負の大きさ、上限の超過、`version` 違い、JSON の破損 → エラー 2。
-- **保存**(`bubbles` の `/api/save`): `bubbles.json`・`bubbles.json.bak` がリンク(シンボリックリンク・ジャンクション)なら拒否する(500。何も変えない)。既存の `bubbles.json` があれば、その内容を読んで `bubbles.json.bak` に、同じフォルダに新規作成(`create_new`、乱数の名前)した一時ファイル経由で書いて置き換える。次に、新しい内容を同じ方法で一時ファイルに書いて `bubbles.json` を置き換える。`.bak` の段階で失敗 → 何も変えない。本体の段階で失敗 → `.bak` だけが新しくなり、`bubbles.json` は元のまま。一時ファイルは失敗時に消す。
+- **保存**(`bubbles` の `/api/save`): `bubbles.json`・`bubbles.json.bak` がリンク(シンボリックリンク・ジャンクション)か、あるのに通常のファイルでない(フォルダなど)なら拒否する(500。何も変えない)。既存の `bubbles.json` があれば、その内容を読んで `bubbles.json.bak` に、同じフォルダに新規作成(`create_new`、乱数の名前)した一時ファイル経由で書いて置き換える。次に、新しい内容を同じ方法で一時ファイルに書いて `bubbles.json` を置き換える。`.bak` の段階で失敗 → 何も変えない。本体の段階で失敗 → `.bak` だけが新しくなり、`bubbles.json` は元のまま。一時ファイルは失敗時に消す。
 - **保存の中身**: 要求の手動配置の一式(既知の ID だけ)に、読み込んだ `bubbles.json` にあった `timeline.json` に無い ID の項目(読み込み時に拡大・縮小済み)をそのまま足す。`canvas` は設定の解像度。要求に `timeline.json` に無い ID があれば 422。既知の ID が要求に無ければ、自動配置に戻したものとして保存しない。
 
 ### 5.3 画面
@@ -415,7 +415,7 @@ ffprobe で `output.tmp.mp4` を確かめる。
 
 ### 5.4 サーバーと API
 
-`tiny_http` によるサーバー。API・画面の要求は1つずつ順に処理する。**メディア**(`/media/asset`・`/media/audio`)の要求だけは要求ごとに別スレッドで応答する(ブラウザの動画・音声の長い Range の読み出しが API を止めないため)。同時に走るメディアのスレッドは 8 本までで、超えたら 503。`/media/frame` は ffmpeg を1つずつ実行し(同時に1つ。走っている間の次の要求は 503)、1回 10 秒で打ち切り(ffmpeg を止めて 500)、出力は 32 MiB まで(超えたら止めて 500)。HTML・JS・CSS は実行ファイルに埋め込み、別々のパスで配信する(外部のライブラリ・CDN を使わない)。`tiny_http` が接続ごとに内部でスレッドを増やすことの扱い(接続数・読み書きの時間の上限)は、実装計画の最初のタスクで `tiny_http` の挙動を確かめてから決める。
+`tiny_http` によるサーバー。API・画面の要求は1つずつ順に処理する。**メディア**(`/media/asset`・`/media/audio`)の要求だけは要求ごとに別スレッドで応答する(ブラウザの動画・音声の長い Range の読み出しが API を止めないため)。同時に走るメディアのスレッドは 8 本までで、超えたら 503。`/media/frame` は専用のワーカースレッド1本で ffmpeg を1つずつ実行する(主スレッドは要求をワーカーに渡すだけで待たない。ワーカーが使用中なら主スレッドが即座に 503)。ffmpeg には `-threads 2` を付け、1回 10 秒で打ち切り(ワーカーが ffmpeg を止めて 500)、出力は 32 MiB まで(超えたら止めて 500)。HTML・JS・CSS は実行ファイルに埋め込み、別々のパスで配信する(外部のライブラリ・CDN を使わない)。接続数の上限は設けない(`tiny_http` は接続ごとに内部でスレッドを使い、受け付けの前に制限する仕組みを持たない。127.0.0.1 だけで待ち受け、クッキーの無い要求は即座に 403 にするので、残るのは同じ PC のプログラムによる資源の消費で、これは守る相手に含めない)。実装計画の最初のタスクで、この `tiny_http` の挙動を確かめて記録する。
 
 **起動と終了の順**: 待ち受けを用意する(ポートを決める)→ URL を作る → ブラウザを開く(または URL を表示)→ 受け付けのループ(主スレッド)。`/api/quit` と Ctrl+C では、受け付けを止め、メディアのスレッドと ffmpeg を止めて(最大 5 秒待ち、残れば ffmpeg は強制終了)、Process.log に終了を書き、最後にロックを外す。メディアのスレッドは Process.log に直接書かず、主スレッドへ知らせて主スレッドが書く。
 
@@ -425,8 +425,8 @@ ffprobe で `output.tmp.mp4` を確かめる。
 |---|---|---|
 | `GET /?token=<T>` | — | 正しければクッキーを設定して `/` へ 303。違えば 403(クッキーは設定しない) |
 | `GET /`、`GET /app.js`、`GET /app.css` | — | 画面 |
-| `GET /api/state` | — | `{canvas:{w,h}, fps, total_frames, fit:"contain"\|"cover", background:"#rrggbb", scenes:[{id, name, cuts:[{id, frames:[n0,n1), asset:{url, kind:"png"\|"jpeg"\|"video", looped, frame_url}\|null}]}], items:[{id, kind:"bubble"\|"note", scene, text, frames:[n0,n1), order, manual:配置\|null, placed:配置, image:{dx,dy,w,h}, min_size:{w,h}, clipped:bool}], warnings:[文字列]}`。`frames` は半開区間、`order` は重ねる順。配置は `{x,y,w,h,tail:{dx,dy}\|null, start_offset_ms, end_offset_ms}` |
-| `POST /api/render` | `{id, manual:配置\|null}`(本文と種類はサーバーが timeline から取る) | `image/png` の本文と、ヘッダー `X-S2V-Origin: <dx>,<dy>`(配置の左上から PNG の左上へのずれ)・`X-S2V-Clipped: 0\|1`。`manual` が null ならサーバーが共通の `scene` で決めた配置(切り詰めを含む)で描く。`manual` があり文字が収まらなければ 422 |
+| `GET /api/state` | — | `{canvas:{w,h}, fps, total_frames, fit:"contain"\|"cover", background:"#rrggbb", scenes:[{id, name, cuts:[{id, frames:[n0,n1), asset:{url, kind:"png"\|"jpeg"\|"video", looped, frames, frame_url}\|null}]}], items:[{id, kind:"bubble"\|"note", scene, text, frames:[n0,n1), order, manual:配置\|null, placed:配置, image:{dx,dy,w,h}, min_size:{w,h}, clipped:bool}], warnings:[文字列]}`。`frames` は半開区間、`order` は重ねる順。`asset.frames` は動画の素材の長さを出力の fps のコマ数にしたもの(サーバーが ffprobe の長さから `render` と同じ関数で求める。画像は null)。**素材の中のコマ** k は、カットのコマ n について `d = n − n0` とし、`d < asset.frames` なら `k = d`、そうでなければ `looped` なら `k = d mod asset.frames`、そうでなければ `k = asset.frames − 1`(最後のコマで止める)。`<video>` の再生位置は `k / fps` 秒、`/media/frame` も同じ k を使う。サーバーはこの式を `render` と共通の1つの関数で持ち、画面は同じ式を使う。配置は `{x,y,w,h,tail:{dx,dy}\|null, start_offset_ms, end_offset_ms}` |
+| `POST /api/render` | `{id, manual:{ID:配置}}`(画面の現在の手動配置の一式。本文と種類はサーバーが timeline から取る) | `image/png` の本文と、ヘッダー `X-S2V-Origin: <dx>,<dy>`(配置の左上から PNG の左上へのずれ)・`X-S2V-Clipped: 0\|1`。サーバーは `/api/layout` と同じく、この手動配置の一式で全体の配置を共通の `scene` で計算し(自動の項目の位置・切り詰めを含む)、その中の項目 `id` を描く。`id` が `manual` にあり、その大きさで文字が収まらなければ 422 |
 | `POST /api/layout` | `{manual:{ID:配置}}` | `/api/state` の `items` と同じ形の全項目の配置の結果(保存はしない) |
 | `POST /api/save` | `{manual:{ID:配置}}` | 成功 `{saved:true, warnings:[…]}`。検証に外れれば 422 `{errors:[…]}`(§5.2 の上限・offset の逆転・文字が収まらない・未知の ID・種類の不一致)。保存の失敗は 500 |
 | `GET /media/asset/<カットID>` | Range 可 | そのカットの素材 |
@@ -556,7 +556,7 @@ pub struct LayoutContext<'a> {
   - 音声の検証(サンプル数の比較、相互相関による時刻のずれの検出。わざと 100 サンプルずらした音声で失敗すること)。
   - 性能試験(`#[ignore]`、手動で実行。既定の設定、この開発機): (a) 200 カット・1000 吹き出し・長さ 30 分(素材は画像)、(b) 30 分の動画の素材1つのカットに 1000 吹き出し。どちらも 30 分以内に完走し、ffmpeg を含むプロセス全体のメモリが合計 2 GiB 以内、`work/render/` の大きさが 2 GiB 以内であること。所要時間・メモリ・ディスクを記録する。
 - **prompts**: 出力の Markdown のゴールデン(登場人物の判定(カットをまたぐ台詞を含む)、`#visual` の無いカット、長さ 0 のカット、自分の作ったファイル以外を消さないこと)。
-- **bubbles のサーバー**: トークンとクッキー、Host、Origin、Content-Type、本文の大きさ、CSP などのヘッダー、メディアの照合(リンク、カット ID の不正)、Range(単一・末尾の切り詰め・`bytes=-n`・`bytes=-0`・複数・書式違い・満たせない・あふれ・空のファイル、206 と 416 の `Content-Length`)、`HEAD`、`Content-Type`、起動後に素材を差し替えても照合時の内容が返ること、保存と `.bak`、文字が収まらない大きさ・offset の逆転・上限超過の拒否、メディアの読み出しの途中でも API が応答すること、並列の Range、`/media/frame` のコマの取り出し・打ち切り・出力の上限、`bubbles` の実行中に素材を上書き・削除・改名できないこと(共有モード)、保存の各段階の失敗の注入、`/api/render` の原点のずれと切り詰め、入力の検証(上限・あふれ)、`/api/state` の各カット・各項目のコマの範囲が `render` の計算(`plan_cuts` と表示の区間)と一致すること、`render` と同じ配置(共通の `scene` を使うこと。切り出し後も `render` の既存のテストが通ること)、ffmpeg・ffprobe の呼び出しに `-protocol_whitelist file` があること、埋め込みの JS に `innerHTML` が無いこと。HTTP のテストは標準ライブラリの `TcpStream` で生の要求を送る。画面の操作は Chrome の自動操作で確認する(台詞に `<script>` などを含む台本で、文字として表示されること)。
+- **bubbles のサーバー**: トークンとクッキー、Host、Origin、Content-Type、本文の大きさ、CSP などのヘッダー、メディアの照合(リンク、カット ID の不正)、Range(単一・末尾の切り詰め・`bytes=-n`・`bytes=-0`・複数・書式違い・満たせない・あふれ・空のファイル、206 と 416 の `Content-Length`)、`HEAD`、`Content-Type`、起動後に素材を差し替えても照合時の内容が返ること、保存と `.bak`、文字が収まらない大きさ・offset の逆転・上限超過の拒否、メディアの読み出しの途中でも API が応答すること、並列の Range、`/media/frame` のコマの取り出し・打ち切り・出力の上限、`bubbles` の実行中に素材を上書き・削除・改名できないこと(共有モード)、保存の各段階の失敗の注入、`/api/render` の原点のずれと切り詰め、入力の検証(上限・あふれ)、`/api/state` の各カット・各項目のコマの範囲が `render` の計算(`plan_cuts` と表示の区間)と一致すること、同じ台本で `render` の重ね画像が切り替わるコマ(`ovl_XXXX.txt` の区間の境目)と、`/api/state` の項目の `frames` から求めた切り替えのコマが一致すること(ffmpeg の結合テスト)、素材の中のコマの式(止める・ループ)、メディアのスレッド・ffmpeg のワーカーが上限で 503 になった後、終われば次の要求が成功すること、`render` と同じ配置(共通の `scene` を使うこと。切り出し後も `render` の既存のテストが通ること)、ffmpeg・ffprobe の呼び出しに `-protocol_whitelist file` があること、埋め込みの JS に `innerHTML` が無いこと。HTTP のテストは標準ライブラリの `TcpStream` で生の要求を送る。画面の操作は Chrome の自動操作で確認する(台詞に `<script>` などを含む台本で、文字として表示されること)。
 - **ロック**: 2つ目のコマンドがロックを取れずに エラー 2 になること。
 - **予約名**: 台本のファイル名が追加の予約名(大文字小文字違いを含む)のとき エラー 2 になること。
 - 検証コマンド: `cargo fmt --check` / `cargo clippy --workspace --all-targets -- -D warnings` / `cargo test --workspace`。
