@@ -202,10 +202,8 @@ pub fn check_html(source: &str) -> Vec<String> {
                 has_src = true;
             }
         }
-        if name == "script" {
-            if !has_src {
-                out.push("禁止: src の無い <script>".to_string());
-            }
+        if name == "script" && !has_src {
+            out.push("禁止: src の無い <script>".to_string());
         }
     }
     out
