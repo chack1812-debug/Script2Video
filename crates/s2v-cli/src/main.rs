@@ -38,6 +38,13 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// timeline.json から素材のプロンプト(prompts/S01.md …)と一覧(prompts/index.md)を作る
+    Prompts {
+        script: PathBuf,
+        /// 設定ファイル(省略時は同梱の既定設定)
+        #[arg(long)]
+        config: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
@@ -57,6 +64,9 @@ fn main() -> ExitCode {
         }),
         Command::Render { script, config } => {
             s2v_cli::run_render(&s2v_cli::RenderArgs { script, config })
+        }
+        Command::Prompts { script, config } => {
+            s2v_cli::run_prompts(&s2v_cli::PromptsArgs { script, config })
         }
     };
     ExitCode::from(outcome.code())
