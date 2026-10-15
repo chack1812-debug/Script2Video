@@ -10,6 +10,8 @@ pub fn decode_args(path: &str) -> Vec<String> {
         "-n",
         "-v",
         "error",
+        "-protocol_whitelist",
+        "file",
         "-i",
         path,
         "-map",
@@ -184,8 +186,17 @@ mod tests {
     #[test]
     fn decode_args_have_nostdin_hide_banner_and_n() {
         assert_eq!(
-            &decode_args("o.mp4")[..6],
-            ["-nostdin", "-hide_banner", "-n", "-v", "error", "-i"]
+            &decode_args("o.mp4")[..8],
+            [
+                "-nostdin",
+                "-hide_banner",
+                "-n",
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-i"
+            ]
         );
     }
 

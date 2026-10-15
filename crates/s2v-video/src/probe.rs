@@ -46,6 +46,8 @@ pub fn probe_args(path: &str) -> Vec<String> {
     [
         "-v",
         "error",
+        "-protocol_whitelist",
+        "file",
         "-count_frames",
         "-show_streams",
         "-show_data_hash",
@@ -61,10 +63,19 @@ pub fn probe_args(path: &str) -> Vec<String> {
 
 /// 素材の検査用の ffprobe の引数(フレームは数えない)。
 pub fn asset_probe_args(path: &str) -> Vec<String> {
-    ["-v", "error", "-show_streams", "-of", "json", path]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    [
+        "-v",
+        "error",
+        "-protocol_whitelist",
+        "file",
+        "-show_streams",
+        "-of",
+        "json",
+        path,
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
 }
 
 /// 値が明示されているか(なし・unknown・unspecified は明示なし)。
@@ -410,6 +421,8 @@ mod tests {
             vec![
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file",
                 "-count_frames",
                 "-show_streams",
                 "-show_data_hash",
@@ -417,6 +430,19 @@ mod tests {
                 "-of",
                 "json",
                 "cut_0001.mp4"
+            ]
+        );
+        assert_eq!(
+            asset_probe_args("a.mp4"),
+            vec![
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-show_streams",
+                "-of",
+                "json",
+                "a.mp4"
             ]
         );
     }
