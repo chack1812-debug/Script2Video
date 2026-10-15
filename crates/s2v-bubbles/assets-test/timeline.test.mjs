@@ -91,3 +91,24 @@ test("player_transitions", () => {
   r = t.playerStep(loop, { playing: true, n: 164, cutId: "L" }, { type: "tick", audioSec: 165 / 30, videoSec: 1.9, ended: false });
   assert.deepEqual(r.actions[0], { type: "video-seek", time: 5 / 30 });
 });
+
+test("player_branches_pinned", () => {
+  // (a) 再生中の同じカットのシーク: cut-change なしで動画をシークして再生
+  let r = t.playerStep(state, { playing: true, n: 110, cutId: "C3" }, { type: "seek", n: 150 });
+  assert.deepEqual(types(r), ["audio-seek", "video-seek", "video-play"]);
+  // (b) 停止中の tick は何も出さない
+  const stopped = { playing: false, n: 110, cutId: "C3" };
+  r = t.playerStep(state, stopped, { type: "tick", audioSec: 5, videoSec: 0, ended: false });
+  assert.deepEqual(types(r), []);
+  assert.deepEqual(r.st, stopped);
+  // (c) カットが変わり、新しいカットが止める素材の最後(C3 の n=200)
+  r = t.playerStep(state, { playing: true, n: 99, cutId: "C1" }, { type: "tick", audioSec: 200 / 30, videoSec: 0, ended: false });
+  assert.deepEqual(types(r), ["cut-change", "video-pause", "video-seek"]);
+  assert.deepEqual(r.actions[2], { type: "video-seek", time: 59 / 30 });
+  // (d) 同じカットで最後のコマに止まっていれば何も出さない。ずれていれば止めて置き直す
+  const atEnd = { playing: true, n: 199, cutId: "C3" };
+  r = t.playerStep(state, atEnd, { type: "tick", audioSec: 200 / 30, videoSec: 59 / 30, ended: false });
+  assert.deepEqual(types(r), []);
+  r = t.playerStep(state, atEnd, { type: "tick", audioSec: 200 / 30, videoSec: 1.5, ended: false });
+  assert.deepEqual(types(r), ["video-pause", "video-seek"]);
+});

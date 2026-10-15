@@ -108,10 +108,11 @@ export function playerStep(state, st, ev) {
           else actions.push({ type: "video-seek", time: secOf(v.k) }, { type: "video-play" });
         }
       } else if (v) {
+        const drift = Math.abs(ev.videoSec - secOf(v.k)) >= 2 / fps - 1e-6;
         if (v.atEnd) {
-          // 止める素材の最後: 一時停止して最後のコマに置く
-          actions.push({ type: "video-pause" }, { type: "video-seek", time: secOf(v.k) });
-        } else if (Math.abs(ev.videoSec - secOf(v.k)) >= 2 / fps - 1e-6) {
+          // 止める素材の最後: すでに最後のコマで止まっていれば何もしない。ずれていれば止めて置き直す
+          if (drift) actions.push({ type: "video-pause" }, { type: "video-seek", time: secOf(v.k) });
+        } else if (drift) {
           // 2 コマ以上のずれ(浮動小数の誤差の許容つき)で合わせ直す
           actions.push({ type: "video-seek", time: secOf(v.k) }, { type: "video-play" });
         }
