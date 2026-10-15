@@ -677,6 +677,8 @@ fn two_servers_do_not_share_cookie() {
 fn embedded_assets_have_no_inner_html() {
     let html = include_str!("../src/assets/index.html");
     let css = include_str!("../src/assets/app.css");
+    let found = forbidden::check_html(html);
+    assert!(found.is_empty(), "index.html: {found:?}");
     // src/assets の全ての .js を対象にする(Node が無くても最低限の検査が残る)
     let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets");
     let mut checked = 0;
@@ -686,15 +688,8 @@ fn embedded_assets_have_no_inner_html() {
             continue;
         }
         let js = std::fs::read_to_string(&path).unwrap();
-        for bad in [
-            "innerHTML",
-            "outerHTML",
-            "insertAdjacentHTML",
-            "document.write",
-            "eval(",
-        ] {
-            assert!(!js.contains(bad), "{} に {bad} があります", path.display());
-        }
+        let found = forbidden::check_js(&js);
+        assert!(found.is_empty(), "{}: {found:?}", path.display());
         checked += 1;
     }
     assert!(checked >= 2, "app.js と geom.js を検査できていません");
@@ -1021,5 +1016,58 @@ fn frame_spawn_failure_is_500_and_next_request_succeeds() {
         assert_eq!(r.status, 503);
         assert!(Instant::now() < deadline, "回復しません");
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn forbidden_checker_detects_violations() {
+    for bad in [
+        "a.innerHTML = x",
+        "e.outerHTML=1",
+        "e.insertAdjacentHTML('a', s)",
+        "document.write(s)",
+        "eval(s)",
+        "new Function('x')",
+        "setTimeout('f()', 1)",
+        "setInterval(\"f()\", 1)",
+        "e.setAttribute('style', 'x')",
+        "e.setAttribute(\"onclick\", f)",
+        "e.style.cssText = s",
+    ] {
+        assert!(!forbidden::check_js(bad).is_empty(), "{bad}");
+    }
+    for bad in [
+        "<div onclick=\"x\">",
+        "<DIV\nONLOAD=x>",
+        "<p style = \"a\">",
+        "<STYLE>p{}</STYLE>",
+        "<script>alert(1)</script>",
+        "<script src=\"https://cdn.example/x.js\"></script>",
+        "<script src=\"//cdn.example/x.js\"></script>",
+    ] {
+        assert!(!forbidden::check_html(bad).is_empty(), "{bad}");
+    }
+}
+
+#[test]
+fn forbidden_checker_allows_good_code() {
+    for ok in [
+        "e.style.left = '1px'",
+        "e.textContent = s",
+        "setTimeout(() => f(), 300)",
+        "// innerHTML は使わない(コメント)",
+        "/* eval( */ const a = 1;",
+        "e.addEventListener('click', f)",
+        "retrieval(x); // eval(",
+    ] {
+        assert_eq!(forbidden::check_js(ok), Vec::<String>::new(), "{ok}");
+    }
+    for ok in [
+        "<script type=\"module\" src=\"/app.js\"></script>",
+        "<link rel=\"stylesheet\" href=\"/app.css\">",
+        "<p>style や onclick という言葉は本文なら可</p>",
+        "<button id=\"save\" type=\"button\">保存</button>",
+    ] {
+        assert_eq!(forbidden::check_html(ok), Vec::<String>::new(), "{ok}");
     }
 }

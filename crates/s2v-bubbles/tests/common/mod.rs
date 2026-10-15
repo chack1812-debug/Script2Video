@@ -1,6 +1,8 @@
 //! HTTP の結合テストの共通の補助(Session の組み立て、起動、生の HTTP の送受信)。
 #![allow(dead_code)]
 
+pub mod forbidden;
+
 use s2v_bubbles::api::{Session, SessionAsset};
 use s2v_bubbles::media::{open_locked, LockedFile};
 use s2v_bubbles::server::{LogEvent, QuitHandle, ServeOptions, Server};
