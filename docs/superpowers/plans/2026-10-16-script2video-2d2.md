@@ -82,7 +82,7 @@
 - `app.js` が状態を持つ: `state`(`/api/state`)、`editor`(`model.Editor`)、`cache`(`model.ImageCache`)、`frames`(`model.FrameFetcher`)、`ui = {n, selected, playing, dragging}`。他のモジュールは `app.js` から渡された関数と値だけを使う。
 - `view.js`(Task 5)の公開: `mountView(root, state, handlers)`(`handlers = {onSelectItem(id), onSeek(n), onPlayToggle(), onSave(), onQuit(), onRevertAuto(id), onNumberCommit(id, field, value)}`)→ `{renderList(items, selected), renderFrame({n, cut, items, cache, selected}), setBackground(spec), setStatus(text), setWarnings(list), setDirty(bool), setNumbers(item|null), previewElement(), overlayLayer()}`。`setBackground(spec)` の `spec` は `{kind:"none"|"image"|"video"|"frame"|"unavailable", url?, fit, background}`。
 - `player.js`(Task 6)の公開: `createPlayer({audio, video, state, getN, setN, frames, onSessionLost})` → `{play(), stop(), seek(n), onCutChange(cut), tick()}`(`timeline.playerStep` の結果を DOM に適用する)。
-- `editor_ui.js`(Task 7・8)の公開: `attachEditing({view, editor, state, ui, redraw, toast})` → `{flushPending(): Promise}`(矢印キーの待ちと入力中の数値の欄を `enqueue` する。保存・終了の前に呼ぶ)。
+- `editor_ui.js`(Task 7・8)の公開: `attachEditing({view, editor, state, ui, player, cache, redraw, toast})` → `{flushPending(): Promise}`(矢印キーの待ちと入力中の数値の欄を `enqueue` する。保存・終了の前に呼ぶ)。
 
 ---
 
@@ -104,7 +104,7 @@
   - `dragTail(start, px, py, cw, ch)` → `{dx, dy}`(先端の canvas の座標 (px, py) を四捨五入し、`0..=cw`・`0..=ch` に収め、`tailCenter` からの相対)
   - `nudge(p, key, shift, cw, ch)` → 配置(`"ArrowLeft"|"ArrowRight"|"ArrowUp"|"ArrowDown"`。1px、shift なら 10px。`clampRect` と `clampTail`)。それ以外のキーは null
   - `hitTest(items, cx, cy)` → 項目 ID か null(`items` は `{id, placed, image, order}` の配列。枠 `placed` の矩形(端を含む)に (cx, cy) が入る項目のうち `order` の最大のもの)
-- Produces(`assets-test/forbidden.mjs`。Node 専用): `checkJs(source)` → 違反の文字列の配列、`checkHtml(source)` → 違反の文字列の配列。規則は Global Constraints の禁止。判定はコメントを除いてから行う(`//` の行コメントと `/* */`。文字列の中の `//` は除かない簡易な処理でよいが、陰性の見本で誤検出しないこと)。HTML は `<` から `>` のタグの中だけを見て、大文字小文字を区別せず、属性名 `on[a-z]+`・`style`、`<style`、`src` の無い `<script`、`src` が `/` で始まらない(同じオリジンでない)`<script` を違反とする。
+- Produces(`assets-test/forbidden.mjs`。Node 専用): `checkJs(source)` → 違反の文字列の配列、`checkHtml(source)` → 違反の文字列の配列。規則は Global Constraints の禁止。判定はコメントを除いてから行う(`//` の行コメントと `/* */`。文字列の中の `//` は除かない簡易な処理でよいが、陰性の見本で誤検出しないこと)。HTML は `<` から `>` のタグの中だけを見て、大文字小文字を区別せず、属性名 `on[a-z]+`・`style`、`<style`、`src` の無い `<script`、`src` が `/` で始まらない、または `//` で始まる(同じオリジンでない)`<script` を違反とする。
 
 - [ ] **Step 1: 失敗するテストを書く**
 
@@ -204,7 +204,7 @@ test("forbidden_checker_detects_violations", () => {
     assert.ok(checkJs(bad).length > 0, bad);
   }
   for (const bad of ["<div onclick=\"x\">", "<DIV\nONLOAD=x>", "<p style = \"a\">", "<STYLE>p{}</STYLE>",
-    "<script>alert(1)</script>", "<script src=\"https://cdn.example/x.js\"></script>"]) {
+    "<script>alert(1)</script>", "<script src=\"https://cdn.example/x.js\"></script>", "<script src=\"//cdn.example/x.js\"></script>"]) {
     assert.ok(checkHtml(bad).length > 0, bad);
   }
 });
@@ -281,8 +281,8 @@ fn node_unit_tests_pass() {
   - `playerStep(st, ev)` → `{st, actions}`。状態 `st = {playing, n, cutId}`。出来事 `ev`:
     - `{type:"play"}`: `playing = true`。actions: `audio-seek(n/fps)`、`audio-play`、今のカットが動画なら `video-seek(k/fps)` と(止める素材の最後でなければ)`video-play`。
     - `{type:"stop"}`: `playing = false`。actions: `audio-pause`、`video-pause`、今のカットが動画なら `video-seek(k/fps)` と `wait-seeked`。
-    - `{type:"seek", n}`(スライダー・一覧): n を変える。再生中なら `audio-seek(n/fps)` と、カットが変われば `cut-change`。停止中なら `cut-change`(変われば)と、動画なら `video-seek(k/fps)`・`wait-seeked`。
-    - `{type:"tick", audioSec, videoSec, ended}`(再生中の `requestAnimationFrame`): `ended` なら `stop` と同じにして `n = total − 1`。そうでなければ `n = frameFromAudio(audioSec)`。カットが変われば `cut-change` と、動画なら `video-seek(k/fps)`・`video-play`(止める素材の最後なら `video-pause` と最後のコマへの `video-seek`)。カットが同じで動画なら: 止める素材の最後(`!looped` かつ `d ≥ frames − 1`)で `video-pause` と最後のコマへの `video-seek`、それ以外で `|videoSec − k/fps| ≥ 2/fps − 1e-6` なら `video-seek(k/fps)`(と再生中なら `video-play`)。
+    - `{type:"seek", n}`(スライダー・一覧): n とカットを新しい値にする。再生中なら `audio-seek(n/fps)`、カットが変われば `cut-change`、新しいカットが動画なら `video-seek(k/fps)` と、止める素材の最後なら `video-pause`、それ以外は `video-play`。停止中なら `cut-change`(変われば)と、動画なら `video-seek(k/fps)`・`wait-seeked`。
+    - `{type:"tick", audioSec, videoSec, ended}`(再生中の `requestAnimationFrame`): `ended` なら `playing = false`、`n = total − 1`、カット = `cutAt(total − 1)`、actions は `audio-pause`・`video-pause`、カットが変わっていれば `cut-change`、新しいカットが動画なら `video-seek(k/fps)`(k はコマ `total − 1` の素材の中のコマ)・`wait-seeked`。そうでなければ `n = frameFromAudio(audioSec)`。カットが変われば `cut-change` と、動画なら `video-seek(k/fps)`・`video-play`(止める素材の最後なら `video-pause` と最後のコマへの `video-seek`)。カットが同じで動画なら: 止める素材の最後(`!looped` かつ `d ≥ frames − 1`)で `video-pause` と最後のコマへの `video-seek`、それ以外で `|videoSec − k/fps| ≥ 2/fps − 1e-6` なら `video-seek(k/fps)`(と再生中なら `video-play`)。
     - 動画の素材は常に消音(`player.js` が `muted = true` にする)。actions は配列で、`{type:"audio-seek", time}`・`{type:"audio-play"}`・`{type:"audio-pause"}`・`{type:"video-seek", time}`・`{type:"video-play"}`・`{type:"video-pause"}`・`{type:"wait-seeked"}`・`{type:"cut-change", cutId}`。
   - `playerStep` は `state`(`/api/state`)を `st` とは別の引数で受ける: `playerStep(state, st, ev)`。
 
@@ -363,10 +363,17 @@ test("player_transitions", () => {
   r = t.playerStep(state, { playing: true, n: 120, cutId: "C3" }, { type: "stop" });
   assert.deepEqual(types(r), ["audio-pause", "video-pause", "video-seek", "wait-seeked"]);
   assert.equal(r.st.playing, false);
-  // 音声の終わり: 停止して最後のコマ
-  r = t.playerStep(state, { playing: true, n: 298, cutId: "C3" }, { type: "tick", audioSec: 10, videoSec: 1.9, ended: true });
+  // 音声の終わり: 停止して最後のコマ。C1(n=99)から終わっても、最後のコマの C3 に切り替えて k = min(299−100, 59) = 59 で止まる
+  r = t.playerStep(state, { playing: true, n: 99, cutId: "C1" }, { type: "tick", audioSec: 10, videoSec: 0, ended: true });
   assert.equal(r.st.playing, false);
   assert.equal(r.st.n, 299);
+  assert.equal(r.st.cutId, "C3");
+  assert.deepEqual(types(r), ["audio-pause", "video-pause", "cut-change", "video-seek", "wait-seeked"]);
+  assert.deepEqual(r.actions[3], { type: "video-seek", time: 59 / 30 });
+  // 再生中のシーク(C1 → C3 の先頭): 動画もシークして再生する
+  r = t.playerStep(state, { playing: true, n: 50, cutId: "C1" }, { type: "seek", n: 100 });
+  assert.deepEqual(types(r), ["audio-seek", "cut-change", "video-seek", "video-play"]);
+  assert.equal(r.st.cutId, "C3");
   // 停止中の連続シーク: それぞれシークして待つ
   r = t.playerStep(state, { playing: false, n: 120, cutId: "C3" }, { type: "seek", n: 121 });
   assert.deepEqual(types(r), ["video-seek", "wait-seeked"]);
@@ -397,15 +404,15 @@ test("player_transitions", () => {
   - `validateOffset(v)` → `{ok:true, value}` か `{ok:false, reason}`(整数・`|v| ≤ 60000`。数字の文字列も受ける)
   - `changedImages(oldItems, newItems)` → PNG を捨てる ID(`placed` の x・y・w・h・tail、`clipped`、`image` のどれかが違う項目と、新しく現れた項目)
   - `class Editor`(`constructor(api, state)`):
-    - `items`(表示の正本。起動時は `state.items`)、`confirmed`(確定済みの一式。起動時は `state.items[].manual` が null でないものから作る)、`saved`(保存済みの一式の正規化した JSON 文字列。起動時は `confirmed` と同じ)、`generation`(確定のたびに増える整数)
+    - `items`(表示の正本。起動時は `state.items`)、`confirmed`(確定済みの一式。起動時は `state.items[].manual` が null でないものから作る)、`saved`(保存済みの一式の正規化した JSON 文字列。起動時は `confirmed` と同じ)
     - `addPendingFlusher(fn)`(`fn() → Promise`。保存・終了の前に呼ぶ保留中の入力の確定。Task 7 が矢印キーと数値の欄を登録する)
-    - `enqueue(id, placementOrNull)` → Promise<`{ok:true, changed:[ID]}` | `{rejected:true, id, errors}`>(1 つずつ処理。一式 = `confirmed` の写し + この編集(null なら ID を消す)。`render({id, manual: withKind(一式, items)})` が ok → `layout({manual: withKind(一式, items)})` が ok のときだけ `confirmed = 一式`、`items = layout の items`、`generation += 1`、`changed = changedImages(古い items, 新しい items)`。null(自動に戻す)のときも render(その項目、自動の配置)と layout の両方を呼ぶ。どちらかが ok でなければ何も変えずに `rejected`)
+    - `enqueue(id, placementOrNull)` → Promise<`{ok:true, changed:[ID]}` | `{rejected:true, id, errors}`>(1 つずつ処理。一式 = `confirmed` の写し + この編集(null なら ID を消す)。`render({id, manual: withKind(一式, items)})` が ok → `layout({manual: withKind(一式, items)})` が ok のときだけ `confirmed = 一式`、`items = layout の items`、`changed = changedImages(古い items, 新しい items)`。null(自動に戻す)のときも render(その項目、自動の配置)と layout の両方を呼ぶ。どちらかが ok でなければ何も変えずに `rejected`)
     - `lastQueued(id)` → 最後に待ち行列へ入れた値(処理中・未処理を含む。無ければ `confirmed[id]`。自動に戻したなら null)
     - `flush()` → 待ち行列が空になるまで待つ
     - `save()` → Promise(全ての `addPendingFlusher` の関数を呼んで待つ → `flush()` → `confirmed` の写しを送る → ok なら `saved = 送った写し`)
     - `isDirty()` → `confirmed` と `saved` が違えば true
   - `class FrameFetcher`(`constructor(fetchFrame)`。`fetchFrame(cutId, n) → Promise<{ok, blob?}>`): `setCurrent(cutId, n)`、`request(cutId, n, onResult)`(同時に1件だけ。処理中の間の要求は最新の1件だけを残して1件目の後に送る。応答は、そのときの `setCurrent` の値と一致するときだけ `onResult(blob)` を呼ぶ)
-  - `class ImageCache`(`constructor(max = 300, revoke)`): `get(id, generation)`(登録時の世代が `generation` 以上なら URL、それ以外は undefined)、`set(id, url, generation)`(**登録時に `generation` が今の `editor.generation` より古い要求の結果なら登録しない**判定は呼び出し側が `isCurrent(generation)` で行う。上限を超えたら使った順の古いものを捨てて `revoke(url)`。同じ ID の置き換えでも古い URL を `revoke`)、`drop(ids)`(`revoke` する)、`isCurrent(requestGeneration, editorGeneration)` → `requestGeneration === editorGeneration`
+  - `class ImageCache`(`constructor(max = 300, revoke)`。項目ごとの版で古い応答を捨てる): `version(id)` → 整数(初めは 0)、`get(id)` → URL か undefined(使った順を更新)、`set(id, url, requestedVersion)` → 真偽(`requestedVersion` が今の `version(id)` と同じときだけ登録して true。違えば登録せず `revoke(url)` して false。上限を超えたら使った順の古いものを捨てて `revoke`。同じ ID の置き換えでも古い URL を `revoke`)、`drop(ids)`(各 ID の URL を `revoke` して消し、`version` を 1 増やす)。変わっていない項目は `drop` されないので、その URL は使い続ける
 
 - [ ] **Step 1: 失敗するテストを書く**(`assets-test/model.test.mjs`)
 
@@ -488,7 +495,6 @@ test("layout_replaces_all_items_and_drops_images", async () => {
   assert.deepEqual(r.changed, ["A"]);
   assert.deepEqual(ed.items[0].frames, [3, 9]);
   assert.equal(ed.items[0].order, 1);
-  assert.equal(ed.generation, 1);
   assert.equal(ed.isDirty(), true);
 });
 
@@ -498,7 +504,7 @@ test("layout_failure_after_render_success_rejects", async () => {
   const r = await ed.enqueue("A", P({ start_offset_ms: 9999 }));
   assert.equal(r.rejected, true);
   assert.equal(ed.confirmed.A, undefined);
-  assert.equal(ed.generation, 0);
+  assert.equal(ed.items[0].placed.x, 0); // 表示の正本も変えない
 });
 
 test("revert_to_auto_removes_from_manual", async () => {
@@ -584,15 +590,35 @@ test("frame_requests_coalesce_and_drop_stale", async () => {
 });
 
 test("stale_png_is_not_registered", () => {
+  // A の PNG を要求した後(版 0)、確定で A が変わり drop された(版 1)。遅れて返った版 0 の応答は登録しない
+  const revoked = [];
+  const c = new ImageCache(10, (u) => revoked.push(u));
+  const v0 = c.version("A");
+  c.drop(["A"]);
+  assert.equal(c.set("A", "old", v0), false);
+  assert.equal(c.get("A"), undefined);
+  assert.deepEqual(revoked, ["old"]);
+  assert.equal(c.set("A", "new", c.version("A")), true);
+  assert.equal(c.get("A"), "new");
+});
+
+test("unchanged_images_are_reused_after_commit", async () => {
+  // 確定で B だけが変わったとき、A の PNG は捨てずに使い続ける
+  const after = baseItems(); after[1].placed = P({ x: 260 });
+  const api = { render: async () => ({ ok: true, png: new Uint8Array([1]), origin: [0, 0], clipped: false }), layout: async () => ({ ok: true, items: after }) };
+  const ed = new Editor(api, { items: baseItems() });
   const c = new ImageCache(10, () => {});
-  assert.equal(c.isCurrent(1, 2), false);  // 世代 1 の要求の結果は、世代 2 では登録しない
-  assert.equal(c.isCurrent(2, 2), true);
+  c.set("A", "uA", c.version("A")); c.set("B", "uB", c.version("B"));
+  const r = await ed.enqueue("B", P({ x: 260 }));
+  c.drop(r.changed);
+  assert.equal(c.get("A"), "uA");
+  assert.equal(c.get("B"), undefined);
 });
 
 test("image_cache_limit_and_revoke", () => {
   const revoked = [];
   const c = new ImageCache(2, (u) => revoked.push(u));
-  c.set("A", "u1", 0); c.set("B", "u2", 0); c.get("A", 0); c.set("C", "u3", 0);
+  c.set("A", "u1", 0); c.set("B", "u2", 0); c.get("A"); c.set("C", "u3", 0);
   assert.deepEqual(revoked, ["u2"]);
   c.set("A", "u4", 0);
   assert.deepEqual(revoked, ["u2", "u1"]);
@@ -688,11 +714,11 @@ test("api_requests_use_same_origin_and_json", async () => {
 - Consumes: Task 1〜4。「DOM のモジュールの契約」の `mountView`。
 - 振る舞い(設計書 §5.3):
   - 起動: `createApi(fetch, onSessionLost)` → `getState()` → `Editor`・`ImageCache(300, URL.revokeObjectURL)`・`FrameFetcher(api.frame)` を作り、一覧・スライダー(`max = sliderMax`)を描く。
-  - コマの描画 `redraw(n)`: `cutAt` → 背景(画像は `<img>` に `fit` を `object-fit` で、余白の色を `background`、動画は `<video muted playsinline preload="auto">`、素材なしは「素材なし」の文字)→ `itemsAt(editor.items, n)` を `order` の順に、各項目の PNG(`cache.get(id, editor.generation)`。無ければ `api.render({id, manual: withKind(editor.confirmed, editor.items)})` を世代つきで要求し、返ったとき `cache.isCurrent(要求の世代, editor.generation)` なら `set` して描き直す)を `placed.x + image.dx` などの位置に重ねる(位置と大きさは `fitView` の scale を掛けて `element.style.left` などで設定)。
+  - コマの描画 `redraw(n)`: `cutAt` → 背景(画像は `<img>` に `fit` を `object-fit` で、余白の色を `background`、動画は `<video muted playsinline preload="auto">`、素材なしは「素材なし」の文字)→ `itemsAt(editor.items, n)` を `order` の順に、各項目の PNG(`cache.get(id)`。無ければ `v = cache.version(id)` を覚えて `api.render({id, manual: withKind(editor.confirmed, editor.items)})` を要求し、返ったとき `cache.set(id, URL.createObjectURL(png), v)` が true なら描き直す。PNG の原点のずれは要求の応答の `origin` ではなく `editor.items` の `image` を使う(layout の結果と同じ値))を `placed.x + image.dx` などの位置に重ねる(位置と大きさは `fitView` の scale を掛けて `element.style.left` などで設定)。
   - 素材の読み込みエラー: `<img>`・`<video>` の `error` で `api.head(url)` → 403 ならセッション切れの表示、動画ならそのカットを frame に切り替え(`frames.setCurrent` と `frames.request` で `<img>` に blob を表示)、frame も失敗なら「プレビューできません」。
   - セッション切れ: 状態の表示に文を出し、以降の要求と再生を止める(`ui.sessionLost = true`)。
   - 一覧: シーン → カット → 項目。手動配置の印(`editor.confirmed` にある)・切り詰めの印(`clipped`)。台本の文字は `textContent` だけ。
-- [ ] **Step 1: テストを書く** — `tests/http.rs` に `embedded_modules_are_served`(`/geom.js`・`/timeline.js`・`/model.js`・`/api.js`・`/view.js`・`/app.js` が `text/javascript; charset=utf-8` で 200(クッキーあり)、クッキーなしで 403)と `index_loads_app_as_module`(`/` の本文に `type="module"` と `src="/app.js"`)。
+- [ ] **Step 1: テストを書く** — 2d-1 の既存のテスト `embedded_assets_have_no_inner_html`(`<script src="/app.js"` を要求している)を、`<script type="module" src="/app.js">` を要求するように直す。`tests/http.rs` に `embedded_modules_are_served`(`/geom.js`・`/timeline.js`・`/model.js`・`/api.js`・`/view.js`・`/app.js` が `text/javascript; charset=utf-8` で 200(クッキーあり)、クッキーなしで 403)と `index_loads_app_as_module`(`/` の本文に `type="module"` と `src="/app.js"`)。
 - [ ] **Step 2〜4**: 実装し、`cargo test -p s2v-bubbles` で通す。手で `script2video bubbles <sample> --no-open` を起動して開き、開発者ツールのコンソールに CSP の違反・エラーが無いこと、全てのモジュールが読み込まれたこと(ネットワークの表)を報告に書く。
 - [ ] **Step 5: 全体の検証とコミット** — `feat: bubbles の画面に一覧・プレビュー・スライダーを加える`
 
