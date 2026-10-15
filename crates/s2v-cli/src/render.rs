@@ -12,17 +12,14 @@ use s2v_core::config::{Fit as CoreFit, RenderConfig};
 use s2v_core::Config;
 use s2v_export::wavio::read_stereo_48k;
 use s2v_render::assets::{match_assets, Asset, AssetKind};
-use s2v_render::autolayout::{auto_layout, AutoParams, LayoutItem};
-use s2v_render::bubbles::{
-    effective_times, expand_to_min, parse_bubbles, scale_to, BubblesFile, Canvas, Placed,
-};
-use s2v_render::draw::{
-    composite, render as render_item, render_clipped, ItemSpec, Overlay, Style,
-};
+use s2v_render::bubbles::{parse_bubbles, scale_to, BubblesFile, Placed};
+use s2v_render::draw::Overlay;
 use s2v_render::font::{FontFace, VerticalFeature};
-use s2v_render::layout::{fits, min_size, LayoutContext};
+use s2v_render::scene::{
+    build_items, compose, draw_item, missing_glyph_warnings, place_items, Item, Placement,
+};
 use s2v_render::ItemKind;
-use s2v_timeline::{Timeline, VisualKind};
+use s2v_timeline::VisualKind;
 use s2v_video::audio_check::{check_audio, check_av_length, decode_args, f32le, is_silent};
 use s2v_video::ffmpeg::{
     check_ffprobe_version, check_version, concat_args, concat_list, cut_args, mux_args, Background,
@@ -106,81 +103,6 @@ fn render(args: &RenderArgs) -> anyhow::Result<Outcome> {
             Ok(Outcome::Failed)
         }
     }
-}
-
-/// 台本の項目(吹き出しまたはト書き)。時刻は `effective_times` を通した表示時刻。
-#[derive(Debug, Clone, PartialEq)]
-struct Item {
-    id: String,
-    kind: ItemKind,
-    text: String,
-    start_ms: i64,
-    end_ms: i64,
-    /// 台本の並び(台詞が先、ト書きが後。同じ種類の中の順序だけが意味を持つ)
-    order: usize,
-}
-
-/// timeline.json から項目を作り、`bubbles.json` の offset を反映する。
-/// 長さ 0 の項目は警告して除く。`timeline` に無い手動配置の ID は警告する。
-fn build_items(
-    tl: &Timeline,
-    manual: &BTreeMap<String, Placed>,
-    warnings: &mut Vec<String>,
-) -> Result<Vec<Item>, String> {
-    let mut raw: Vec<(&str, ItemKind, &str, i64, i64)> = Vec::new();
-    for l in &tl.lines {
-        raw.push((&l.id, ItemKind::Bubble, &l.text, l.start_ms, l.end_ms));
-    }
-    for sc in &tl.scenes {
-        for n in &sc.notes {
-            raw.push((&n.id, ItemKind::Note, &n.text, n.start_ms, n.end_ms));
-        }
-    }
-    let mut items = Vec::new();
-    for (order, (id, kind, text, s, e)) in raw.iter().enumerate() {
-        let p = manual.get(*id);
-        let has_offset = p.is_some_and(|p| p.start_offset_ms != 0 || p.end_offset_ms != 0);
-        if s >= e && !has_offset {
-            warnings.push(format!("{id}: 表示の長さが 0 なので映像に出しません"));
-            continue;
-        }
-        let (start_ms, end_ms) =
-            effective_times(*s, *e, p, tl.duration_ms).map_err(|m| format!("{id}: {m}"))?;
-        items.push(Item {
-            id: id.to_string(),
-            kind: *kind,
-            text: text.to_string(),
-            start_ms,
-            end_ms,
-            order,
-        });
-    }
-    let known: BTreeSet<&str> = raw.iter().map(|r| r.0).collect();
-    for id in manual.keys() {
-        if !known.contains(id.as_str()) {
-            warnings.push(format!(
-                "bubbles.json の {id} は timeline.json にありません(無視します)"
-            ));
-        }
-    }
-    Ok(items)
-}
-
-/// フォントに無い文字がある項目ごとの警告。
-fn missing_glyph_warnings(face: &FontFace, items: &[Item]) -> Vec<String> {
-    items
-        .iter()
-        .filter_map(|it| {
-            let m = face.missing_chars(&it.text);
-            (!m.is_empty()).then(|| {
-                let chars: String = m.iter().collect();
-                format!(
-                    "{}: フォントに無い文字があります(代わりの字形で描きます): {chars}",
-                    it.id
-                )
-            })
-        })
-        .collect()
 }
 
 /// `max(1, 論理コア数 ÷ jobs)`。
@@ -401,135 +323,6 @@ fn resolve_backgrounds(
     }
 }
 
-fn render_ctx<'a>(face: &'a FontFace, cfg: &RenderConfig, kind: ItemKind) -> LayoutContext<'a> {
-    let (padding, ratio) = match kind {
-        ItemKind::Bubble => (cfg.bubble_padding, cfg.bubble_max_height_ratio),
-        ItemKind::Note => (cfg.note_padding, cfg.note_max_height_ratio),
-    };
-    LayoutContext {
-        face,
-        font_size: cfg.font_size,
-        line_spacing: cfg.line_spacing,
-        padding,
-        max_inner_h: (cfg.height as f32 * ratio).round() as u32,
-    }
-}
-
-/// 項目の位置と大きさを決める。手動の項目で枠に収まらなければ広げて警告し、残りは自動配置する。
-fn place_items(
-    items: &[Item],
-    manual: &BTreeMap<String, Placed>,
-    cfg: &RenderConfig,
-    face: &FontFace,
-    warnings: &mut Vec<String>,
-) -> (BTreeMap<String, Placed>, BTreeSet<String>) {
-    let canvas = Canvas {
-        w: cfg.width,
-        h: cfg.height,
-    };
-    let mut placed: BTreeMap<String, Placed> = BTreeMap::new();
-    let mut manual_clipped: BTreeSet<String> = BTreeSet::new();
-    let mut layout_items = Vec::new();
-    for it in items {
-        let ctx = render_ctx(face, cfg, it.kind);
-        let size = match manual.get(&it.id) {
-            Some(p) => {
-                let p = if fits(&ctx, &it.text, p.w, p.h) {
-                    p.clone()
-                } else {
-                    let min = min_size(&ctx, &it.text);
-                    warnings.push(format!(
-                        "{}: 文字が枠に収まらないので {}x{} に広げます(元は {}x{})",
-                        it.id,
-                        p.w.max(min.0),
-                        p.h.max(min.1),
-                        p.w,
-                        p.h
-                    ));
-                    let mut q = expand_to_min(p, min, canvas);
-                    // 広げても画面に入らないときは画面の大きさに切り詰め、枠の中で切って描く
-                    if q.w > canvas.w || q.h > canvas.h {
-                        q.w = q.w.min(canvas.w);
-                        q.h = q.h.min(canvas.h);
-                        q.x = q.x.clamp(0, (canvas.w - q.w) as i32);
-                        q.y = q.y.clamp(0, (canvas.h - q.h) as i32);
-                        warnings.push(format!(
-                            "{}: 文字が画面に収まらないので、画面の大きさ {}x{} に切り詰めます",
-                            it.id, q.w, q.h
-                        ));
-                        manual_clipped.insert(it.id.clone());
-                    }
-                    q
-                };
-                let size = (p.w, p.h);
-                placed.insert(it.id.clone(), p);
-                size
-            }
-            None => min_size(&ctx, &it.text),
-        };
-        layout_items.push(LayoutItem {
-            id: it.id.clone(),
-            kind: it.kind,
-            start_ms: it.start_ms,
-            end_ms: it.end_ms,
-            order: it.order,
-            size,
-        });
-    }
-    // 時刻は effective_times で offset を反映済みなので、障害物の計算で二重に足さないよう 0 にする
-    let obstacles: BTreeMap<String, Placed> = placed
-        .iter()
-        .map(|(id, p)| {
-            (
-                id.clone(),
-                Placed {
-                    start_offset_ms: 0,
-                    end_offset_ms: 0,
-                    ..p.clone()
-                },
-            )
-        })
-        .collect();
-    let (auto, auto_warnings) = auto_layout(
-        &layout_items,
-        &obstacles,
-        &AutoParams {
-            canvas,
-            margin: cfg.margin,
-            bubble_gap: cfg.bubble_gap,
-            tail_length: cfg.tail_length,
-        },
-    );
-    warnings.extend(auto_warnings);
-    // 自動配置が画面の大きさに切り詰めた項目(min_size より小さく置かれたもの)
-    let mut clipped: BTreeSet<String> = layout_items
-        .iter()
-        .filter(|li| {
-            auto.get(&li.id)
-                .is_some_and(|a| a.w < li.size.0 || a.h < li.size.1)
-        })
-        .map(|li| li.id.clone())
-        .collect();
-    clipped.extend(manual_clipped);
-    placed.extend(auto);
-    (placed, clipped)
-}
-
-/// 項目を 1 つ描く。切り詰めた自動項目(`clipped`)だけ、収まらなくても入る部分を描く。
-/// それ以外は枠に収まらなければ Err。
-fn draw_one(
-    ctx: &LayoutContext,
-    style: &Style,
-    spec: &ItemSpec,
-    clipped: bool,
-) -> Result<Overlay, String> {
-    if clipped {
-        render_clipped(ctx, style, spec)
-    } else {
-        render_item(ctx, style, spec)
-    }
-}
-
 /// 重ね画像を描いて `seg` に PNG として書く。
 fn write_overlays(
     seg: &Path,
@@ -543,35 +336,24 @@ fn write_overlays(
     // 使われる項目だけを 1 回ずつ描く
     let used: BTreeSet<&String> = files.keys().flatten().collect();
     let by_id: BTreeMap<&str, &Item> = items.iter().map(|i| (i.id.as_str(), i)).collect();
-    let mut drawn: BTreeMap<&str, (i32, i32, Overlay)> = BTreeMap::new();
+    let mut drawn: BTreeMap<&str, Overlay> = BTreeMap::new();
     for id in used {
-        let it = by_id[id.as_str()];
-        let p = &placed[id];
-        let style = match it.kind {
-            ItemKind::Bubble => Style::bubble(cfg),
-            ItemKind::Note => Style::note(cfg),
-        };
-        let ctx = render_ctx(face, cfg, it.kind);
-        let spec = ItemSpec {
-            kind: it.kind,
-            text: &it.text,
-            w: p.w,
-            h: p.h,
-            tail: p.tail.map(|t| (t.dx, t.dy)),
-        };
-        let ov = draw_one(&ctx, &style, &spec, clipped.contains(id.as_str()))
-            .map_err(|e| format!("{id}: {e}"))?;
-        drawn.insert(id.as_str(), (p.x, p.y, ov));
+        let ov = draw_item(
+            by_id[id.as_str()],
+            &placed[id],
+            clipped.contains(id.as_str()),
+            cfg,
+            face,
+        )
+        .map_err(|e| format!("{id}: {e}"))?;
+        drawn.insert(id.as_str(), ov);
     }
     for (set, name) in files {
-        let layers: Vec<(i32, i32, &_)> = set
+        let layers: Vec<(&Placed, &Overlay)> = set
             .iter()
-            .map(|id| {
-                let (x, y, ov) = &drawn[id.as_str()];
-                (x + ov.dx, y + ov.dy, &ov.pixmap)
-            })
+            .map(|id| (&placed[id], &drawn[id.as_str()]))
             .collect();
-        let img = composite(cfg.width, cfg.height, &layers);
+        let img = compose(cfg, &layers);
         let png = img
             .encode_png()
             .map_err(|e| format!("{name} を PNG にできません: {e}"))?;
@@ -642,7 +424,7 @@ fn render_main(
     warnings.extend(missing_glyph_warnings(&face, &items));
 
     // 6. 大きさと位置
-    let (placed, clipped) = place_items(&items, &manual, cfg, &face, &mut warnings);
+    let Placement { placed, clipped } = place_items(&items, &manual, cfg, &face, &mut warnings);
     for w in &warnings {
         log.warn(w);
     }
@@ -932,117 +714,7 @@ fn run_parallel(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use s2v_timeline::{CutEntry, LineEntry, Normalize, NoteEntry, SceneEntry};
     use s2v_video::frames::Interval;
-
-    fn line(id: &str, text: &str, s: i64, e: i64) -> LineEntry {
-        LineEntry {
-            id: id.into(),
-            scene: "S01".into(),
-            cast: "A".into(),
-            text: text.into(),
-            start_ms: s,
-            end_ms: e,
-            take: "S01-L001".into(),
-            track: None,
-            measured_lufs: None,
-            requested_gain_db: None,
-            norm_gain_db: None,
-            norm_clamped: None,
-            src_start_ms: None,
-            src_end_ms: None,
-            missing: false,
-            reason: None,
-        }
-    }
-
-    fn timeline() -> Timeline {
-        Timeline {
-            schema_version: 3,
-            script: "s.txt".into(),
-            script_sha256: String::new(),
-            audio_sha256: String::new(),
-            sample_rate: 48000,
-            duration_ms: 5000,
-            normalize: Normalize { target_lufs: -16.0 },
-            cast: vec![],
-            scenes: vec![SceneEntry {
-                id: "S01".into(),
-                name: None,
-                index: 1,
-                silent: false,
-                start_ms: 0,
-                end_ms: 5000,
-                cuts: vec![CutEntry {
-                    id: "S01-C01".into(),
-                    start_ms: 0,
-                    end_ms: 5000,
-                    visual: None,
-                }],
-                notes: vec![NoteEntry {
-                    id: "S01-N01".into(),
-                    text: "翌朝、港。".into(),
-                    start_ms: 0,
-                    end_ms: 2000,
-                }],
-            }],
-            takes: vec![],
-            lines: vec![
-                line("S01-L001", "おはよう。", 500, 1500),
-                line("S01-L002", "さようなら。", 1500, 1500),
-            ],
-            events: vec![],
-        }
-    }
-
-    fn placed(start_off: i64, end_off: i64) -> Placed {
-        Placed {
-            kind: ItemKind::Bubble,
-            x: 10,
-            y: 10,
-            w: 50,
-            h: 80,
-            tail: None,
-            start_offset_ms: start_off,
-            end_offset_ms: end_off,
-        }
-    }
-
-    #[test]
-    fn items_are_built_from_timeline() {
-        let mut manual = BTreeMap::new();
-        manual.insert("S01-L001".to_string(), placed(-200, 300));
-        manual.insert("S01-L099".to_string(), placed(0, 0));
-        let mut warnings = Vec::new();
-        let items = build_items(&timeline(), &manual, &mut warnings).unwrap();
-        // 台詞 L001(offset 反映)とト書き N01。L002 は長さ 0 なので除かれる
-        let ids: Vec<&str> = items.iter().map(|i| i.id.as_str()).collect();
-        assert_eq!(ids, vec!["S01-L001", "S01-N01"]);
-        assert_eq!(items[0].kind, ItemKind::Bubble);
-        assert_eq!(items[0].text, "おはよう。");
-        assert_eq!((items[0].start_ms, items[0].end_ms), (300, 1800));
-        assert_eq!(items[1].kind, ItemKind::Note);
-        assert_eq!((items[1].start_ms, items[1].end_ms), (0, 2000));
-        assert!(
-            warnings.iter().any(|w| w.contains("S01-L002")),
-            "{warnings:?}"
-        );
-        assert!(
-            warnings.iter().any(|w| w.contains("S01-L099")),
-            "{warnings:?}"
-        );
-    }
-
-    #[test]
-    fn manual_times_are_clamped_and_empty_result_is_an_error() {
-        let mut manual = BTreeMap::new();
-        manual.insert("S01-L001".to_string(), placed(-60_000, 60_000));
-        let items = build_items(&timeline(), &manual, &mut Vec::new()).unwrap();
-        assert_eq!((items[0].start_ms, items[0].end_ms), (0, 5000)); // [0, duration] に収める
-        manual.insert("S01-L001".to_string(), placed(2000, -400));
-        let e = build_items(&timeline(), &manual, &mut Vec::new()).unwrap_err();
-        assert!(e.contains("S01-L001"), "{e}");
-    }
 
     fn plan(cut: &str, sets: &[(i64, &[&str])]) -> CutPlan {
         CutPlan {
@@ -1082,29 +754,6 @@ mod tests {
             vec!["ov_empty.png", "ov_0001.png", "ov_empty.png", "ov_0001.png"]
         );
         assert_eq!(per_cut[1][1], (5, "ov_0002.png".to_string()));
-    }
-
-    #[test]
-    fn only_clipped_items_may_overflow_the_frame() {
-        let face = FontFace::load(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../s2v-render/tests/fonts/test-vrt2.ttf"),
-            0,
-        )
-        .unwrap();
-        let cfg = RenderConfig::default();
-        let ctx = render_ctx(&face, &cfg, ItemKind::Note);
-        let style = Style::note(&cfg);
-        let spec = ItemSpec {
-            kind: ItemKind::Note,
-            text: "一二三四五",
-            w: 60,
-            h: 60,
-            tail: None,
-        };
-        // 切り詰めた印が無ければ、収まらない項目は Err(終了コード 2)
-        assert!(draw_one(&ctx, &style, &spec, false).is_err());
-        assert!(draw_one(&ctx, &style, &spec, true).is_ok());
     }
 
     #[test]
@@ -1182,33 +831,6 @@ mod tests {
     }
 
     #[test]
-    fn place_items_marks_only_items_shrunk_to_the_screen() {
-        let face = FontFace::load(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../s2v-render/tests/fonts/test-vrt2.ttf"),
-            0,
-        )
-        .unwrap();
-        let cfg = RenderConfig {
-            width: 320,
-            height: 180,
-            ..RenderConfig::default()
-        };
-        let item = |id: &str, text: &str| Item {
-            id: id.into(),
-            kind: ItemKind::Bubble,
-            text: text.into(),
-            start_ms: 0,
-            end_ms: 1000,
-            order: 0,
-        };
-        let items = vec![item("S01-L001", "あ"), item("S01-L002", &"あ".repeat(500))];
-        let mut w = Vec::new();
-        let (_, clipped) = place_items(&items, &BTreeMap::new(), &cfg, &face, &mut w);
-        assert_eq!(clipped.into_iter().collect::<Vec<_>>(), vec!["S01-L002"]);
-    }
-
-    #[test]
     fn manual_item_too_big_for_the_screen_is_clipped_inside_it() {
         let face = FontFace::load(
             &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
@@ -1244,7 +866,7 @@ mod tests {
         )]
         .into();
         let mut w = Vec::new();
-        let (placed, clipped) = place_items(&items, &manual, &cfg, &face, &mut w);
+        let Placement { placed, clipped } = place_items(&items, &manual, &cfg, &face, &mut w);
         let p = &placed["S01-L001"];
         assert!(p.x >= 0 && p.y >= 0, "{p:?}");
         assert!(p.x as u32 + p.w <= 320 && p.y as u32 + p.h <= 180, "{p:?}");
@@ -1322,32 +944,5 @@ mod tests {
         assert_eq!(threads_for(8, 3), 2);
         assert_eq!(threads_for(2, 4), 1);
         assert_eq!(threads_for(1, 64), 1);
-    }
-
-    #[test]
-    fn missing_glyphs_are_warned_per_item() {
-        let face = FontFace::load(
-            &PathBuf::from(env!("CARGO_MANIFEST_DIR"))
-                .join("../s2v-render/tests/fonts/test-vrt2.ttf"),
-            0,
-        )
-        .unwrap();
-        let item = |id: &str, text: &str| Item {
-            id: id.into(),
-            kind: ItemKind::Bubble,
-            text: text.into(),
-            start_ms: 0,
-            end_ms: 1,
-            order: 0,
-        };
-        let w = missing_glyph_warnings(
-            &face,
-            &[item("S01-L001", "おはよう。"), item("S01-L002", "龘ゑ")],
-        );
-        assert_eq!(w.len(), 1, "{w:?}");
-        assert!(
-            w[0].contains("S01-L002") && w[0].contains('龘') && w[0].contains('ゑ'),
-            "{w:?}"
-        );
     }
 }

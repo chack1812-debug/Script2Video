@@ -1,6 +1,6 @@
 //! コマ・区間・重ね画像の一覧の計算(設計書 §4.2、§4.5)。プロセスは起動しない。
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 /// 時刻(ミリ秒)をコマ番号にする。`floor((t*fps + 500) / 1000)`(0.5 は切り上げ)。
 pub fn frame(t_ms: i64, fps: u32) -> i64 {
@@ -42,15 +42,8 @@ pub struct CutPlan {
     pub intervals: Vec<Interval>,
 }
 
-/// cuts: (カット ID, start_ms, end_ms)(台本の並び、隙間なし)。コマ数 0 のカットは含めない。
-pub fn plan_cuts(
-    cuts: &[(String, i64, i64)],
-    items: &[ShownItem],
-    duration_ms: i64,
-    fps: u32,
-) -> Vec<CutPlan> {
-    let total = total_frames(duration_ms, fps);
-    // 重ねる順に並べる(ト書き → 吹き出し。表示開始の順、同時なら order)
+/// 重ねる順の項目 ID(ト書き → 吹き出し。表示開始の順、同時なら order)。
+pub fn stacking_order(items: &[ShownItem]) -> Vec<String> {
     let mut sorted: Vec<&ShownItem> = items.iter().collect();
     sorted.sort_by_key(|it| {
         (
@@ -59,9 +52,50 @@ pub fn plan_cuts(
             it.order,
         )
     });
-    let spans: Vec<(i64, i64, &str)> = sorted
+    sorted.into_iter().map(|it| it.id.clone()).collect()
+}
+
+/// 動画の素材の長さを出力の fps のコマ数にする(切り捨て)。time_base は "num/den"。
+pub fn asset_frames(duration_ts: i64, time_base: &str, fps: u32) -> Option<i64> {
+    let (num, den) = time_base.split_once('/')?;
+    let (num, den): (i128, i128) = (num.trim().parse().ok()?, den.trim().parse().ok()?);
+    if duration_ts <= 0 || num <= 0 || den <= 0 {
+        return None;
+    }
+    let v = (duration_ts as i128 * num * fps as i128).div_euclid(den);
+    (v > 0).then_some(v as i64)
+}
+
+/// カットのコマ n に表示する素材の中のコマ(最後のコマで止める、loop ならループする)。
+pub fn asset_frame(n: i64, n0: i64, asset_frames: i64, looped: bool) -> i64 {
+    if asset_frames <= 0 {
+        return 0;
+    }
+    let d = (n - n0).max(0);
+    if d < asset_frames {
+        d
+    } else if looped {
+        d % asset_frames
+    } else {
+        asset_frames - 1
+    }
+}
+
+/// cuts: (カット ID, start_ms, end_ms)(台本の並び、隙間なし)。コマ数 0 のカットは含めない。
+pub fn plan_cuts(
+    cuts: &[(String, i64, i64)],
+    items: &[ShownItem],
+    duration_ms: i64,
+    fps: u32,
+) -> Vec<CutPlan> {
+    let total = total_frames(duration_ms, fps);
+    // 重ねる順(ト書き → 吹き出し。表示開始の順、同時なら order)
+    let order = stacking_order(items);
+    let by_id: BTreeMap<&str, &ShownItem> = items.iter().map(|it| (it.id.as_str(), it)).collect();
+    let spans: Vec<(i64, i64, &str)> = order
         .iter()
-        .map(|it| {
+        .map(|id| {
+            let it = by_id[id.as_str()];
             (
                 frame(it.start_ms, fps),
                 frame(it.end_ms, fps),
@@ -153,6 +187,66 @@ pub fn overlay_list(intervals: &[(i64, String)], n: i64, fps: u32) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn asset_frame_freezes_or_loops() {
+        // 素材 60 コマ、カットの先頭 n0 = 100
+        assert_eq!(asset_frame(100, 100, 60, false), 0);
+        assert_eq!(asset_frame(159, 100, 60, false), 59);
+        assert_eq!(asset_frame(160, 100, 60, false), 59); // 最後のコマで止める
+        assert_eq!(asset_frame(300, 100, 60, false), 59);
+        assert_eq!(asset_frame(160, 100, 60, true), 0); // ループ
+        assert_eq!(asset_frame(225, 100, 60, true), 5);
+        assert_eq!(asset_frame(105, 100, 0, false), 0);
+    }
+
+    #[test]
+    fn asset_frames_from_probe_values() {
+        assert_eq!(asset_frames(180_000, "1/90000", 30), Some(60)); // 2 秒
+        assert_eq!(asset_frames(1001, "1/30000", 30), Some(1)); // 0.0333… 秒
+        assert_eq!(asset_frames(0, "1/90000", 30), None);
+        assert_eq!(asset_frames(100, "x", 30), None);
+        assert_eq!(asset_frames(100, "1/0", 30), None);
+    }
+
+    #[test]
+    fn stacking_order_matches_plan_cuts() {
+        let items = vec![
+            ShownItem {
+                id: "L2".into(),
+                is_note: false,
+                start_ms: 500,
+                end_ms: 900,
+                order: 1,
+            },
+            ShownItem {
+                id: "N1".into(),
+                is_note: true,
+                start_ms: 0,
+                end_ms: 900,
+                order: 5,
+            },
+            ShownItem {
+                id: "L1".into(),
+                is_note: false,
+                start_ms: 500,
+                end_ms: 900,
+                order: 0,
+            },
+            ShownItem {
+                id: "L0".into(),
+                is_note: false,
+                start_ms: 100,
+                end_ms: 900,
+                order: 9,
+            },
+        ];
+        assert_eq!(stacking_order(&items), ["N1", "L0", "L1", "L2"]);
+        let plans = plan_cuts(&[("C".into(), 0, 1000)], &items, 1000, 30);
+        // 全部が表示されている区間(最後の区間は全項目が終わった後で空になる)
+        let all = plans[0].intervals.iter().find(|iv| iv.items.len() == 4);
+        assert_eq!(all.unwrap().items, ["N1", "L0", "L1", "L2"]);
+    }
 
     #[test]
     fn frame_rounding() {
