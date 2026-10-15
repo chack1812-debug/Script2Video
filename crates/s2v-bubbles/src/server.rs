@@ -34,6 +34,7 @@ const PAGES: &[(&str, &str, &str)] = &[
     ("/geom.js", include_str!("assets/geom.js"), JS_TYPE),
     ("/timeline.js", include_str!("assets/timeline.js"), JS_TYPE),
     ("/model.js", include_str!("assets/model.js"), JS_TYPE),
+    ("/api.js", include_str!("assets/api.js"), JS_TYPE),
 ];
 
 /// メディアのスレッドの同時数の上限。
