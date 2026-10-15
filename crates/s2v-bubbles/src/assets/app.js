@@ -238,6 +238,8 @@ async function main() {
       selected: ui.selected,
       onMissing: requestImage,
     });
+    // 選択の枠とつまみも、再生中の描き直しにそろえる
+    if (ext.editing) ext.editing.sync();
   }
 
   const audio = document.createElement("audio");
