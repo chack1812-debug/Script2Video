@@ -131,13 +131,27 @@ impl Drop for Bubbles {
 }
 
 fn spawn(p: &Project, extra: &[&str]) -> Bubbles {
-    let mut child = Command::new(env!("CARGO_BIN_EXE_script2video"))
-        .arg("bubbles")
-        .arg(&p.script)
-        .arg("--config")
-        .arg(&p.config)
-        .arg("--no-open")
-        .args(extra)
+    spawn_with(p, extra, true, &[])
+}
+
+fn spawn_with(p: &Project, extra: &[&str], no_open: bool, env: &[(&str, &str)]) -> Bubbles {
+    let mut cmd = Command::new(env!("CARGO_BIN_EXE_script2video"));
+    cmd.envs(env.iter().copied());
+    if !no_open {
+        cmd.arg("bubbles")
+            .arg(&p.script)
+            .arg("--config")
+            .arg(&p.config)
+            .args(extra);
+    } else {
+        cmd.arg("bubbles")
+            .arg(&p.script)
+            .arg("--config")
+            .arg(&p.config)
+            .arg("--no-open")
+            .args(extra);
+    }
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -392,4 +406,22 @@ fn stale_build_is_failed() {
     fs::write(&wav, bytes).unwrap();
     let mut b = spawn(&p, &[]);
     assert_eq!(b.wait_code(), 2, "{}", b.stderr.lock().unwrap());
+}
+
+#[test]
+fn browser_open_failure_makes_exit_code_one() {
+    if skip() {
+        return;
+    }
+    let p = project(true);
+    let mut b = spawn_with(&p, &[], false, &[("S2V_BUBBLES_TEST_OPEN_FAIL", "1")]);
+    b.wait_url();
+    let cookie = login(&b);
+    quit(&b, &cookie);
+    assert_eq!(b.wait_code(), 1, "{}", b.stderr.lock().unwrap());
+    assert!(
+        p.log().contains("ブラウザを開けませんでした"),
+        "{}",
+        p.log()
+    );
 }

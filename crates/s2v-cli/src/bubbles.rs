@@ -166,8 +166,6 @@ fn serve(
         },
     )?;
 
-    // 起動時の警告の数(実行中の拒否の記録は含めない)
-    let startup_warnings = log.warning_count();
     // トークンを含む URL は標準出力にだけ出す(Process.log には書かない)
     log.info(format!("待ち受けを始めました(127.0.0.1:{})", server.port()));
     let url = server.url();
@@ -177,6 +175,8 @@ fn serve(
         open_browser(&url, log);
     }
 
+    // 起動時の警告の数(ブラウザを開けなかった警告までを含め、実行中の拒否の記録は含めない)
+    let startup_warnings = log.warning_count();
     server.run(&mut |ev| match ev {
         LogEvent::Info(m) => log.info(m),
         LogEvent::Warn(m) => log.warn(m),
@@ -191,6 +191,11 @@ fn serve(
 
 /// 既定のブラウザで開く。失敗は警告(URL は表示済み)。Windows 以外では開かない。
 fn open_browser(url: &str, log: &mut ProcLog) {
+    // テスト用: 開く処理を失敗させる(製品では設定しない)
+    if std::env::var_os("S2V_BUBBLES_TEST_OPEN_FAIL").is_some_and(|v| v == "1") {
+        log.warn("ブラウザを開けませんでした(試験用の失敗)。表示した URL を開いてください");
+        return;
+    }
     #[cfg(windows)]
     {
         // 引数の配列で渡す(シェルの文字列を組み立てない)
