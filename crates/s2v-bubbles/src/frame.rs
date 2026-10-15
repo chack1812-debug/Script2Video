@@ -3,6 +3,7 @@
 //! 専用スレッドを1本だけ持ち、使用中の要求は待たせずに `Busy` で断る。
 //! 10 秒で打ち切り、出力は 32 MiB まで。
 
+use s2v_video::ffmpeg::PROTOCOL_WHITELIST;
 use std::io::Read;
 use std::process::{Child, Command, Stdio};
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -18,8 +19,8 @@ pub const FRAME_MAX_BYTES: usize = 32 << 20;
 
 /// 標準エラーの末尾として返す行数。
 const STDERR_TAIL_LINES: usize = 20;
-/// 標準エラーとして保持する最大のバイト数(これ以上は読み捨てる)。
-const STDERR_MAX_BYTES: u64 = 1 << 20;
+/// 標準エラーとして保持する末尾のバイト数(それより前は捨てる)。
+const STDERR_KEEP_BYTES: usize = 64 << 10;
 /// 子プロセスの状態を見る間隔。
 const POLL: Duration = Duration::from_millis(5);
 
@@ -42,16 +43,13 @@ pub enum FrameError {
 pub fn frame_args(input: &str, k: i64, fps: u32, matrix: &str, range: &str) -> Vec<String> {
     let secs = k as f64 / f64::from(fps);
     let v = |s: &str| s.to_string();
-    vec![
+    let mut a = vec![
         v("-nostdin"),
         v("-hide_banner"),
         v("-v"),
         v("error"),
         v("-threads"),
         v("2"),
-        // TODO(2d-1 取り込み時): s2v_video::ffmpeg::PROTOCOL_WHITELIST を使う
-        v("-protocol_whitelist"),
-        v("file"),
         v("-ss"),
         format!("{secs:.6}"),
         v("-i"),
@@ -69,7 +67,10 @@ pub fn frame_args(input: &str, k: i64, fps: u32, matrix: &str, range: &str) -> V
         // 出力はパイプ(標準出力)なので `-n`(上書きしない)は付けない。
         // Global Constraints の `-n` は、ファイルに書く呼び出しのためのもの。
         v("-"),
-    ]
+    ];
+    // `-threads 2` の直後(入力の前)に共通の指定を入れる
+    a.splice(6..6, PROTOCOL_WHITELIST.iter().map(|s| s.to_string()));
+    a
 }
 
 type FrameResult = Result<Vec<u8>, FrameError>;
@@ -199,10 +200,25 @@ fn run_job(
         buf
     });
     let err_reader = thread::spawn(move || {
-        let mut buf = Vec::new();
-        let _ = (&mut stderr).take(STDERR_MAX_BYTES).read_to_end(&mut buf);
-        // 上限を超えた分も詰まらないよう読み捨てる
-        let _ = std::io::copy(&mut stderr, &mut std::io::sink());
+        // 最後まで読みつつ、末尾の STDERR_KEEP_BYTES だけを保持する(メモリの上限を保つ)
+        let mut buf: Vec<u8> = Vec::new();
+        let mut chunk = [0u8; 8192];
+        loop {
+            match stderr.read(&mut chunk) {
+                Ok(0) | Err(_) => break,
+                Ok(n) => {
+                    buf.extend_from_slice(&chunk[..n]);
+                    if buf.len() > 2 * STDERR_KEEP_BYTES {
+                        let cut = buf.len() - STDERR_KEEP_BYTES;
+                        buf.drain(..cut);
+                    }
+                }
+            }
+        }
+        if buf.len() > STDERR_KEEP_BYTES {
+            let cut = buf.len() - STDERR_KEEP_BYTES;
+            buf.drain(..cut);
+        }
         buf
     });
 
@@ -370,6 +386,22 @@ mod tests {
             .unwrap();
         match rx.recv().unwrap() {
             Err(FrameError::Failed(m)) => assert!(m.contains("boom"), "{m}"),
+            other => panic!("{other:?}"),
+        }
+        w.shutdown();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn huge_stderr_keeps_the_last_lines() {
+        let w = FrameWorker::start_with("powershell".into(), Duration::from_secs(30), 1 << 20);
+        let rx = w
+            .try_submit(ps(
+                "[Console]::Error.WriteLine('x' * 3145728); [Console]::Error.WriteLine('LAST LINE'); exit 3",
+            ))
+            .unwrap();
+        match rx.recv().unwrap() {
+            Err(FrameError::Failed(m)) => assert!(m.contains("LAST LINE"), "{}", m.len()),
             other => panic!("{other:?}"),
         }
         w.shutdown();
