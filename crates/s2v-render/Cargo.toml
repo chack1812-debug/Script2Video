@@ -1,0 +1,17 @@
+[package]
+name = "s2v-render"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+s2v-core = { path = "../s2v-core" }
+s2v-timeline = { path = "../s2v-timeline" }
+rustybuzz = "0.20"
+tiny-skia = "0.12"
+unicode-segmentation = "1"
+serde.workspace = true
+serde_json = "1"
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3"

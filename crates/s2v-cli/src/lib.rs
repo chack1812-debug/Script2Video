@@ -7,11 +7,13 @@ pub mod layout;
 pub mod lock;
 pub mod number;
 pub mod proclog;
+pub mod render;
 pub mod verify;
 pub mod work;
 
 pub use build::{run_build, BuildArgs};
 pub use number::run_number;
+pub use render::{run_render, RenderArgs};
 
 /// 終了コード(設計書 5.6)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]

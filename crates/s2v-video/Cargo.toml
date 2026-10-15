@@ -1,0 +1,13 @@
+[package]
+name = "s2v-video"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+serde.workspace = true
+serde_json = "1"
+realfft = "3"
+anyhow.workspace = true
+
+[dev-dependencies]
+tempfile = "3"
