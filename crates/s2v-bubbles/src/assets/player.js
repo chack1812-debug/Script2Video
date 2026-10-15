@@ -7,7 +7,7 @@ const SEEKED_TIMEOUT_MS = 1500; // seeked が来ないときの保険(読み込�
 
 /**
  * o = {
- *   audio, video(要素か、今の動画の要素を返す関数。無ければ null), state, getN, setN, frames, onSessionLost,
+ *   audio, video(要素か、今の動画の要素を返す関数。無ければ null), state, getN, setN, frames,
  *   showCut(cut, n): 背景を cut のものに替える, redraw(n): 止まっているときの描き直し,
  *   onFrame(n): 再生中のコマの更新(スライダー・重ね画像), onPlayingChange(bool),
  *   isLost?(), onAudioError?(), raf?, caf?, setTimer?, clearTimer?

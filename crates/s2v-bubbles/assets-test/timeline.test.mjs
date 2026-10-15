@@ -112,3 +112,8 @@ test("player_branches_pinned", () => {
   r = t.playerStep(state, atEnd, { type: "tick", audioSec: 200 / 30, videoSec: 1.5, ended: false });
   assert.deepEqual(types(r), ["video-pause", "video-seek"]);
 });
+
+test("redraw_mode_keeps_background_while_playing", () => {
+  assert.equal(t.redrawMode(true), "overlay");
+  assert.equal(t.redrawMode(false), "full");
+});

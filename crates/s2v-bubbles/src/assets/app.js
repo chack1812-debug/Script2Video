@@ -2,8 +2,8 @@
 // 再生(player.js)は Task 6、編集(editor_ui.js)は Task 7・8 がここに繋ぐ(下の ext と redraw が口)。
 import { createApi } from "./api.js";
 import { Editor, FrameFetcher, ImageCache, withKind } from "./model.js";
-import { assetFrame, cutAt, itemsAt } from "./timeline.js";
 import { attachEditing } from "./editor_ui.js";
+import { assetFrame, cutAt, itemsAt, redrawMode } from "./timeline.js";
 import { createPlayer } from "./player.js";
 import { mountView } from "./view.js";
 
@@ -91,7 +91,7 @@ async function main() {
     }
     if (kind === "video" && cut.asset.frame_url) {
       frameMode.add(cut.id);
-      redraw(ui.n);
+      refresh();
     } else {
       view.setBackground(bgSpec("unavailable"));
       dropFrame();
@@ -143,7 +143,7 @@ async function main() {
         return;
       }
       // 版が変わっていれば set が false を返し、blob URL も解放される
-      if (cache.set(item.id, URL.createObjectURL(r.png), v)) redraw(ui.n);
+      if (cache.set(item.id, URL.createObjectURL(r.png), v)) refresh();
     });
   }
 
@@ -179,7 +179,7 @@ async function main() {
       const it = editor.items.find((x) => x.id === id);
       refreshChrome();
       if (it && !(it.frames[0] <= ui.n && ui.n < it.frames[1])) seek(it.frames[0]);
-      else redraw(ui.n);
+      else refresh();
     },
     onSeek: (n) => {
       if (!ui.sessionLost) seek(n);
@@ -219,6 +219,12 @@ async function main() {
     else redraw(n);
   }
 
+  // 今のコマの描き直し。再生中は背景の動画を巻き戻さないよう重ね画像だけ
+  function refresh() {
+    if (redrawMode(ui.playing) === "overlay") drawPlaying(ui.n);
+    else redraw(ui.n);
+  }
+
   // 再生中のコマの更新(背景の動画には触れず、スライダーと重ね画像だけ)
   function drawPlaying(n) {
     if (ui.sessionLost) return;
@@ -246,7 +252,6 @@ async function main() {
       ui.n = n;
     },
     frames,
-    onSessionLost,
     isLost: () => ui.sessionLost,
     showCut: (cut, n) => updateBackground(cut, n),
     redraw: (n) => redraw(n),

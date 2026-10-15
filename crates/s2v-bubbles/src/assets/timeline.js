@@ -123,3 +123,8 @@ export function playerStep(state, st, ev) {
       return { st, actions };
   }
 }
+
+/** 描き直しの種類。再生中は背景の動画に触れず重ね画像だけ("overlay")、停止中は背景も含めて全部("full")。 */
+export function redrawMode(playing) {
+  return playing ? "overlay" : "full";
+}
