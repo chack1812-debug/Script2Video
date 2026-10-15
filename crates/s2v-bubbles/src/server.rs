@@ -22,9 +22,17 @@ use std::thread;
 use std::time::{Duration, Instant};
 use tiny_http::{Header, Method, Request, Response, StatusCode};
 
-const INDEX_HTML: &str = include_str!("assets/index.html");
-const APP_JS: &str = include_str!("assets/app.js");
-const APP_CSS: &str = include_str!("assets/app.css");
+const HTML_TYPE: &str = "text/html; charset=utf-8";
+const JS_TYPE: &str = "text/javascript; charset=utf-8";
+const CSS_TYPE: &str = "text/css; charset=utf-8";
+
+/// 埋め込みの画面のファイル(パス, 内容, Content-Type)。ファイルを足すときはここに 1 行足す。
+const PAGES: &[(&str, &str, &str)] = &[
+    ("/", include_str!("assets/index.html"), HTML_TYPE),
+    ("/app.js", include_str!("assets/app.js"), JS_TYPE),
+    ("/app.css", include_str!("assets/app.css"), CSS_TYPE),
+    ("/geom.js", include_str!("assets/geom.js"), JS_TYPE),
+];
 
 /// メディアのスレッドの同時数の上限。
 const MAX_MEDIA_THREADS: usize = 8;
@@ -336,11 +344,12 @@ impl Server {
             }
         }
 
+        // 4. 画面(埋め込みの表)
+        if let Some((_, body, ctype)) = PAGES.iter().find(|(p, _, _)| *p == path) {
+            return self.page(req, &method, body, ctype);
+        }
+
         match path {
-            // 4. 画面
-            "/" => self.page(req, &method, INDEX_HTML, "text/html; charset=utf-8"),
-            "/app.js" => self.page(req, &method, APP_JS, "text/javascript; charset=utf-8"),
-            "/app.css" => self.page(req, &method, APP_CSS, "text/css; charset=utf-8"),
             // 8. 状態
             "/api/state" => {
                 if method != Method::Get {

@@ -61,6 +61,7 @@ fn requests_without_cookie_are_403() {
         "/",
         "/app.js",
         "/app.css",
+        "/geom.js",
         "/api/state",
         "/media/audio",
         "/media/asset/S01-C01",
@@ -251,6 +252,7 @@ fn common_headers_on_every_response() {
         ("/", "text/html; charset=utf-8"),
         ("/app.js", "text/javascript; charset=utf-8"),
         ("/app.css", "text/css; charset=utf-8"),
+        ("/geom.js", "text/javascript; charset=utf-8"),
     ] {
         let r = Req::new("GET", path, p).cookie(&c).send(p);
         assert_eq!(r.status, 200, "{path}");
@@ -673,14 +675,29 @@ fn two_servers_do_not_share_cookie() {
 
 #[test]
 fn embedded_assets_have_no_inner_html() {
-    let js = include_str!("../src/assets/app.js");
     let html = include_str!("../src/assets/index.html");
     let css = include_str!("../src/assets/app.css");
-    assert!(!js.contains("innerHTML"));
-    assert!(!js.contains("outerHTML"));
-    assert!(!js.contains("insertAdjacentHTML"));
-    assert!(!js.contains("document.write"));
-    assert!(!js.contains("eval("));
+    // src/assets の全ての .js を対象にする(Node が無くても最低限の検査が残る)
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("js") {
+            continue;
+        }
+        let js = std::fs::read_to_string(&path).unwrap();
+        for bad in [
+            "innerHTML",
+            "outerHTML",
+            "insertAdjacentHTML",
+            "document.write",
+            "eval(",
+        ] {
+            assert!(!js.contains(bad), "{} に {bad} があります", path.display());
+        }
+        checked += 1;
+    }
+    assert!(checked >= 2, "app.js と geom.js を検査できていません");
     // CSP: インラインのスクリプト・スタイルを使わない
     assert!(html.contains(r#"<script src="/app.js"#));
     assert!(html.contains(r#"href="/app.css""#));
