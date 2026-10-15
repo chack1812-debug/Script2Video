@@ -68,9 +68,9 @@ fn canvas_of(cfg: &RenderConfig) -> Canvas {
 }
 
 /// 手動配置の一式で項目を組み立て直す(offset が表示時刻に効く)。
-/// offset の逆転などで組み立てられなければ、起動時の項目に戻す。
-fn items_for(s: &Session, manual: &BTreeMap<String, Placed>) -> Vec<Item> {
-    build_items(&s.timeline, manual, &mut Vec::new()).unwrap_or_else(|_| s.items.clone())
+/// 逆転した offset は `validate_layout` が先に拒否するので、ここで失敗するのは検証を通していない入力だけ。
+fn items_for(s: &Session, manual: &BTreeMap<String, Placed>) -> Result<Vec<Item>, ApiError> {
+    build_items(&s.timeline, manual, &mut Vec::new()).map_err(|m| ApiError::Unprocessable(vec![m]))
 }
 
 fn shown(items: &[Item]) -> Vec<ShownItem> {
@@ -170,7 +170,10 @@ fn asset_json(a: &SessionAsset) -> Value {
 /// `/api/state` の応答。
 pub fn state_json(s: &Session, manual: &BTreeMap<String, Placed>) -> Value {
     let fps = s.cfg.fps;
-    let items = items_for(s, manual);
+    // 起動時に検証済みの手動配置が渡される。逆転があれば手動を使わない項目に戻す
+    let items = items_for(s, manual)
+        .or_else(|_| items_for(s, &BTreeMap::new()))
+        .unwrap_or_default();
     let (items_v, place_warnings) = items_value(s, &items, manual);
     let cut_ranges: Vec<(String, i64, i64)> = s
         .timeline
@@ -222,8 +225,11 @@ pub fn state_json(s: &Session, manual: &BTreeMap<String, Placed>) -> Value {
 }
 
 /// `/api/layout` の応答(`state_json` の `items` と同じ形)。
-pub fn layout_json(s: &Session, manual: &BTreeMap<String, Placed>) -> Value {
-    Value::Array(items_value(s, &items_for(s, manual), manual).0)
+/// 検証(未知の ID・上限・表示時刻の逆転)に外れれば Unprocessable。
+pub fn layout_json(s: &Session, manual: &BTreeMap<String, Placed>) -> Result<Value, ApiError> {
+    check_layout(s, manual)?;
+    let items = items_for(s, manual)?;
+    Ok(Value::Array(items_value(s, &items, manual).0))
 }
 
 /// timeline にある全ての項目 ID(長さ 0 で映像に出ないものも含む)。
@@ -251,6 +257,51 @@ fn validate_manual(s: &Session, manual: &BTreeMap<String, Placed>) -> Vec<String
     errs
 }
 
+/// 台本の項目の (種類, 本文, 開始, 終了)(長さ 0 で映像に出ないものも含む)。
+type BaseItems<'a> = BTreeMap<&'a str, (ItemKind, &'a str, i64, i64)>;
+
+fn base_items(tl: &Timeline) -> BaseItems<'_> {
+    let mut base = BTreeMap::new();
+    for l in &tl.lines {
+        base.insert(
+            l.id.as_str(),
+            (ItemKind::Bubble, l.text.as_str(), l.start_ms, l.end_ms),
+        );
+    }
+    for sc in &tl.scenes {
+        for n in &sc.notes {
+            base.insert(
+                n.id.as_str(),
+                (ItemKind::Note, n.text.as_str(), n.start_ms, n.end_ms),
+            );
+        }
+    }
+    base
+}
+
+/// 配置を計算する API(render・layout・save)共通の検証: 未知の ID・上限(`validate_file`)・表示時刻の逆転。
+fn validate_layout(s: &Session, manual: &BTreeMap<String, Placed>) -> Vec<String> {
+    let mut errs = validate_manual(s, manual);
+    let base = base_items(&s.timeline);
+    for (id, p) in manual {
+        if let Some(&(_, _, st, en)) = base.get(id.as_str()) {
+            if let Err(m) = effective_times(st, en, Some(p), s.timeline.duration_ms) {
+                errs.push(format!("{id}: {m}"));
+            }
+        }
+    }
+    errs
+}
+
+fn check_layout(s: &Session, manual: &BTreeMap<String, Placed>) -> Result<(), ApiError> {
+    let errs = validate_layout(s, manual);
+    if errs.is_empty() {
+        Ok(())
+    } else {
+        Err(ApiError::Unprocessable(errs))
+    }
+}
+
 #[derive(serde::Deserialize)]
 struct ManualBody {
     manual: BTreeMap<String, Placed>,
@@ -275,7 +326,8 @@ pub fn render_png(
     id: &str,
     manual: &BTreeMap<String, Placed>,
 ) -> Result<(Vec<u8>, i32, i32, bool), ApiError> {
-    let items = items_for(s, manual);
+    check_layout(s, manual)?;
+    let items = items_for(s, manual)?;
     let item = items
         .iter()
         .find(|i| i.id == id)
@@ -303,6 +355,23 @@ pub fn render_png(
 /// 同じフォルダに一時ファイル(`.<名前>.<乱数16進>.tmp`)を `create_new` で作り、
 /// 書いて `sync_all` し、`rename` で置き換える。失敗時は一時ファイルを消す。
 pub fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    atomic_replace_with(path, bytes, &|_, _| Ok(()))
+}
+
+/// 失敗の注入の段階(テスト用。製品の経路では何もしない)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Stage {
+    /// 一時ファイルへ書く前
+    Write,
+    /// 置き換え(`rename`)の前
+    Replace,
+}
+
+fn atomic_replace_with(
+    path: &Path,
+    bytes: &[u8],
+    hook: &dyn Fn(&Path, Stage) -> std::io::Result<()>,
+) -> std::io::Result<()> {
     let dir = path.parent().unwrap_or_else(|| Path::new("."));
     let name = path
         .file_name()
@@ -329,10 +398,14 @@ pub fn atomic_replace(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
             }
             Err(e) => return Err(e),
         };
-        let res = f.write_all(bytes).and_then(|_| f.sync_all()).and_then(|_| {
-            drop(f);
-            fs::rename(&tmp, path)
-        });
+        let res = hook(path, Stage::Write)
+            .and_then(|_| f.write_all(bytes))
+            .and_then(|_| f.sync_all())
+            .and_then(|_| {
+                drop(f);
+                hook(path, Stage::Replace)
+            })
+            .and_then(|_| fs::rename(&tmp, path));
         if res.is_err() {
             let _ = fs::remove_file(&tmp);
         }
@@ -354,26 +427,23 @@ fn check_target(path: &Path) -> Result<bool, ApiError> {
 
 /// 検証して `bubbles.json` を保存する(設計書 §5.2)。戻り値は警告。
 pub fn save(s: &Session, manual: &BTreeMap<String, Placed>) -> Result<Vec<String>, ApiError> {
-    let mut errs = validate_manual(s, manual);
-    // 各項目: 文字が収まる大きさか、表示の開始 < 終了か
-    let mut base: BTreeMap<&str, (ItemKind, &str, i64, i64)> = BTreeMap::new();
-    for l in &s.timeline.lines {
-        base.insert(&l.id, (ItemKind::Bubble, &l.text, l.start_ms, l.end_ms));
-    }
-    for sc in &s.timeline.scenes {
-        for n in &sc.notes {
-            base.insert(&n.id, (ItemKind::Note, &n.text, n.start_ms, n.end_ms));
-        }
-    }
+    save_with(s, manual, &|_, _| Ok(()))
+}
+
+fn save_with(
+    s: &Session,
+    manual: &BTreeMap<String, Placed>,
+    hook: &dyn Fn(&Path, Stage) -> std::io::Result<()>,
+) -> Result<Vec<String>, ApiError> {
+    // render・layout と同じ検証に、各項目の文字が収まる大きさかを足す
+    let mut errs = validate_layout(s, manual);
+    let base = base_items(&s.timeline);
     for (id, p) in manual {
-        let Some(&(kind, text, st, en)) = base.get(id.as_str()) else {
-            continue; // 未知の ID は validate_manual が報告済み
+        let Some(&(kind, text, _, _)) = base.get(id.as_str()) else {
+            continue; // 未知の ID は報告済み
         };
         if p.kind == kind && !fits(&layout_ctx(&s.face, &s.cfg, kind), text, p.w, p.h) {
             errs.push(format!("{id}: 文字が枠に収まりません"));
-        }
-        if let Err(m) = effective_times(st, en, Some(p), s.timeline.duration_ms) {
-            errs.push(format!("{id}: {m}"));
         }
     }
     if !errs.is_empty() {
@@ -405,13 +475,13 @@ pub fn save(s: &Session, manual: &BTreeMap<String, Placed>) -> Result<Vec<String
     if main_exists {
         let old = fs::read(&main)
             .map_err(|_| ApiError::Internal("既存の bubbles.json を読めません".into()))?;
-        atomic_replace(&bak, &old)
+        atomic_replace_with(&bak, &old, hook)
             .map_err(|_| ApiError::Internal("bubbles.json.bak を書けません".into()))?;
     }
-    atomic_replace(&main, text.as_bytes())
+    atomic_replace_with(&main, text.as_bytes(), hook)
         .map_err(|_| ApiError::Internal("bubbles.json を書けません".into()))?;
 
-    let items = items_for(s, manual);
+    let items = items_for(s, manual)?;
     let mut warnings = Vec::new();
     place_items(&items, manual, &s.cfg, &s.face, &mut warnings);
     Ok(warnings)
@@ -837,5 +907,84 @@ mod tests {
             original
         );
         assert_eq!(names(dir.path()), vec!["bubbles.json"]);
+    }
+
+    #[test]
+    fn inverted_times_are_rejected_by_render_layout_and_save() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = session_in(dir.path(), "あ");
+        let mut inv = bubble(100, 40, 120, 120);
+        inv.start_offset_ms = 2_000; // 500+2000 >= 終了 2000
+        let manual = one("S01-L001", inv);
+        let r = render_png(&s, "S01-L001", &manual);
+        assert!(matches!(r, Err(ApiError::Unprocessable(_))), "{r:?}");
+        let r = layout_json(&s, &manual);
+        assert!(matches!(r, Err(ApiError::Unprocessable(_))), "{r:?}");
+        assert!(matches!(save(&s, &manual), Err(ApiError::Unprocessable(_))));
+        assert!(layout_json(&s, &BTreeMap::new()).is_ok());
+    }
+
+    #[test]
+    fn repeated_save_replaces_existing_files() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = session_in(dir.path(), "あ");
+        save(&s, &one("S01-L001", bubble(100, 40, 120, 120))).unwrap();
+        let first = std::fs::read(dir.path().join("bubbles.json")).unwrap();
+        save(&s, &one("S01-L001", bubble(20, 30, 120, 120))).unwrap();
+        let second = std::fs::read(dir.path().join("bubbles.json")).unwrap();
+        assert_ne!(first, second);
+        assert_eq!(
+            std::fs::read(dir.path().join("bubbles.json.bak")).unwrap(),
+            first
+        );
+        assert!(names(dir.path()).iter().all(|n| !n.ends_with(".tmp")));
+    }
+
+    #[test]
+    fn injected_failures_in_save_stages() {
+        let original = b"ORIGINAL".to_vec();
+        let manual = one("S01-L001", bubble(100, 40, 120, 120));
+        let fail_on = |file: &'static str, stage: Stage| {
+            move |p: &Path, st: Stage| {
+                if st == stage && p.file_name().unwrap() == file {
+                    Err(std::io::Error::other("注入した失敗"))
+                } else {
+                    Ok(())
+                }
+            }
+        };
+        for stage in [Stage::Write, Stage::Replace] {
+            // (a) .bak の段階 → 何も変わらない
+            let dir = tempfile::tempdir().unwrap();
+            let s = session_in(dir.path(), "あ");
+            std::fs::write(dir.path().join("bubbles.json"), &original).unwrap();
+            let r = save_with(&s, &manual, &fail_on("bubbles.json.bak", stage));
+            assert!(matches!(r, Err(ApiError::Internal(_))), "{stage:?}");
+            assert_eq!(
+                std::fs::read(dir.path().join("bubbles.json")).unwrap(),
+                original
+            );
+            assert_eq!(names(dir.path()), vec!["bubbles.json"], "{stage:?}");
+
+            // (b) 本体の段階 → bubbles.json は元のまま、.bak は新しくなる
+            let dir = tempfile::tempdir().unwrap();
+            let s = session_in(dir.path(), "あ");
+            std::fs::write(dir.path().join("bubbles.json"), &original).unwrap();
+            let r = save_with(&s, &manual, &fail_on("bubbles.json", stage));
+            assert!(matches!(r, Err(ApiError::Internal(_))), "{stage:?}");
+            assert_eq!(
+                std::fs::read(dir.path().join("bubbles.json")).unwrap(),
+                original
+            );
+            assert_eq!(
+                std::fs::read(dir.path().join("bubbles.json.bak")).unwrap(),
+                original
+            );
+            assert_eq!(
+                names(dir.path()),
+                vec!["bubbles.json", "bubbles.json.bak"],
+                "{stage:?}"
+            );
+        }
     }
 }
