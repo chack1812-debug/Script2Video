@@ -674,6 +674,46 @@ fn two_servers_do_not_share_cookie() {
 }
 
 #[test]
+fn embedded_modules_are_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_default(dir.path());
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    for path in [
+        "/geom.js",
+        "/timeline.js",
+        "/model.js",
+        "/api.js",
+        "/view.js",
+        "/app.js",
+    ] {
+        let r = Req::new("GET", path, p).cookie(&c).send(p);
+        assert_eq!(r.status, 200, "{path}");
+        assert_eq!(
+            r.header("Content-Type"),
+            Some("text/javascript; charset=utf-8"),
+            "{path}"
+        );
+        assert!(!r.body.is_empty(), "{path}");
+        let r = Req::new("GET", path, p).send(p);
+        assert_eq!(r.status, 403, "{path}");
+    }
+}
+
+#[test]
+fn index_loads_app_as_module() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_default(dir.path());
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    let r = Req::new("GET", "/", p).cookie(&c).send(p);
+    assert_eq!(r.status, 200);
+    let t = r.text();
+    assert!(t.contains(r#"type="module""#), "{t}");
+    assert!(t.contains(r#"src="/app.js""#), "{t}");
+}
+
+#[test]
 fn embedded_assets_have_no_inner_html() {
     let html = include_str!("../src/assets/index.html");
     let css = include_str!("../src/assets/app.css");
@@ -694,7 +734,7 @@ fn embedded_assets_have_no_inner_html() {
     }
     assert!(checked >= 2, "app.js と geom.js を検査できていません");
     // CSP: インラインのスクリプト・スタイルを使わない
-    assert!(html.contains(r#"<script src="/app.js"#));
+    assert!(html.contains(r#"<script type="module" src="/app.js">"#));
     assert!(html.contains(r#"href="/app.css""#));
     assert!(!html.contains("<style"));
     assert!(!html.contains(" style="));
