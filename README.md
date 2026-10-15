@@ -5,6 +5,7 @@
 ```
 script2video number <台本.txt>
 script2video build <台本.txt> [--voice-dir <収録フォルダ>] [--config <設定.toml>] [--no-cache]
+script2video prompts <台本.txt> [--config <設定.toml>]
 script2video render <台本.txt> [--config <設定.toml>]
 ```
 
@@ -60,6 +61,41 @@ script2video build 第1話.txt --voice-dir 収録/
 詳しくは [台本仕様.md](台本仕様.md) の §2.8(`#cut`・`#visual`)・§2.9(`#note`)を参照。
 
 台本の書式は [台本仕様.md](台本仕様.md)、設計は [docs/superpowers/specs/2026-10-12-script2video-design.md](docs/superpowers/specs/2026-10-12-script2video-design.md) と、映像工程の設計 [docs/superpowers/specs/2026-10-14-script2video-video-design.md](docs/superpowers/specs/2026-10-14-script2video-video-design.md) を参照。
+
+## prompts(素材のプロンプトを作る)
+
+`build` の後に実行する。`timeline.json` から、画像・動画の生成に使うプロンプトをカットごとに作り、台本フォルダの `prompts/` に書く。
+
+```bash
+script2video prompts 第1話.txt
+script2video prompts 第1話.txt --config config.toml
+```
+
+出力は、シーンごとの `prompts/S01.md` … と、全カットの一覧 `prompts/index.md`。`S01.md` にはカットごとの節があり、各節に次を書く(長さ 0 のカットは節を作らない。全カットが長さ 0 のシーンはファイルを作らない)。
+
+- 作る素材のファイル名(`tracks/S01.png` など。`#visual` に種類が無ければ「`tracks/S01.png` か `tracks/S01.mp4`」)
+- 種類(画像・動画。動画はループの有無)
+- 長さ(動画と種類が未指定のカットだけ。秒、小数1桁)
+- プロンプト本文(コピーしやすいようコードブロックに入れる)
+
+プロンプト本文は次の順で、空の要素は行ごと省く: `[prompts]` の `style`、シーン名、カットの `#visual`、登場人物とその外見(`@cast` の外見。無い役は名前だけ)、`[prompts]` の `suffix`。登場人物は、そのカットの間に話す人を台本の並びの初出順に並べる。`#visual` の無いカットは、節に「`#visual: なし`」と書いて警告する。
+
+`index.md` の表には、カット ID・素材のファイル名・種類・長さ・「素材」の列(`tracks/` に見つかれば「あり(`S01.jpg`)」、無ければ「なし」、長さ 0 は「不要(長さ 0)」)を出す。`tracks/` の素材に誤り(同じカットに複数ある・種類違い・リンク)があれば、`index.md` の末尾の「tracks/ の確認事項」と `Process.log` に書く。ただし終了コードは変えない(誤りは `render` が終了コード 2 にする)。
+
+`config.toml` の `[prompts]`:
+
+| キー | 既定 | 意味 |
+|---|---|---|
+| `style` | 空 | プロンプトの先頭に付ける画風の指定 |
+| `suffix` | 縦横比 16:9。画像の中に文字・吹き出しを入れない。 | プロンプトの末尾に付ける注意書き |
+
+`prompts/` の中で上書き・削除するのは `index.md` と `S<数字>.md`(前回あって今回は無いシーンのものを含む)だけ。自分のメモは別の名前(`memo.md` など)で置ける。
+
+終了コード:
+
+- `0`: 成功
+- `1`: `#visual` の無いカットがある、または台本が `build` の後に変わった(プロンプトは書く)
+- `2`: `build` がまだ(または `timeline.json` が使えない)、`prompts` がリンクか台本フォルダの外を指している、台本フォルダに `prompts` というファイルがある、書き込みの失敗、他の `number`・`build`・`render`・`prompts` が同じ台本フォルダで実行中(何も消さない)
 
 ## render(動画を作る)
 
