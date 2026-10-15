@@ -928,14 +928,22 @@ mod tests {
     fn repeated_save_replaces_existing_files() {
         let dir = tempfile::tempdir().unwrap();
         let s = session_in(dir.path(), "あ");
+        // 最初に本体(A)と .bak(Z)の両方を置く
+        std::fs::write(dir.path().join("bubbles.json"), b"AAA").unwrap();
+        std::fs::write(dir.path().join("bubbles.json.bak"), b"ZZZ").unwrap();
         save(&s, &one("S01-L001", bubble(100, 40, 120, 120))).unwrap();
-        let first = std::fs::read(dir.path().join("bubbles.json")).unwrap();
-        save(&s, &one("S01-L001", bubble(20, 30, 120, 120))).unwrap();
-        let second = std::fs::read(dir.path().join("bubbles.json")).unwrap();
-        assert_ne!(first, second);
+        let b = std::fs::read(dir.path().join("bubbles.json")).unwrap();
+        assert_ne!(b, b"AAA");
         assert_eq!(
             std::fs::read(dir.path().join("bubbles.json.bak")).unwrap(),
-            first
+            b"AAA"
+        );
+        save(&s, &one("S01-L001", bubble(20, 30, 120, 120))).unwrap();
+        let c = std::fs::read(dir.path().join("bubbles.json")).unwrap();
+        assert_ne!(b, c);
+        assert_eq!(
+            std::fs::read(dir.path().join("bubbles.json.bak")).unwrap(),
+            b
         );
         assert!(names(dir.path()).iter().all(|n| !n.ends_with(".tmp")));
     }
@@ -958,13 +966,22 @@ mod tests {
             let dir = tempfile::tempdir().unwrap();
             let s = session_in(dir.path(), "あ");
             std::fs::write(dir.path().join("bubbles.json"), &original).unwrap();
+            std::fs::write(dir.path().join("bubbles.json.bak"), b"ZZZ").unwrap();
             let r = save_with(&s, &manual, &fail_on("bubbles.json.bak", stage));
             assert!(matches!(r, Err(ApiError::Internal(_))), "{stage:?}");
             assert_eq!(
                 std::fs::read(dir.path().join("bubbles.json")).unwrap(),
                 original
             );
-            assert_eq!(names(dir.path()), vec!["bubbles.json"], "{stage:?}");
+            assert_eq!(
+                std::fs::read(dir.path().join("bubbles.json.bak")).unwrap(),
+                b"ZZZ"
+            );
+            assert_eq!(
+                names(dir.path()),
+                vec!["bubbles.json", "bubbles.json.bak"],
+                "{stage:?}"
+            );
 
             // (b) 本体の段階 → bubbles.json は元のまま、.bak は新しくなる
             let dir = tempfile::tempdir().unwrap();
