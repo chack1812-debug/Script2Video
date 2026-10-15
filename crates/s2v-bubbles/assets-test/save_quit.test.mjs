@@ -32,8 +32,22 @@ test("format_save_422_lists_reasons", () => {
 
 test("format_save_other_error_is_short", () => {
   const f = formatSaveResult({ ok: false, status: 500, errors: ["サーバーのエラー"] });
-  assert.equal(f.status, "保存できません: サーバーのエラー");
+  assert.equal(f.status, "保存できません(状態コード 500)");
   assert.deepEqual(f.lines, []);
+  assert.equal(formatSaveResult({ ok: false, status: 0, errors: ["x"] }).status, "サーバーに接続できません");
+  assert.equal(formatSaveResult({ ok: false, status: 403, errors: ["x"] }).status, "セッションが切れました。bubbles を起動し直してください");
+});
+
+test("quit_waits_for_saving_in_progress", async () => {
+  let release;
+  const saving = new Promise((r) => { release = r; });
+  const { o, log } = base({ pendingSave: () => saving });
+  const p = decideQuit(o);
+  await new Promise((r) => setTimeout(r, 10));
+  assert.deepEqual(log, []);
+  release();
+  assert.equal((await p).result, "quit");
+  assert.deepEqual(log, ["flushers", "flush", "quit"]);
 });
 
 test("quit_clean_does_not_confirm", async () => {

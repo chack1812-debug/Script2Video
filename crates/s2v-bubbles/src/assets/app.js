@@ -11,7 +11,7 @@ import { QUIT_DONE_TEXT, SESSION_LOST_QUIT_TEXT, decideQuit, formatSaveResult } 
 const SESSION_LOST_TEXT = "セッションが切れました。bubbles を起動し直してください";
 
 async function main() {
-  const ui = { n: 0, selected: null, playing: false, dragging: false, sessionLost: false, saving: false };
+  const ui = { n: 0, selected: null, playing: false, dragging: false, sessionLost: false, saving: false, savePromise: null };
   // 後続のタスクが差し込む口(player: Task 6、editing: Task 7・8)
   const ext = { player: null, editing: null };
   let view = null;
@@ -189,22 +189,26 @@ async function main() {
       if (ui.sessionLost) return;
       if (ext.player) ui.playing ? ext.player.stop() : ext.player.play();
     },
-    async onSave() {
-      if (ui.sessionLost || ui.saving) return;
+    onSave() {
+      if (ui.sessionLost || ui.saving) return ui.savePromise;
       ui.saving = true;
       view.setSaving(true);
-      try {
-        // editor.save が保留中の入力の確定 → 待ち行列を空に → 確定した一式の送信、の順で行う
-        const r = await editor.save();
-        if (ui.sessionLost) return; // セッション切れの表示を上書きしない
-        const f = formatSaveResult(r);
-        view.setWarnings([...state.warnings, ...f.lines]);
-        setStatus(f.status);
-      } finally {
-        ui.saving = false;
-        view.setSaving(false);
-        view.setDirty(editor.isDirty());
-      }
+      ui.savePromise = (async () => {
+        try {
+          // editor.save が保留中の入力の確定 → 待ち行列を空に → 確定した一式の送信、の順で行う
+          const r = await editor.save();
+          if (ui.sessionLost) return; // セッション切れの表示を上書きしない
+          const f = formatSaveResult(r);
+          view.setWarnings([...state.warnings, ...f.lines]);
+          setStatus(f.status);
+        } finally {
+          ui.saving = false;
+          ui.savePromise = null;
+          view.setSaving(false);
+          view.setDirty(editor.isDirty());
+        }
+      })();
+      return ui.savePromise;
     },
     async onQuit() {
       if (ui.sessionLost) {
@@ -212,6 +216,7 @@ async function main() {
         return;
       }
       const d = await decideQuit({
+        pendingSave: () => ui.savePromise,
         flushers: () => [editor.runPendingFlushers()],
         flush: () => editor.flush(),
         isDirty: () => editor.isDirty(),
