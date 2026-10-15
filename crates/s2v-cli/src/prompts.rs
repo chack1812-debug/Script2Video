@@ -135,31 +135,30 @@ fn prompts_main(
         ));
     }
 
-    // prompts/ を用意し、前回の生成ファイルだけを消す
+    // prompts/ を用意し、新しい集合を先に書く(同名は置き換わる。途中で失敗しても既存のファイルは消えない)
     std::fs::create_dir_all(&out_dir)
         .map_err(|e| format!("prompts/ を作れません: {}: {e}", out_dir.display()))?;
+    for (name, text) in &files {
+        crate::fsutil::write_atomic(&out_dir.join(name), text.as_bytes())
+            .map_err(|e| format!("prompts/{name} を書けません: {e}"))?;
+    }
+    // 全部書けた後で、今回の集合に無い前回の生成ファイルだけを消す
     let entries = std::fs::read_dir(&out_dir)
         .map_err(|e| format!("prompts/ を読めません: {}: {e}", out_dir.display()))?;
     for entry in entries {
         let entry = entry.map_err(|e| format!("prompts/ を読めません: {e}"))?;
         let name = entry.file_name().to_string_lossy().into_owned();
-        if !is_generated_name(&name) {
+        if !is_generated_name(&name) || files.contains_key(&name) {
             continue;
         }
         let Ok(meta) = std::fs::symlink_metadata(entry.path()) else {
             continue;
         };
-        // フォルダは消さない(同名のフォルダがあれば、後の書き込みが失敗する)
+        // フォルダは消さない
         if meta.is_file() || meta.file_type().is_symlink() {
             std::fs::remove_file(entry.path())
                 .map_err(|e| format!("prompts/{name} を消せません: {e}"))?;
         }
-    }
-
-    // 名前の順に書く
-    for (name, text) in &files {
-        crate::fsutil::write_atomic(&out_dir.join(name), text.as_bytes())
-            .map_err(|e| format!("prompts/{name} を書けません: {e}"))?;
     }
     log.info(format!(
         "prompts/ に {} 個のファイルを書きました",

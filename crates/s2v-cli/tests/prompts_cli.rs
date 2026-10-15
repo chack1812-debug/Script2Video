@@ -228,6 +228,37 @@ fn prompts_link_or_file_is_failed_without_deleting() {
     }
 }
 
+#[test]
+fn prompts_link_to_inside_folder_is_failed_without_deleting() {
+    // 台本フォルダの内側を指すリンクも拒否し、リンク先の生成名のファイルを消さない
+    let p = project(BODY, true);
+    let inner = p.dir.join("elsewhere");
+    fs::create_dir_all(&inner).unwrap();
+    fs::write(inner.join("S01.md"), "内").unwrap();
+    fs::write(inner.join("S09.md"), "内2").unwrap();
+    if make_dir_link(&p.prompts(), &inner) {
+        assert_eq!(p.run(), Outcome::Failed);
+        assert_eq!(fs::read_to_string(inner.join("S01.md")).unwrap(), "内");
+        assert_eq!(fs::read_to_string(inner.join("S09.md")).unwrap(), "内2");
+    }
+}
+
+#[test]
+fn write_failure_keeps_existing_generated_files() {
+    // S01.md という名前のフォルダがあると書き込みが失敗する。その時点で古い S09.md は消えない
+    let p = project(BODY, true);
+    let dir = p.prompts();
+    fs::create_dir_all(dir.join("S01.md")).unwrap();
+    fs::write(dir.join("S09.md"), "古いシーン").unwrap();
+    fs::write(dir.join("index.md"), "古い一覧").unwrap();
+    assert_eq!(p.run(), Outcome::Failed, "{}", p.log());
+    assert_eq!(
+        fs::read_to_string(dir.join("S09.md")).unwrap(),
+        "古いシーン"
+    );
+    assert!(dir.join("S01.md").is_dir());
+}
+
 /// timeline.json の時刻をすべて 0 にする(`duration_ms` が 0 の台本を再現する)。
 fn zero_all_times(v: &mut serde_json::Value) {
     match v {
