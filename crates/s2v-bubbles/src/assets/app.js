@@ -21,6 +21,9 @@ async function main() {
   const onSessionLost = () => {
     ui.sessionLost = true;
     ui.playing = false;
+    // 後から結線される player も含めて再生を止め、背景のメディアの読み込みも止める(表示は最後のまま)
+    if (ext.player && typeof ext.player.stop === "function") ext.player.stop();
+    if (view) view.releaseBackground();
     setStatus(SESSION_LOST_TEXT);
   };
 
@@ -41,46 +44,68 @@ async function main() {
 
   const bgSpec = (kind, extra) => ({ kind, fit: state.fit, background: state.background, ...extra });
 
+  // frame の blob URL を解放する(frame 以外の背景へ切り替えた後に呼ぶ)
+  function dropFrame() {
+    if (frameShown) URL.revokeObjectURL(frameShown.url);
+    frameShown = null;
+  }
+
   function showFrame(cut, n) {
+    if (ui.sessionLost) return;
     frames.setCurrent(cut.id, n);
     if (frameShown && frameShown.cutId === cut.id && frameShown.n === n) {
-      view.setBackground(bgSpec("frame", { url: frameShown.url }));
+      view.setBackground(bgSpec("frame", { url: frameShown.url, cutId: cut.id }));
       return;
     }
-    if (ui.sessionLost) return;
     frames.request(
       cut.id,
       n,
       (blob) => {
+        if (ui.sessionLost) return;
         const url = URL.createObjectURL(blob);
-        if (frameShown) URL.revokeObjectURL(frameShown.url);
+        const old = frameShown;
         frameShown = { cutId: cut.id, n, url };
-        view.setBackground(bgSpec("frame", { url }));
+        view.setBackground(bgSpec("frame", { url, cutId: cut.id }));
+        if (old) URL.revokeObjectURL(old.url);
       },
-      () => view.setBackground(bgSpec("unavailable")),
+      () => {
+        if (ui.sessionLost) return;
+        view.setBackground(bgSpec("unavailable"));
+        dropFrame();
+      },
     );
   }
 
   // 素材の読み込みエラー: HEAD で 403 ならセッション切れ(api が onSessionLost を呼ぶ)
   async function onAssetError(cut, kind) {
+    if (ui.sessionLost) return;
     const status = await api.head(cut.asset.url);
     if (status === 403 || ui.sessionLost) return;
+    // 待つ間に別のカットへ移っていたら、このカットのエラーは今の表示に関係しない
+    const now = cutAt(state, ui.n);
+    if (!now || now.id !== cut.id) {
+      if (kind === "video" && cut.asset.frame_url) frameMode.add(cut.id);
+      return;
+    }
     if (kind === "video" && cut.asset.frame_url) {
       frameMode.add(cut.id);
       redraw(ui.n);
     } else {
       view.setBackground(bgSpec("unavailable"));
+      dropFrame();
     }
   }
 
   function updateBackground(cut, n) {
     if (!cut || !cut.asset) {
       view.setBackground(bgSpec("none"));
+      dropFrame();
       return;
     }
     const a = cut.asset;
     if (a.kind !== "video") {
-      view.setBackground(bgSpec("image", { url: a.url, onError: () => onAssetError(cut, "image") }));
+      view.setBackground(bgSpec("image", { url: a.url, cutId: cut.id, onError: () => onAssetError(cut, "image") }));
+      dropFrame();
       return;
     }
     if (frameMode.has(cut.id)) {
@@ -89,7 +114,10 @@ async function main() {
     }
     // 止まっているときは素材の中のコマ k の時刻に置く(再生中の同期は player.js)
     const k = assetFrame(n, cut.frames[0], a.frames, a.looped);
-    view.setBackground(bgSpec("video", { url: a.url, time: k / state.fps, onError: () => onAssetError(cut, "video") }));
+    view.setBackground(
+      bgSpec("video", { url: a.url, cutId: cut.id, time: k / state.fps, onError: () => onAssetError(cut, "video") }),
+    );
+    dropFrame();
   }
 
   // --- 重ね画像 ---
@@ -113,6 +141,7 @@ async function main() {
 
   // --- コマの描画 ---
   function redraw(n) {
+    if (ui.sessionLost) return;
     ui.n = n;
     view.setFrame(n);
     const cut = cutAt(state, n);
@@ -136,13 +165,16 @@ async function main() {
   // --- 操作 ---
   const handlers = {
     onSelectItem(id) {
+      if (ui.sessionLost) return;
       ui.selected = id;
       const it = editor.items.find((x) => x.id === id);
       refreshChrome();
       if (it && !(it.frames[0] <= ui.n && ui.n < it.frames[1])) seek(it.frames[0]);
       else redraw(ui.n);
     },
-    onSeek: (n) => seek(n),
+    onSeek: (n) => {
+      if (!ui.sessionLost) seek(n);
+    },
     onPlayToggle() {
       if (ui.sessionLost) return;
       if (ext.player) ui.playing ? ext.player.stop() : ext.player.play();
@@ -168,6 +200,7 @@ async function main() {
   };
 
   function seek(n) {
+    if (ui.sessionLost) return;
     if (ext.player) ext.player.seek(n);
     redraw(n);
   }

@@ -64,7 +64,7 @@ export function mountView(root, state, handlers) {
   // spec = {kind:"none"|"image"|"video"|"frame"|"unavailable", url?, fit, background, time?, onError?}
   function setBackground(spec) {
     stage.style.backgroundColor = spec.background || "";
-    const key = spec.kind + "|" + (spec.url || "");
+    const key = spec.kind + "|" + (spec.cutId || "") + "|" + (spec.url || "");
     if (key !== bgKey) {
       bgKey = key;
       clear(stage);
@@ -97,6 +97,15 @@ export function mountView(root, state, handlers) {
         }
       }
     }
+  }
+
+  /** 背景のメディアの読み込みを止める(セッション切れの後)。表示は最後のまま。 */
+  function releaseBackground() {
+    if (bgEl) {
+      bgEl.removeAttribute("src");
+      if (bgEl.tagName === "VIDEO") bgEl.load();
+    }
+    bgKey = null;
   }
 
   // --- 重ね画像 ---
@@ -299,6 +308,7 @@ export function mountView(root, state, handlers) {
     renderList,
     renderFrame,
     setBackground,
+    releaseBackground,
     setStatus,
     setWarnings,
     setDirty,
