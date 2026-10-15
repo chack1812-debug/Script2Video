@@ -268,9 +268,7 @@ async function main() {
 
   view = mountView(document.body, state, handlers);
   view.setWarnings(state.warnings);
-  // player は Task 6 が ext.player に入れる。それまでは呼ばれても何もしない
-  const playerProxy = { stop: () => ext.player?.stop?.(), seek: (n) => ext.player?.seek?.(n) };
-  ext.editing = attachEditing({ view, editor, state, ui, player: playerProxy, cache, redraw, toast: setStatus });
+  ext.editing = attachEditing({ view, editor, state, ui, player: ext.player, cache, redraw, toast: setStatus });
   setStatus(
     "シーン " + state.scenes.length + " 件、項目 " + state.items.length + " 件、警告 " + state.warnings.length + " 件",
   );
