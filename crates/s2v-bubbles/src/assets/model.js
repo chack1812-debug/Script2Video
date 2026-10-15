@@ -165,8 +165,8 @@ export class FrameFetcher {
     this._cur = { cutId, n };
   }
 
-  request(cutId, n, onResult) {
-    const req = { cutId, n, onResult };
+  request(cutId, n, onResult, onError) {
+    const req = { cutId, n, onResult, onError };
     if (this._busy) {
       this._waiting = req;
       return;
@@ -176,14 +176,18 @@ export class FrameFetcher {
 
   async _start(req) {
     this._busy = true;
-    let res = null;
+    let res;
     try {
       res = await this._fetch(req.cutId, req.n);
-    } catch {
-      res = null;
+    } catch (e) {
+      res = { ok: false, status: 0, errors: [String(e && e.message ? e.message : e)] };
     }
     this._busy = false;
-    if (res && res.ok && this._cur && this._cur.cutId === req.cutId && this._cur.n === req.n) req.onResult(res.blob);
+    // 今のコマと一致する応答だけを渡す(古い成功も失敗も捨てる)
+    if (this._cur && this._cur.cutId === req.cutId && this._cur.n === req.n) {
+      if (res && res.ok) req.onResult(res.blob);
+      else if (req.onError) req.onError({ status: (res && res.status) || 0, errors: errorsOf(res) });
+    }
     const next = this._waiting;
     this._waiting = null;
     if (next) this._start(next);

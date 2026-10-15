@@ -206,3 +206,56 @@ test("image_cache_limit_and_revoke", () => {
   c.drop(["C"]);
   assert.deepEqual(revoked, ["u2", "u1", "u3"]);
 });
+
+test("frame_cut_id_mismatch_is_dropped", async () => {
+  const d = [];
+  const ff = new FrameFetcher(() => { const x = deferred(); d.push(x); return x.p; });
+  const got = [];
+  ff.setCurrent("C", 10);
+  ff.request("C", 10, (b) => got.push(["C", b]));
+  ff.setCurrent("D", 10);
+  ff.request("D", 10, (b) => got.push(["D", b]));
+  d[0].resolve({ ok: true, blob: "bC" }); await tick(); await tick();
+  assert.deepEqual(got, []);
+  d[1].resolve({ ok: true, blob: "bD" }); await tick(); await tick();
+  assert.deepEqual(got, [["D", "bD"]]);
+});
+
+test("frame_failure_calls_on_error_only_when_current", async () => {
+  const d = [];
+  const asked = [];
+  const ff = new FrameFetcher((cut, n) => { asked.push(n); const x = deferred(); d.push(x); return x.p; });
+  const results = [], errors = [];
+  ff.setCurrent("C", 1);
+  ff.request("C", 1, (b) => results.push(b), (e) => errors.push(["1", e]));
+  ff.setCurrent("C", 2);
+  ff.request("C", 2, (b) => results.push(b), (e) => errors.push(["2", e]));
+  d[0].resolve({ ok: false, status: 500, errors: ["x"] }); await tick(); await tick();
+  assert.deepEqual(errors, []);            // 古い失敗は捨てる
+  assert.deepEqual(asked, [1, 2]);         // 失敗の後も次の要求は送られる
+  d[1].resolve({ ok: false, status: 404, errors: ["無い"] }); await tick(); await tick();
+  assert.deepEqual(errors, [["2", { status: 404, errors: ["無い"] }]]);
+  assert.deepEqual(results, []);
+});
+
+test("frame_exception_calls_on_error", async () => {
+  const ff = new FrameFetcher(async () => { throw new Error("切れた"); });
+  const errors = [];
+  ff.setCurrent("C", 1);
+  ff.request("C", 1, () => assert.fail(), (e) => errors.push(e));
+  await tick(); await tick();
+  assert.deepEqual(errors, [{ status: 0, errors: ["切れた"] }]);
+});
+
+test("queue_survives_api_throw", async () => {
+  let n = 0;
+  const api = {
+    render: async () => { if (n++ === 0) throw new Error("boom"); return { ok: true, png: new Uint8Array([1]), origin: [0, 0], clipped: false }; },
+    layout: async () => ({ ok: true, items: baseItems() }),
+  };
+  const ed = new Editor(api, { items: baseItems() });
+  const a = ed.enqueue("A", P({ x: 1 })), b = ed.enqueue("B", P({ x: 2 }));
+  assert.equal((await a).rejected, true);
+  assert.equal((await b).ok, true);
+  assert.equal(ed.confirmed.A, undefined);
+});
