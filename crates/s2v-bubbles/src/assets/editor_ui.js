@@ -1,11 +1,10 @@
 // 編集の操作(選択・ドラッグ・矢印キー・数値の欄・自動に戻す)。DOM を触るが、計算は geom.js と edit_calc.js に任せる。
 // 確定は model.Editor.enqueue に渡し(直列化はそちら)、結果を画面に反映する。
-import { dragCorner, dragMove, dragTail, fitView, hitTest, nudge, tailTip, toCanvas, toView } from "./geom.js";
-import { hitHandle, parseIntField, placementOf, samePlacement, withField } from "./edit_calc.js";
-import { validateOffset } from "./model.js";
+import { dragCorner, dragMove, dragTail, fitView, hitTest, tailTip, toCanvas, toView } from "./geom.js";
+import { hitHandle } from "./edit_calc.js";
+import { EditSession } from "./edit_session.js";
 import { itemsAt } from "./timeline.js";
 
-const ARROW_WAIT_MS = 300;
 const FORM_TAGS = new Set(["INPUT", "TEXTAREA", "BUTTON", "SELECT"]);
 const CORNERS = ["nw", "ne", "sw", "se"];
 
@@ -43,11 +42,8 @@ export function attachEditing({ view, editor, state, ui, player, cache, redraw, 
   // 確定するまで見せる配置(ドラッグ中・矢印キー中・確定の待ち中)。{ id, placed }
   let shadow = null;
   let drag = null; // { id, kind, start, sx, sy, pointerId }
-  let arrow = null; // { id, placed, timer }
 
   const itemById = (id) => editor.items.find((it) => it.id === id) || null;
-  // 操作の起点: 最後に待ち行列へ入れた手動の値、無ければ今の配置
-  const baseOf = (item) => placementOf(editor.lastQueued(item.id) || item.placed);
   const selectedVisible = () => {
     if (!ui.selected) return null;
     return itemsAt(editor.items, ui.n).find((it) => it.id === ui.selected) || null;
@@ -113,13 +109,31 @@ export function attachEditing({ view, editor, state, ui, player, cache, redraw, 
     refresh(!fromNumber);
   }
 
-  // 変化が無ければ何もしない(自動のままの項目は今の配置と比べる)
-  function isUnchanged(item, next) {
-    const q = editor.lastQueued(item.id);
-    return samePlacement(next, q || item.placed);
-  }
+  // 編集の状態(矢印の待ち・基準値・二重の確定の判定)は edit_session.js
+  const session = new EditSession({
+    editor,
+    cw,
+    ch,
+    hooks: {
+      commit,
+      preview: (id, placed) => {
+        shadow = { id, placed };
+        sync();
+      },
+      discard: () => {
+        shadow = null;
+        sync();
+      },
+    },
+    activeInput: () => {
+      const active = document.activeElement;
+      for (const [field, el] of inputs) if (el === active && ui.selected) return { id: ui.selected, field, text: el.value };
+      return null;
+    },
+  });
 
   function select(id) {
+    session.beforeOther();
     ui.selected = id;
     refresh(false);
   }
@@ -145,14 +159,15 @@ export function attachEditing({ view, editor, state, ui, player, cache, redraw, 
     const kind = sel ? hitHandle(shadow && shadow.id === sel.id ? shadow.placed : sel.placed, c.x, c.y, curFit().scale) : null;
     if (sel && kind) {
       e.preventDefault();
-      if (player && player.stop) player.stop();
-      drag = { id: sel.id, kind, start: baseOf(sel), sx: c.x, sy: c.y, pointerId: e.pointerId };
-      ui.dragging = true;
+      // capture できなければドラッグを始めない(pointerup を取りこぼすため)
       try {
         box.setPointerCapture(e.pointerId);
       } catch {
-        // capture できなくても、box 上の移動は拾える
+        return;
       }
+      if (player && player.stop) player.stop();
+      drag = { id: sel.id, kind, start: session.dragStart(sel), sx: c.x, sy: c.y, pointerId: e.pointerId };
+      ui.dragging = true;
       return;
     }
     // ドラッグではなく選択: 重なっていれば前面の項目、空白なら選択を外す
@@ -184,32 +199,15 @@ export function attachEditing({ view, editor, state, ui, player, cache, redraw, 
       // すでに解放されている
     }
     const placed = apply ? dragPlaced(d, canvasPoint(e)) : null;
-    const item = itemById(d.id);
-    if (!placed || !item || isUnchanged(item, placed)) {
+    if (!session.dragEnd(itemById(d.id), placed)) {
       shadow = null; // 取り消し、または動いていない: 輪郭を捨てて元に戻す
       sync();
-      return;
     }
-    commit(d.id, placed);
   }
   box.addEventListener("pointerup", (e) => endDrag(e, true));
   box.addEventListener("pointercancel", (e) => endDrag(e, false));
 
   // --- 矢印キー ---
-  function flushArrow() {
-    if (!arrow) return Promise.resolve();
-    const a = arrow;
-    arrow = null;
-    clearTimeout(a.timer);
-    const item = itemById(a.id);
-    if (!item || isUnchanged(item, a.placed)) {
-      shadow = null;
-      sync();
-      return Promise.resolve();
-    }
-    return commit(a.id, a.placed);
-  }
-
   document.addEventListener("keydown", (e) => {
     if (ui.sessionLost || ui.dragging) return;
     const t = e.target;
@@ -218,45 +216,21 @@ export function attachEditing({ view, editor, state, ui, player, cache, redraw, 
     if (!ui.selected) return;
     const item = itemById(ui.selected);
     if (!item) return;
-    const from = arrow && arrow.id === item.id ? arrow.placed : baseOf(item);
-    const next = nudge(from, e.key, e.shiftKey, cw, ch);
-    if (!next) return;
+    const key = e.key;
+    if (!key.startsWith("Arrow")) return;
     e.preventDefault();
     if (player && player.stop) player.stop();
-    const a = arrow || { id: item.id, placed: null, timer: 0 };
-    clearTimeout(a.timer);
-    a.id = item.id;
-    a.placed = next;
-    a.timer = setTimeout(() => flushArrow(), ARROW_WAIT_MS);
-    arrow = a;
-    shadow = { id: item.id, placed: next };
-    sync();
+    session.arrowKey(item, key, e.shiftKey);
   });
 
   // --- 数値の欄 ---
   function commitNumber(id, field, text) {
     if (ui.sessionLost) return Promise.resolve();
-    const item = itemById(id);
-    if (!item) return Promise.resolve();
-    const restore = () => {
-      if (ui.selected === id) refresh(false);
-    };
-    const parsed = field.endsWith("_ms") ? validateOffset(text) : parseIntField(text);
-    if (!parsed.ok) {
-      toast(parsed.reason);
-      restore();
-      return Promise.resolve();
-    }
-    const next = withField(baseOf(item), field, parsed.value);
-    if (!next) {
-      restore();
-      return Promise.resolve();
-    }
-    if (isUnchanged(item, next)) {
-      restore(); // 同じ値(「050」などの表記ゆれも整える)
-      return Promise.resolve();
-    }
-    return commit(id, next, { fromNumber: true });
+    const r = session.commitNumber(id, field, text);
+    if (r.kind === "commit") return r.promise;
+    if (r.kind === "invalid") toast(r.reason);
+    if (ui.selected === id) refresh(false); // 不正・同じ値: 欄を確定値に戻す(表記ゆれも整える)
+    return Promise.resolve();
   }
 
   for (const [field, input] of inputs) {
@@ -267,31 +241,17 @@ export function attachEditing({ view, editor, state, ui, player, cache, redraw, 
     });
   }
 
-  function flushNumber() {
-    const active = document.activeElement;
-    for (const [field, el] of inputs) {
-      if (el === active && ui.selected) return commitNumber(ui.selected, field, el.value);
-    }
-    return Promise.resolve();
-  }
-
   function revertAuto(id) {
     if (ui.sessionLost) return Promise.resolve();
-    if (arrow && arrow.id === id) {
-      clearTimeout(arrow.timer);
-      arrow = null;
-      shadow = null;
-    }
-    if (!editor.lastQueued(id)) return Promise.resolve(); // すでに自動
-    return commit(id, null);
+    return session.revert(id) || Promise.resolve();
   }
 
   // 保存・終了の前に、待っている入力を確定する
-  editor.addPendingFlusher(() => flushArrow());
-  editor.addPendingFlusher(() => flushNumber());
+  editor.addPendingFlusher(() => session.flushArrow());
+  editor.addPendingFlusher(() => session.flushInput());
 
   async function flushPending() {
-    await Promise.all([flushArrow(), flushNumber()]);
+    await session.flushAll();
     await editor.flush();
   }
 

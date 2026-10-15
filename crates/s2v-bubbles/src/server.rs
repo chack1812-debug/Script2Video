@@ -37,6 +37,11 @@ const PAGES: &[(&str, &str, &str)] = &[
     ("/api.js", include_str!("assets/api.js"), JS_TYPE),
     ("/view.js", include_str!("assets/view.js"), JS_TYPE),
     (
+        "/edit_session.js",
+        include_str!("assets/edit_session.js"),
+        JS_TYPE,
+    ),
+    (
         "/edit_calc.js",
         include_str!("assets/edit_calc.js"),
         JS_TYPE,
