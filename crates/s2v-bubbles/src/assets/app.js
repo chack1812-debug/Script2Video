@@ -4,6 +4,7 @@ import { createApi } from "./api.js";
 import { Editor, FrameFetcher, ImageCache, withKind } from "./model.js";
 import { assetFrame, cutAt, itemsAt } from "./timeline.js";
 import { attachEditing } from "./editor_ui.js";
+import { createPlayer } from "./player.js";
 import { mountView } from "./view.js";
 
 const SESSION_LOST_TEXT = "セッションが切れました。bubbles を起動し直してください";
@@ -110,6 +111,12 @@ async function main() {
       return;
     }
     if (frameMode.has(cut.id)) {
+      if (ui.playing) {
+        // 再生中は frame を要求しない。最後に表示した画像のまま(無ければ素材なしの表示)
+        if (frameShown) view.setBackground(bgSpec("frame", { url: frameShown.url, cutId: frameShown.cutId }));
+        else view.setBackground(bgSpec("none"));
+        return;
+      }
       showFrame(cut, n);
       return;
     }
@@ -207,9 +214,52 @@ async function main() {
 
   function seek(n) {
     if (ui.sessionLost) return;
+    // player に任せる(動画の seeked を待つ場合も含め、描き直しは player が redraw を呼ぶ)
     if (ext.player) ext.player.seek(n);
-    redraw(n);
+    else redraw(n);
   }
+
+  // 再生中のコマの更新(背景の動画には触れず、スライダーと重ね画像だけ)
+  function drawPlaying(n) {
+    if (ui.sessionLost) return;
+    ui.n = n;
+    view.setFrame(n);
+    view.renderFrame({
+      n,
+      cut: cutAt(state, n),
+      items: itemsAt(editor.items, n),
+      cache,
+      selected: ui.selected,
+      onMissing: requestImage,
+    });
+  }
+
+  const audio = document.createElement("audio");
+  audio.preload = "auto";
+  audio.src = "/media/audio";
+  ext.player = createPlayer({
+    audio,
+    video: () => view.videoElement(),
+    state,
+    getN: () => ui.n,
+    setN: (n) => {
+      ui.n = n;
+    },
+    frames,
+    onSessionLost,
+    isLost: () => ui.sessionLost,
+    showCut: (cut, n) => updateBackground(cut, n),
+    redraw: (n) => redraw(n),
+    onFrame: drawPlaying,
+    onPlayingChange: (p) => {
+      ui.playing = p;
+      view.setPlaying(p);
+    },
+    onAudioError: async () => {
+      const status = await api.head("/media/audio");
+      if (status !== 403 && !ui.sessionLost) setStatus("音声を読み込めません");
+    },
+  });
 
   view = mountView(document.body, state, handlers);
   view.setWarnings(state.warnings);

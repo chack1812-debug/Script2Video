@@ -685,6 +685,7 @@ fn embedded_modules_are_served() {
         "/model.js",
         "/api.js",
         "/view.js",
+        "/player.js",
         "/app.js",
     ] {
         let r = Req::new("GET", path, p).cookie(&c).send(p);

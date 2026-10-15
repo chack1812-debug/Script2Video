@@ -51,6 +51,7 @@ const PAGES: &[(&str, &str, &str)] = &[
         include_str!("assets/editor_ui.js"),
         JS_TYPE,
     ),
+    ("/player.js", include_str!("assets/player.js"), JS_TYPE),
 ];
 
 /// メディアのスレッドの同時数の上限。
