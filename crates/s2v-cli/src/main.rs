@@ -38,6 +38,19 @@ enum Command {
         #[arg(long)]
         config: Option<PathBuf>,
     },
+    /// 吹き出し・ト書きの配置を調整するローカルの画面を起動する(終了は画面の「終了」)
+    Bubbles {
+        script: PathBuf,
+        /// 設定ファイル(省略時は同梱の既定設定)
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// 待ち受けのポート(省略時は空いているポートを自動で選ぶ)
+        #[arg(long)]
+        port: Option<u16>,
+        /// ブラウザを自動で開かない
+        #[arg(long)]
+        no_open: bool,
+    },
     /// timeline.json から素材のプロンプト(prompts/S01.md …)と一覧(prompts/index.md)を作る
     Prompts {
         script: PathBuf,
@@ -65,6 +78,17 @@ fn main() -> ExitCode {
         Command::Render { script, config } => {
             s2v_cli::run_render(&s2v_cli::RenderArgs { script, config })
         }
+        Command::Bubbles {
+            script,
+            config,
+            port,
+            no_open,
+        } => s2v_cli::run_bubbles(&s2v_cli::BubblesArgs {
+            script,
+            config,
+            port,
+            no_open,
+        }),
         Command::Prompts { script, config } => {
             s2v_cli::run_prompts(&s2v_cli::PromptsArgs { script, config })
         }

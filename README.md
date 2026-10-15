@@ -6,6 +6,7 @@
 script2video number <台本.txt>
 script2video build <台本.txt> [--voice-dir <収録フォルダ>] [--config <設定.toml>] [--no-cache]
 script2video prompts <台本.txt> [--config <設定.toml>]
+script2video bubbles <台本.txt> [--config <設定.toml>] [--port <N>] [--no-open]
 script2video render <台本.txt> [--config <設定.toml>]
 ```
 
@@ -96,6 +97,25 @@ script2video prompts 第1話.txt --config config.toml
 - `0`: 成功
 - `1`: `#visual` の無いカットがある、または台本が `build` の後に変わった(プロンプトは書く)
 - `2`: `build` がまだ(または `timeline.json` が使えない)、`prompts` がリンクか台本フォルダの外を指している、台本フォルダに `prompts` というファイルがある、書き込みの失敗、他の `number`・`build`・`render`・`prompts` が同じ台本フォルダで実行中(何も消さない)
+
+## bubbles(吹き出し・ト書きの配置を画面で調整する)
+
+```
+script2video bubbles 第1話.txt
+script2video bubbles 第1話.txt --config config.toml --port 8765 --no-open
+```
+
+注意: 2d-1 の画面は仮のものです(項目の一覧と警告を表示し、「終了」で止められるだけ)。配置を動かして保存する操作は 2d-2 で加えます。サーバー側の API(配置の計算・プレビューの描画・`bubbles.json` の保存)は動きます。
+
+前提: ffmpeg・ffprobe が使えること(`render` と同じ検査)。先に `build` を実行しておく。台本・収録が `build` の後に変わっていると、`render` と同じく起動しません(終了コード 2)。
+
+- 起動すると標準出力に `http://127.0.0.1:<ポート>/?token=<64 桁の16進>` の 1 行を出し、既定のブラウザで開く(Windows のみ。開けなかったときは警告を出すので、表示した URL を自分で開く)。`--no-open` ならブラウザを開かず URL を表示するだけ。`--port` を省くと空いているポートを自動で選ぶ。指定したポートが使えなければ終了コード 2。
+- URL の `token` は起動のたびに変わる使い捨ての合言葉で、`Process.log` には書かない。ブラウザは最初の要求でクッキー(`s2v_<ポート>`)を受け取る。別の台本の `bubbles` を同時に起動しても、ポートごとにクッキー名が違うので混ざらない。
+- 起動中は `tracks/` の素材と `full_dialogue.wav` を、他のプログラムから上書き・削除・改名できないように開いたままにする。素材の差し替えは `bubbles` を終えてから行う。他のプログラムが書き込みのために開いている素材は「素材なし」として警告し、その素材なしで続ける。素材が無いカットも警告して続ける。
+- 保存先は台本フォルダの `bubbles.json`。保存のたびに直前の内容を `bubbles.json.bak` に残す(既存の `.bak` は置き換える)。`bubbles.json` や `.bak` がリンクやフォルダのときは何も変えずに保存を断る。
+- 終了は画面の「終了」(`POST /api/quit`)。受け付けを止め、ffmpeg とメディアの応答を止めて(最大 5 秒待つ)、`Process.log` に終了を書いてから終わる。Ctrl+C ではプロセスがそのまま終わるので、未保存の変更は失われ、`Process.log` に終了の行は書かれない(ロックと素材のハンドルは OS が外す)。
+- 終了コード: `0` 正常に終了、`1` 警告ありで起動して終了、`2` 起動前の失敗(検査・ポート・ロック・`full_dialogue.wav` を開けない)。同じ台本フォルダで `number`・`build`・`prompts`・`render` や別の `bubbles` が動いていると、後から始めた方が終了コード 2 で止まる。
+- 守る相手: 127.0.0.1 だけで待ち受け、トークン・クッキー・Host/Origin の検査・`Content-Security-Policy` で、ブラウザで開いた他のウェブページや同じ PC の他のローカルのサービスからの操作を防ぐ。同じ PC で動く他のプログラム(トークンやクッキーを読める相手)からは守れない。
 
 ## render(動画を作る)
 

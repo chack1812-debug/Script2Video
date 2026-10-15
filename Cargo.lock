@@ -791,6 +791,7 @@ dependencies = [
  "clap",
  "hound",
  "s2v-audio",
+ "s2v-bubbles",
  "s2v-core",
  "s2v-export",
  "s2v-render",

@@ -17,6 +17,7 @@ s2v-export = { path = "../s2v-export" }
 s2v-timeline = { path = "../s2v-timeline" }
 s2v-render = { path = "../s2v-render" }
 s2v-video = { path = "../s2v-video" }
+s2v-bubbles = { path = "../s2v-bubbles" }
 anyhow.workspace = true
 serde.workspace = true
 serde_json = "1"
