@@ -245,6 +245,10 @@ export function mountView(root, state, handlers) {
     dirtyEl.textContent = dirty ? "未保存の変更あり" : "";
   }
 
+  function setSaving(saving) {
+    $("save").disabled = !!saving;
+  }
+
   // --- 数値の欄(確定の処理は Task 7 が onNumberCommit を受ける) ---
   const inputs = new Map();
   let numbersId = null;
@@ -317,6 +321,7 @@ export function mountView(root, state, handlers) {
     setStatus,
     setWarnings,
     setDirty,
+    setSaving,
     setNumbers,
     setFrame,
     setPlaying,

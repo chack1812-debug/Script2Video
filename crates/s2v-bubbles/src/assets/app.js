@@ -6,11 +6,12 @@ import { attachEditing } from "./editor_ui.js";
 import { assetFrame, cutAt, itemsAt, redrawMode } from "./timeline.js";
 import { createPlayer } from "./player.js";
 import { mountView } from "./view.js";
+import { QUIT_DONE_TEXT, SESSION_LOST_QUIT_TEXT, decideQuit, formatSaveResult } from "./save_quit.js";
 
 const SESSION_LOST_TEXT = "セッションが切れました。bubbles を起動し直してください";
 
 async function main() {
-  const ui = { n: 0, selected: null, playing: false, dragging: false, sessionLost: false };
+  const ui = { n: 0, selected: null, playing: false, dragging: false, sessionLost: false, saving: false };
   // 後続のタスクが差し込む口(player: Task 6、editing: Task 7・8)
   const ext = { player: null, editing: null };
   let view = null;
@@ -189,20 +190,39 @@ async function main() {
       if (ext.player) ui.playing ? ext.player.stop() : ext.player.play();
     },
     async onSave() {
-      if (ui.sessionLost) return;
-      if (ext.editing) await ext.editing.flushPending();
-      const r = await editor.save();
-      if (r.ok) {
-        view.setWarnings([...state.warnings, ...r.warnings]);
-        setStatus("保存しました");
-      } else {
-        setStatus("保存できません: " + (r.errors || []).join(" / "));
+      if (ui.sessionLost || ui.saving) return;
+      ui.saving = true;
+      view.setSaving(true);
+      try {
+        // editor.save が保留中の入力の確定 → 待ち行列を空に → 確定した一式の送信、の順で行う
+        const r = await editor.save();
+        if (ui.sessionLost) return; // セッション切れの表示を上書きしない
+        const f = formatSaveResult(r);
+        view.setWarnings([...state.warnings, ...f.lines]);
+        setStatus(f.status);
+      } finally {
+        ui.saving = false;
+        view.setSaving(false);
+        view.setDirty(editor.isDirty());
       }
-      view.setDirty(editor.isDirty());
     },
     async onQuit() {
-      const r = await api.quit();
-      setStatus(r.ok ? "終了しました。このタブは閉じてかまいません" : (r.errors || []).join(" / "));
+      if (ui.sessionLost) {
+        setStatus(SESSION_LOST_QUIT_TEXT);
+        return;
+      }
+      const d = await decideQuit({
+        flushers: () => [editor.runPendingFlushers()],
+        flush: () => editor.flush(),
+        isDirty: () => editor.isDirty(),
+        confirm: (t) => window.confirm(t),
+        quit: () => api.quit(),
+        sessionLost: () => ui.sessionLost,
+      });
+      view.setDirty(editor.isDirty());
+      if (d.result === "quit") setStatus(QUIT_DONE_TEXT);
+      else if (d.result === "lost") setStatus(SESSION_LOST_QUIT_TEXT);
+      else if (d.result === "failed") setStatus("終了できません: " + d.errors.join(" / "));
     },
     onRevertAuto(id) {
       if (ext.editing) ext.editing.revertAuto(id);
@@ -274,6 +294,20 @@ async function main() {
   setStatus(
     "シーン " + state.scenes.length + " 件、項目 " + state.items.length + " 件、警告 " + state.warnings.length + " 件",
   );
+  // Ctrl+S は保存(ブラウザの保存ダイアログは出さない)
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === "s" || e.key === "S")) {
+      e.preventDefault();
+      handlers.onSave();
+    }
+  });
+  // 未保存の変更があるときだけ、閉じる前の確認を出す
+  window.addEventListener("beforeunload", (e) => {
+    if (editor.isDirty()) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
   refreshChrome();
   redraw(0);
   if (ui.sessionLost) setStatus(SESSION_LOST_TEXT);

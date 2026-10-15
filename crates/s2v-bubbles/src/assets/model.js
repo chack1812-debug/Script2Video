@@ -132,6 +132,11 @@ export class Editor {
     }
   }
 
+  // 保留中の入力(矢印キー・数値の欄)の確定を待ち行列へ入れ、その呼び出しの完了を待つ。
+  runPendingFlushers() {
+    return Promise.all(this._flushers.map((f) => f()));
+  }
+
   // 待ち行列が空になるまで待つ。
   async flush() {
     while (this._busy > 0) await this._tail;
@@ -139,7 +144,7 @@ export class Editor {
 
   // 保留中の入力を確定し、待ち行列を空にしてから、その時点の一式だけを送る。
   async save() {
-    await Promise.all(this._flushers.map((f) => f()));
+    await this.runPendingFlushers();
     await this.flush();
     const sent = copyManual(this.confirmed);
     const r = await this.api.save({ manual: withKind(sent, this.items) });

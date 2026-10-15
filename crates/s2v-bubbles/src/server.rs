@@ -52,6 +52,11 @@ const PAGES: &[(&str, &str, &str)] = &[
         JS_TYPE,
     ),
     ("/player.js", include_str!("assets/player.js"), JS_TYPE),
+    (
+        "/save_quit.js",
+        include_str!("assets/save_quit.js"),
+        JS_TYPE,
+    ),
 ];
 
 /// メディアのスレッドの同時数の上限。
