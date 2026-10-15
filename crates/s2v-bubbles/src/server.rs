@@ -233,7 +233,7 @@ impl Server {
         name: &str,
         req: Request,
         f: impl FnOnce(Request) + Send + 'static,
-    ) -> Result<(), Request> {
+    ) -> Result<(), Box<Request>> {
         let cell = Arc::new(Mutex::new(Some(req)));
         let inner = Arc::clone(&cell);
         let result = if self.fail_spawn.load(Ordering::SeqCst) {
@@ -255,7 +255,9 @@ impl Server {
                     "応答のスレッドを始められません: {e}"
                 )));
                 let req = cell.lock().ok().and_then(|mut g| g.take());
-                Err(req.expect("始められなかったスレッドは要求を取っていない"))
+                Err(Box::new(
+                    req.expect("始められなかったスレッドは要求を取っていない"),
+                ))
             }
         }
     }
@@ -406,7 +408,7 @@ impl Server {
         });
         if let Err(req) = spawned {
             // 枠と数えは、捨てられたクロージャとともに返済済み
-            reply_error(req, 500, "応答のスレッドを始められません");
+            reply_error(*req, 500, "応答のスレッドを始められません");
         }
         Flow::Continue
     }
@@ -473,7 +475,7 @@ impl Server {
             }
         });
         if let Err(req) = spawned {
-            reply_error(req, 500, "応答のスレッドを始められません");
+            reply_error(*req, 500, "応答のスレッドを始められません");
         }
         Flow::Continue
     }

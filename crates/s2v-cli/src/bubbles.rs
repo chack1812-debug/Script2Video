@@ -163,6 +163,7 @@ fn serve(
             port: args.port,
             ffmpeg,
             frame_worker: None,
+            fail_spawn: None,
         },
     )?;
 
