@@ -27,6 +27,8 @@ export async function decideQuit({ flushers, flush, isDirty, confirm, quit, sess
   await flush();
   if (sessionLost()) return { result: "lost" };
   if (isDirty() && !confirm(QUIT_CONFIRM_TEXT)) return { result: "cancelled" };
+  // 確認のダイアログの間に切れたかもしれないので、送る直前にもう一度確かめる
+  if (sessionLost()) return { result: "lost" };
   const r = await quit();
   if (r && r.ok) return { result: "quit" };
   return { result: "failed", errors: r && r.errors ? r.errors : ["失敗しました"] };

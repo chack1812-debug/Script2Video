@@ -37,7 +37,7 @@ async function main() {
     return;
   }
   const state = got;
-  const editor = new Editor(api, state);
+  const editor = new Editor(api, state, () => ui.sessionLost);
   const cache = new ImageCache(300, (u) => URL.revokeObjectURL(u));
   const frames = new FrameFetcher((cutId, n) => api.frame(cutId, n));
 

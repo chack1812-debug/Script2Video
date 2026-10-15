@@ -83,3 +83,22 @@ test("editor_run_pending_flushers_calls_all", async () => {
   await ed.runPendingFlushers();
   assert.deepEqual(called, [1, 2]);
 });
+
+test("quit_session_lost_during_confirm_does_not_send", async () => {
+  let lost = false;
+  const { o, log } = base({ isDirty: () => true, confirm: () => { lost = true; return true; }, sessionLost: () => lost });
+  assert.equal((await decideQuit(o)).result, "lost");
+  assert.ok(!log.includes("quit"));
+});
+
+test("save_session_lost_during_flusher_does_not_send", async () => {
+  let lost = false;
+  let sent = 0;
+  const api = { save: async () => { sent++; return { ok: true, warnings: [] }; } };
+  const ed = new Editor(api, { items: [] }, () => lost);
+  ed.addPendingFlusher(() => { lost = true; });
+  const r = await ed.save();
+  assert.equal(sent, 0);
+  assert.equal(r.ok, false);
+  assert.equal(r.status, 403);
+});

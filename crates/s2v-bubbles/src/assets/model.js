@@ -69,8 +69,10 @@ function errorsOf(r) {
 }
 
 export class Editor {
-  constructor(api, state) {
+  // isLost: セッションが切れているかを返す関数(保存の直前の確認に使う)
+  constructor(api, state, isLost = () => false) {
     this.api = api;
+    this.isLost = isLost;
     this.items = state.items;
     this.confirmed = {};
     for (const it of state.items) if (it.manual) this.confirmed[it.id] = pickPlacement(it.manual);
@@ -146,6 +148,9 @@ export class Editor {
   async save() {
     await this.runPendingFlushers();
     await this.flush();
+    if (this.isLost()) {
+      return { ok: false, status: 403, errors: ["セッションが切れました。bubbles を起動し直してください"] };
+    }
     const sent = copyManual(this.confirmed);
     const r = await this.api.save({ manual: withKind(sent, this.items) });
     if (r && r.ok) this.saved = normalize(sent);
