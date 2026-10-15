@@ -68,6 +68,16 @@ fn canvas_ok(c: Canvas) -> bool {
 /// 読み込みと検証(§5.2)。Err は理由の一覧(エラー 2)
 pub fn parse_bubbles(json: &str) -> Result<BubblesFile, Vec<String>> {
     let file: BubblesFile = serde_json::from_str(json).map_err(|e| vec![e.to_string()])?;
+    let errs = validate_file(&file);
+    if errs.is_empty() {
+        Ok(file)
+    } else {
+        Err(errs)
+    }
+}
+
+/// 型への変換の後の検証(§5.2)。誤りの一覧(空なら正しい)。`bubbles` の保存でも同じ検証を使う。
+pub fn validate_file(file: &BubblesFile) -> Vec<String> {
     let mut errs = Vec::new();
     if file.version != 1 {
         errs.push(format!(
@@ -124,11 +134,7 @@ pub fn parse_bubbles(json: &str) -> Result<BubblesFile, Vec<String>> {
             ));
         }
     }
-    if errs.is_empty() {
-        Ok(file)
-    } else {
-        Err(errs)
-    }
+    errs
 }
 
 /// `v * new / old` を四捨五入する(負の値は符号を分けて同様)。
@@ -234,6 +240,43 @@ pub fn expand_to_min(p: &Placed, min: (u32, u32), canvas: Canvas) -> Placed {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn validate_file_reports_the_same_errors_as_parse() {
+        let ok = r#"{"version":1,"canvas":{"w":1920,"h":1080},"items":{}}"#;
+        let f = parse_bubbles(ok).unwrap();
+        assert!(validate_file(&f).is_empty());
+        let mut bad = f.clone();
+        bad.items.insert(
+            "S01-L001".into(),
+            Placed {
+                kind: ItemKind::Note,
+                x: 0,
+                y: 0,
+                w: 10,
+                h: 10,
+                tail: None,
+                start_offset_ms: 0,
+                end_offset_ms: 0,
+            },
+        );
+        bad.items.insert(
+            "S01-L002".into(),
+            Placed {
+                kind: ItemKind::Bubble,
+                x: 1915,
+                y: 0,
+                w: 10,
+                h: 10,
+                tail: None,
+                start_offset_ms: 0,
+                end_offset_ms: 0,
+            },
+        );
+        let errs = validate_file(&bad);
+        assert!(errs.iter().any(|e| e.contains("S01-L001")), "{errs:?}"); // 種類の不一致
+        assert!(errs.iter().any(|e| e.contains("S01-L002")), "{errs:?}"); // 画面の外
+    }
 
     const OK: &str = r#"{"version":1,"canvas":{"w":1920,"h":1080},"items":{
         "S01-L003":{"kind":"bubble","x":1200,"y":80,"w":220,"h":420,"tail":{"dx":0,"dy":290},"start_offset_ms":0,"end_offset_ms":0},

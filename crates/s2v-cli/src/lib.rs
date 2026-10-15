@@ -1,11 +1,13 @@
 //! Script2Video のコマンド実装。`main.rs` は引数の解析だけを行い、ここを呼ぶ。
 
+pub mod bubbles;
 pub mod build;
 pub mod freshness;
 pub mod fsutil;
 pub mod layout;
 pub mod lock;
 pub mod number;
+pub mod prepare;
 pub mod proclog;
 pub mod prompts;
 pub mod prompts_md;
@@ -13,6 +15,7 @@ pub mod render;
 pub mod verify;
 pub mod work;
 
+pub use bubbles::{run_bubbles, BubblesArgs};
 pub use build::{run_build, BuildArgs};
 pub use number::run_number;
 pub use prompts::{run_prompts, PromptsArgs};

@@ -142,6 +142,9 @@ fn base_args() -> Vec<String> {
         .collect()
 }
 
+/// 入力ごとに `-i` の直前へ置く入力オプション。ネットワークなどの file 以外のプロトコルで読ませない。
+pub const PROTOCOL_WHITELIST: [&str; 2] = ["-protocol_whitelist", "file"];
+
 fn strs(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
@@ -159,6 +162,7 @@ pub fn cut_args(
         Background::Png { path } | Background::Jpeg { path } => {
             a.extend(strs(&["-loop", "1", "-framerate"]));
             a.push(s.fps.to_string());
+            a.extend(strs(&PROTOCOL_WHITELIST));
             a.push("-i".into());
             a.push(path.clone());
         }
@@ -166,11 +170,14 @@ pub fn cut_args(
             if *looped {
                 a.extend(strs(&["-stream_loop", "-1"]));
             }
+            a.extend(strs(&PROTOCOL_WHITELIST));
             a.push("-i".into());
             a.push(path.clone());
         }
     }
-    a.extend(strs(&["-f", "concat", "-safe", "0", "-i"]));
+    a.extend(strs(&["-f", "concat", "-safe", "0"]));
+    a.extend(strs(&PROTOCOL_WHITELIST));
+    a.push("-i".into());
     a.push(overlay_list.to_string());
     a.push("-filter_complex".into());
     a.push(cut_filter(bg, n, s));
@@ -251,9 +258,9 @@ pub fn concat_list(files: &[String]) -> String {
 /// カットを連結する引数。
 pub fn concat_args(list: &str, out: &str) -> Vec<String> {
     let mut a = base_args();
-    a.extend(strs(&[
-        "-f", "concat", "-safe", "0", "-i", list, "-c:v", "copy",
-    ]));
+    a.extend(strs(&["-f", "concat", "-safe", "0"]));
+    a.extend(strs(&PROTOCOL_WHITELIST));
+    a.extend(strs(&["-i", list, "-c:v", "copy"]));
     a.push(out.to_string());
     a
 }
@@ -261,7 +268,10 @@ pub fn concat_args(list: &str, out: &str) -> Vec<String> {
 /// 映像と音声を多重化する引数。
 pub fn mux_args(video: &str, wav: &str, out: &str, audio_bitrate: &str) -> Vec<String> {
     let mut a = base_args();
-    a.extend(strs(&["-i", video, "-i", wav]));
+    for input in [video, wav] {
+        a.extend(strs(&PROTOCOL_WHITELIST));
+        a.extend(strs(&["-i", input]));
+    }
     a.extend(strs(&[
         "-map",
         "0:v",
@@ -451,7 +461,7 @@ mod tests {
             "cut_0001.mp4",
             &s(),
         );
-        let head: Vec<&str> = a.iter().take(10).map(|x| x.as_str()).collect();
+        let head: Vec<&str> = a.iter().take(11).map(|x| x.as_str()).collect();
         assert_eq!(
             head,
             vec![
@@ -460,11 +470,12 @@ mod tests {
                 "-n",
                 "-stream_loop",
                 "-1",
+                "-protocol_whitelist",
+                "file",
                 "-i",
                 "D:/素材/波.mp4",
                 "-f",
-                "concat",
-                "-safe"
+                "concat"
             ]
         );
         let tail: Vec<&str> = a.iter().rev().take(4).map(|x| x.as_str()).collect();
@@ -502,8 +513,17 @@ mod tests {
             &s(),
         );
         assert_eq!(
-            &img[3..9],
-            &["-loop", "1", "-framerate", "30", "-i", "a.png"]
+            &img[3..11],
+            &[
+                "-loop",
+                "1",
+                "-framerate",
+                "30",
+                "-protocol_whitelist",
+                "file",
+                "-i",
+                "a.png"
+            ]
         );
     }
 
@@ -523,6 +543,8 @@ mod tests {
                 "concat",
                 "-safe",
                 "0",
+                "-protocol_whitelist",
+                "file",
                 "-i",
                 "concat.txt",
                 "-c:v",
@@ -536,7 +558,50 @@ mod tests {
             "output.tmp.mp4",
             "192k",
         );
-        assert_eq!(m.join(" "), "-nostdin -hide_banner -n -i video.mp4 -i D:/台本/full_dialogue.wav -map 0:v -map 1:a -c:v copy -c:a aac -profile:a aac_low -b:a 192k -ar 48000 -ac 2 -movflags +faststart output.tmp.mp4");
+        assert_eq!(m.join(" "), "-nostdin -hide_banner -n -protocol_whitelist file -i video.mp4 -protocol_whitelist file -i D:/台本/full_dialogue.wav -map 0:v -map 1:a -c:v copy -c:a aac -profile:a aac_low -b:a 192k -ar 48000 -ac 2 -movflags +faststart output.tmp.mp4");
+    }
+
+    #[test]
+    fn every_input_has_protocol_whitelist() {
+        // 全ての "-i" について、直前の "-i"(無ければ先頭)から今の "-i" までの間に
+        // 入力オプション "-protocol_whitelist file" がある
+        let png = Background::Png {
+            path: "a.png".into(),
+        };
+        let jpg = Background::Jpeg {
+            path: "a.jpg".into(),
+        };
+        let vid = |looped| Background::Video {
+            path: "v.mp4".into(),
+            looped,
+            matrix: "bt709".into(),
+            range: "tv".into(),
+        };
+        let mut all: Vec<Vec<String>> = [png, jpg, vid(true), vid(false)]
+            .iter()
+            .map(|bg| cut_args(bg, "ovl.txt", 60, "cut.mp4", &s()))
+            .collect();
+        all.push(concat_args("concat.txt", "video.mp4"));
+        all.push(mux_args("video.mp4", "a.wav", "out.mp4", "192k"));
+        for args in all {
+            let ii: Vec<usize> = args
+                .iter()
+                .enumerate()
+                .filter(|(_, a)| *a == "-i")
+                .map(|(i, _)| i)
+                .collect();
+            assert!(!ii.is_empty());
+            for &i in &ii {
+                let before = &args[..i];
+                let from = before.iter().rposition(|a| a == "-i").map_or(0, |p| p + 2);
+                assert!(
+                    before[from..]
+                        .windows(2)
+                        .any(|w| w == ["-protocol_whitelist", "file"]),
+                    "{args:?}"
+                );
+            }
+        }
     }
 }
 
@@ -614,6 +679,8 @@ mod cut_args_golden_tests {
                 "concat",
                 "-safe",
                 "0",
+                "-protocol_whitelist",
+                "file",
                 "-i",
                 "ovl.txt",
                 "-filter_complex",
@@ -642,10 +709,10 @@ mod cut_args_golden_tests {
     #[test]
     fn full_vectors() {
         let cases: Vec<(Background, Fit, Vec<&str>, &str)> = vec![
-            (vid(true), Fit::Contain, vec!["-stream_loop", "-1", "-i", "v.mp4"], "scale=1920:1080:force_original_aspect_ratio=decrease:in_color_matrix=bt601:in_range=pc:out_color_matrix=bt709:out_range=tv,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x000000,setsar=1,format=yuv420p,trim=end_frame=60"),
-            (vid(false), Fit::Cover, vec!["-i", "v.mp4"], "scale=1920:1080:force_original_aspect_ratio=increase:in_color_matrix=bt601:in_range=pc:out_color_matrix=bt709:out_range=tv,crop=1920:1080,setsar=1,format=yuv420p,tpad=stop_mode=clone:stop=-1,trim=end_frame=60"),
-            (Background::Png { path: "a.png".into() }, Fit::Contain, vec!["-loop", "1", "-framerate", "30", "-i", "a.png"], "scale=1920:1080:force_original_aspect_ratio=decrease:out_color_matrix=bt709:out_range=tv,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x000000,setsar=1,format=yuv420p,trim=end_frame=60"),
-            (Background::Jpeg { path: "a.jpg".into() }, Fit::Cover, vec!["-loop", "1", "-framerate", "30", "-i", "a.jpg"], "scale=1920:1080:force_original_aspect_ratio=increase:in_color_matrix=bt601:in_range=pc:out_color_matrix=bt709:out_range=tv,crop=1920:1080,setsar=1,format=yuv420p,trim=end_frame=60"),
+            (vid(true), Fit::Contain, vec!["-stream_loop", "-1", "-protocol_whitelist", "file", "-i", "v.mp4"], "scale=1920:1080:force_original_aspect_ratio=decrease:in_color_matrix=bt601:in_range=pc:out_color_matrix=bt709:out_range=tv,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x000000,setsar=1,format=yuv420p,trim=end_frame=60"),
+            (vid(false), Fit::Cover, vec!["-protocol_whitelist", "file", "-i", "v.mp4"], "scale=1920:1080:force_original_aspect_ratio=increase:in_color_matrix=bt601:in_range=pc:out_color_matrix=bt709:out_range=tv,crop=1920:1080,setsar=1,format=yuv420p,tpad=stop_mode=clone:stop=-1,trim=end_frame=60"),
+            (Background::Png { path: "a.png".into() }, Fit::Contain, vec!["-loop", "1", "-framerate", "30", "-protocol_whitelist", "file", "-i", "a.png"], "scale=1920:1080:force_original_aspect_ratio=decrease:out_color_matrix=bt709:out_range=tv,pad=1920:1080:(ow-iw)/2:(oh-ih)/2:color=0x000000,setsar=1,format=yuv420p,trim=end_frame=60"),
+            (Background::Jpeg { path: "a.jpg".into() }, Fit::Cover, vec!["-loop", "1", "-framerate", "30", "-protocol_whitelist", "file", "-i", "a.jpg"], "scale=1920:1080:force_original_aspect_ratio=increase:in_color_matrix=bt601:in_range=pc:out_color_matrix=bt709:out_range=tv,crop=1920:1080,setsar=1,format=yuv420p,trim=end_frame=60"),
         ];
         for (bg, fit, input, scale_part) in cases {
             let got = cut_args(&bg, "ovl.txt", 60, "cut.mp4", &st(fit));

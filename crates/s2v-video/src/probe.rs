@@ -1,5 +1,6 @@
 //! ffprobe の JSON 出力の解析と、カット・出力の検査。プロセスは起動しない(引数の組み立てと検査だけ)。
 
+use crate::ffmpeg::PROTOCOL_WHITELIST;
 use serde::Deserialize;
 
 /// ffprobe の 1 ストリーム(使う項目だけ)。
@@ -43,31 +44,36 @@ pub fn parse_probe(json: &str) -> Result<Probe, String> {
 
 /// ffprobe の引数(カット・出力の検査用)。
 pub fn probe_args(path: &str) -> Vec<String> {
-    [
-        "-v",
-        "error",
-        "-count_frames",
-        "-show_streams",
-        "-show_data_hash",
-        "sha256",
-        "-of",
-        "json",
-        path,
-    ]
-    .iter()
-    .map(|s| s.to_string())
-    .collect()
+    let mut a: Vec<String> = ["-v", "error"].iter().map(|s| s.to_string()).collect();
+    a.extend(PROTOCOL_WHITELIST.iter().map(|s| s.to_string()));
+    a.extend(
+        [
+            "-count_frames",
+            "-show_streams",
+            "-show_data_hash",
+            "sha256",
+            "-of",
+            "json",
+            path,
+        ]
+        .iter()
+        .map(|s| s.to_string()),
+    );
+    a
 }
 
 /// 素材の検査用の ffprobe の引数(フレームは数えない)。
 pub fn asset_probe_args(path: &str) -> Vec<String> {
-    ["-v", "error", "-show_streams", "-of", "json", path]
-        .iter()
-        .map(|s| s.to_string())
-        .collect()
+    let mut a: Vec<String> = ["-v", "error"].iter().map(|s| s.to_string()).collect();
+    a.extend(PROTOCOL_WHITELIST.iter().map(|s| s.to_string()));
+    a.extend(
+        ["-show_streams", "-of", "json", path]
+            .iter()
+            .map(|s| s.to_string()),
+    );
+    a
 }
 
-/// 値が明示されているか(なし・unknown・unspecified は明示なし)。
 fn explicit(v: &Option<String>) -> Option<&str> {
     match v.as_deref() {
         None | Some("") | Some("unknown") | Some("unspecified") => None,
@@ -410,6 +416,8 @@ mod tests {
             vec![
                 "-v",
                 "error",
+                "-protocol_whitelist",
+                "file",
                 "-count_frames",
                 "-show_streams",
                 "-show_data_hash",
@@ -417,6 +425,19 @@ mod tests {
                 "-of",
                 "json",
                 "cut_0001.mp4"
+            ]
+        );
+        assert_eq!(
+            asset_probe_args("a.mp4"),
+            vec![
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-show_streams",
+                "-of",
+                "json",
+                "a.mp4"
             ]
         );
     }
