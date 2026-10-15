@@ -136,14 +136,29 @@ pub fn media_response(
 }
 
 /// `start..=end` を順に読む `Read`。短い読み出しは繰り返す。
-pub struct RangeReader<'a> {
-    file: &'a LockedFile,
+pub struct RangeReader<'a, T: ReadAt + ?Sized = LockedFile> {
+    file: &'a T,
     next: u64,
     /// 読み終えた位置(含まない)。
     stop: u64,
 }
 
+/// 位置を指定した読み出し(テストで偽物を差し込めるようにする)。
+pub trait ReadAt {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize>;
+}
+
+impl ReadAt for LockedFile {
+    fn read_at(&self, buf: &mut [u8], offset: u64) -> io::Result<usize> {
+        LockedFile::read_at(self, buf, offset)
+    }
+}
+
 pub fn reader(file: &LockedFile, start: u64, end: u64) -> RangeReader<'_> {
+    reader_of(file, start, end)
+}
+
+fn reader_of<T: ReadAt + ?Sized>(file: &T, start: u64, end: u64) -> RangeReader<'_, T> {
     RangeReader {
         file,
         next: start,
@@ -151,25 +166,29 @@ pub fn reader(file: &LockedFile, start: u64, end: u64) -> RangeReader<'_> {
     }
 }
 
-impl Read for RangeReader<'_> {
+impl<T: ReadAt + ?Sized> Read for RangeReader<'_, T> {
+    /// 1 回の呼び出しで、要求の長さ(残りの範囲と buf の小さい方)を満たすまで
+    /// `read_at` を繰り返す。途中で 0 が返り範囲が残っていれば UnexpectedEof。
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
         if self.next >= self.stop || buf.is_empty() {
             return Ok(0);
         }
         let remain = self.stop - self.next;
         let want = buf.len().min(usize::try_from(remain).unwrap_or(usize::MAX));
-        loop {
-            match self.file.read_at(&mut buf[..want], self.next) {
+        let mut got = 0;
+        while got < want {
+            match self.file.read_at(&mut buf[got..want], self.next) {
                 // 範囲の途中でファイルが終わった(固定していれば起きない)
                 Ok(0) => return Err(io::ErrorKind::UnexpectedEof.into()),
                 Ok(n) => {
+                    got += n;
                     self.next += n as u64;
-                    return Ok(n);
                 }
                 Err(e) if e.kind() == io::ErrorKind::Interrupted => continue,
                 Err(e) => return Err(e),
             }
         }
+        Ok(got)
     }
 }
 
@@ -316,6 +335,52 @@ mod tests {
         let mut out = Vec::new();
         reader(&f, 250, 255).read_to_end(&mut out).unwrap();
         assert_eq!(out, (250..=255u8).collect::<Vec<_>>());
+    }
+
+    /// 1 回に 3 バイトまでしか返さない偽物。`limit` 到達で 0 を返す。
+    struct Short {
+        data: Vec<u8>,
+        limit: usize,
+    }
+    impl ReadAt for Short {
+        fn read_at(&self, buf: &mut [u8], offset: u64) -> std::io::Result<usize> {
+            let off = offset as usize;
+            let end = self.data.len().min(self.limit);
+            if off >= end {
+                return Ok(0);
+            }
+            let n = buf.len().min(3).min(end - off);
+            buf[..n].copy_from_slice(&self.data[off..off + n]);
+            Ok(n)
+        }
+    }
+
+    #[test]
+    fn single_read_fills_buf_despite_short_reads() {
+        let src = Short {
+            data: (0..100u8).collect(),
+            limit: 100,
+        };
+        let mut r = reader_of(&src, 10, 29);
+        let mut buf = [0u8; 8];
+        assert_eq!(r.read(&mut buf).unwrap(), 8);
+        assert_eq!(buf.to_vec(), (10..18u8).collect::<Vec<_>>());
+        // 残りの範囲(12 バイト)が buf より小さいときは残りだけ
+        let mut buf = [0u8; 32];
+        assert_eq!(r.read(&mut buf).unwrap(), 12);
+        assert_eq!(buf[..12].to_vec(), (18..30u8).collect::<Vec<_>>());
+        assert_eq!(r.read(&mut buf).unwrap(), 0);
+    }
+
+    #[test]
+    fn zero_in_middle_is_unexpected_eof() {
+        let src = Short {
+            data: (0..100u8).collect(),
+            limit: 15,
+        };
+        let mut buf = [0u8; 20];
+        let e = reader_of(&src, 10, 29).read(&mut buf).unwrap_err();
+        assert_eq!(e.kind(), std::io::ErrorKind::UnexpectedEof);
     }
 
     #[test]
