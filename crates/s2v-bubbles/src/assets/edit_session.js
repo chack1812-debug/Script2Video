@@ -6,11 +6,12 @@ import { parseIntField, placementOf, samePlacement, withField } from "./edit_cal
 import { validateOffset } from "./model.js";
 
 export class EditSession {
-  constructor({ editor, cw, ch, hooks, setTimer = setTimeout, clearTimer = clearTimeout, delayMs = 300, activeInput = () => null }) {
+  constructor({ editor, cw, ch, hooks, setTimer = (f, ms) => setTimeout(f, ms), clearTimer = (h) => clearTimeout(h), delayMs = 300, activeInput = () => null }) {
     this.editor = editor;
     this.cw = cw;
     this.ch = ch;
     this.hooks = hooks;
+    // ブラウザの setTimeout は this が window 以外だと投げるため、既定はアロー関数で包む
     this._set = setTimer;
     this._clear = clearTimer;
     this.delayMs = delayMs;

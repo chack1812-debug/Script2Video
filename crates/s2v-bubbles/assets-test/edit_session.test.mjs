@@ -126,3 +126,34 @@ test("revert_drops_pending_arrow", () => {
   assert.equal(s.arrow, null);
   assert.equal(sent.length, 0);
 });
+
+// ブラウザの setTimeout は this が window 以外だと TypeError: Illegal invocation になる。
+// Node は投げないので、同じ検査をする関数に差し替えて、タイマーを差し込まない既定の経路を確かめる。
+test("タイマーを差し込まない既定でも、矢印キーは this つきの呼び出しで投げない", async () => {
+  const origSet = globalThis.setTimeout;
+  const origClear = globalThis.clearTimeout;
+  const strict = (orig) =>
+    function (...args) {
+      if (this !== undefined && this !== globalThis) throw new TypeError("Illegal invocation");
+      return orig(...args);
+    };
+  globalThis.setTimeout = strict(origSet);
+  globalThis.clearTimeout = strict(origClear);
+  try {
+    const items = [mkItem("a")];
+    const editor = new Editor({ render: async () => ({ ok: true }), layout: async () => ({ ok: true, items }), save: async () => ({ ok: true }) }, { items });
+    const s = new EditSession({
+      editor,
+      cw: 1920,
+      ch: 1080,
+      hooks: { commit: () => Promise.resolve(), preview: () => {}, discard: () => {} },
+      delayMs: 1,
+    });
+    assert.ok(s.arrowKey(items[0], "ArrowRight", false));
+    assert.ok(s.arrowKey(items[0], "ArrowRight", false)); // 2 回目は clear も通る
+    s.revert("a"); // 保留を捨てる(clear)
+  } finally {
+    globalThis.setTimeout = origSet;
+    globalThis.clearTimeout = origClear;
+  }
+});
