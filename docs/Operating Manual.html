@@ -1,0 +1,533 @@
+<!doctype html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Script2Video 取扱説明書</title>
+<style>
+:root {
+  --bg: #fbfaf7;
+  --panel: #ffffff;
+  --text: #1f2328;
+  --muted: #5b636d;
+  --line: #dfe2e6;
+  --accent: #2557a7;
+  --accent-soft: #e8eefa;
+  --code-bg: #f3f4f6;
+  --warn: #8a5a00;
+  --warn-bg: #fff6e0;
+  --ok: #1d6b3a;
+  --ok-bg: #e7f5ec;
+  --danger: #a12a2a;
+  --danger-bg: #fdecec;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --bg: #15171a;
+    --panel: #1d2024;
+    --text: #e6e8eb;
+    --muted: #9aa3ad;
+    --line: #30353b;
+    --accent: #7fa8ee;
+    --accent-soft: #1f2a3d;
+    --code-bg: #24282d;
+    --warn: #f0c060;
+    --warn-bg: #2e2716;
+    --ok: #7fd49c;
+    --ok-bg: #18291f;
+    --danger: #f08a8a;
+    --danger-bg: #331b1b;
+  }
+}
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: "Yu Gothic UI", "Hiragino Sans", "Noto Sans JP", "Meiryo", sans-serif;
+  font-size: 15.5px;
+  line-height: 1.75;
+}
+.layout { display: grid; grid-template-columns: 260px minmax(0, 1fr); max-width: 1180px; margin: 0 auto; }
+nav.toc {
+  position: sticky; top: 0; align-self: start; height: 100vh; overflow-y: auto;
+  padding: 28px 18px 28px 24px; border-right: 1px solid var(--line); font-size: 14px;
+}
+nav.toc .brand { font-weight: 700; font-size: 16px; margin-bottom: 4px; }
+nav.toc .ver { color: var(--muted); font-size: 12.5px; margin-bottom: 18px; }
+nav.toc ol { list-style: none; margin: 0; padding: 0; }
+nav.toc li { margin: 2px 0; }
+nav.toc a { color: var(--text); text-decoration: none; display: block; padding: 3px 8px; border-radius: 6px; }
+nav.toc a:hover { background: var(--accent-soft); color: var(--accent); }
+nav.toc ol ol { padding-left: 12px; font-size: 13.5px; }
+nav.toc ol ol a { color: var(--muted); }
+main { padding: 36px 48px 80px; min-width: 0; }
+h1 { font-size: 30px; line-height: 1.3; margin: 0 0 6px; }
+.lead { color: var(--muted); margin: 0 0 28px; }
+h2 { font-size: 22px; margin: 56px 0 14px; padding-top: 8px; border-top: 2px solid var(--line); }
+h3 { font-size: 17.5px; margin: 32px 0 10px; }
+h4 { font-size: 15.5px; margin: 22px 0 6px; }
+p, ul, ol, table, pre, .note { margin: 0 0 14px; }
+ul, ol { padding-left: 1.4em; }
+li { margin: 3px 0; }
+a { color: var(--accent); }
+code, kbd {
+  font-family: "Cascadia Mono", "Consolas", "SFMono-Regular", monospace;
+  font-size: 0.9em; background: var(--code-bg); border-radius: 4px; padding: 1px 5px;
+}
+kbd { border: 1px solid var(--line); border-bottom-width: 2px; }
+pre {
+  background: var(--code-bg); border-radius: 8px; padding: 12px 14px; overflow-x: auto;
+  font-family: "Cascadia Mono", "Consolas", "SFMono-Regular", monospace; font-size: 13.5px; line-height: 1.6;
+}
+pre code { background: none; padding: 0; font-size: inherit; }
+table { border-collapse: collapse; width: 100%; font-size: 14.5px; display: block; overflow-x: auto; }
+th, td { border: 1px solid var(--line); padding: 7px 10px; text-align: left; vertical-align: top; }
+th { background: var(--accent-soft); font-weight: 600; white-space: nowrap; }
+.note { border-left: 4px solid var(--accent); background: var(--accent-soft); padding: 10px 14px; border-radius: 0 8px 8px 0; }
+.note.warn { border-color: var(--warn); background: var(--warn-bg); }
+.note.ok { border-color: var(--ok); background: var(--ok-bg); }
+.note.danger { border-color: var(--danger); background: var(--danger-bg); }
+.note > :last-child { margin-bottom: 0; }
+.note strong:first-child { display: block; margin-bottom: 2px; }
+.flow { display: flex; flex-wrap: wrap; gap: 8px; align-items: stretch; margin: 6px 0 18px; }
+.step {
+  flex: 1 1 140px; background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 10px 12px;
+}
+.step .n { font-size: 12px; color: var(--muted); }
+.step .t { font-weight: 700; }
+.step .d { font-size: 13px; color: var(--muted); line-height: 1.5; margin-top: 2px; }
+.step.cmd .t code { background: var(--accent-soft); color: var(--accent); }
+.arrow { align-self: center; color: var(--muted); }
+.grid2 { display: grid; grid-template-columns: repeat(auto-fit, minmax(260px, 1fr)); gap: 14px; margin-bottom: 14px; }
+.card { background: var(--panel); border: 1px solid var(--line); border-radius: 10px; padding: 12px 14px; }
+.card h4 { margin-top: 0; }
+.card > :last-child { margin-bottom: 0; }
+.screen {
+  display: grid; grid-template-columns: 1.1fr 2.6fr 1.1fr; grid-template-rows: auto 1fr auto; gap: 6px;
+  border: 1px solid var(--line); border-radius: 10px; padding: 8px; background: var(--panel); font-size: 13px; margin-bottom: 14px;
+}
+.screen > div { border: 1px dashed var(--line); border-radius: 6px; padding: 8px; }
+.screen .top { grid-column: 1 / 4; }
+.screen .bottom { grid-column: 2 / 3; }
+.screen .label { font-weight: 700; display: block; }
+.screen .muted { color: var(--muted); }
+footer { margin-top: 64px; color: var(--muted); font-size: 13px; border-top: 1px solid var(--line); padding-top: 14px; }
+@media (max-width: 860px) {
+  .layout { grid-template-columns: 1fr; }
+  nav.toc { position: static; height: auto; border-right: none; border-bottom: 1px solid var(--line); padding: 18px 16px; }
+  main { padding: 24px 16px 60px; }
+  .screen { grid-template-columns: 1fr; }
+  .screen .top, .screen .bottom { grid-column: 1; }
+}
+@media print {
+  nav.toc { display: none; }
+  .layout { display: block; }
+  main { padding: 0; }
+  h2 { break-before: page; }
+}
+</style>
+</head>
+<body>
+<div class="layout">
+<nav class="toc" aria-label="目次">
+  <div class="brand">Script2Video</div>
+  <div class="ver">取扱説明書(2026-10-16 時点)</div>
+  <ol>
+    <li><a href="#overview">1. 概要と作業の流れ</a></li>
+    <li><a href="#install">2. インストールと前提</a></li>
+    <li><a href="#folder">3. 台本フォルダの構成</a></li>
+    <li><a href="#script">4. 台本の書き方</a>
+      <ol>
+        <li><a href="#script-sections">セクション</a></li>
+        <li><a href="#script-lines">台詞</a></li>
+        <li><a href="#script-commands">コマンド</a></li>
+        <li><a href="#script-video">カット・情景・ト書き</a></li>
+      </ol>
+    </li>
+    <li><a href="#cmd-number">5. number(番号付け)</a></li>
+    <li><a href="#cmd-build">6. build(音声・字幕)</a></li>
+    <li><a href="#cmd-prompts">7. prompts(素材のプロンプト)</a></li>
+    <li><a href="#assets">8. 素材の置き方</a></li>
+    <li><a href="#cmd-bubbles">9. bubbles(配置の調整)</a>
+      <ol>
+        <li><a href="#bubbles-screen">画面の構成</a></li>
+        <li><a href="#bubbles-ops">操作</a></li>
+        <li><a href="#bubbles-save">保存と終了</a></li>
+      </ol>
+    </li>
+    <li><a href="#cmd-render">10. render(動画の書き出し)</a></li>
+    <li><a href="#config">11. 設定(config.toml)</a></li>
+    <li><a href="#exit">12. 終了コードとログ</a></li>
+    <li><a href="#trouble">13. 困ったとき</a></li>
+    <li><a href="#limits">14. 現在の制限と未確認の事項</a></li>
+  </ol>
+</nav>
+
+<main>
+<h1>Script2Video 取扱説明書</h1>
+<p class="lead">台本と収録音声から、音声・字幕・タイムラインを作り、画像・動画の素材と縦書きの吹き出し・ト書きを合成して、完成動画 <code>output.mp4</code> を書き出すコマンドラインツールです。この説明書は 2026-10-16 時点の main の状態(計画 2a〜2d の取り込み後)に合わせています。</p>
+
+<!-- 1 -->
+<h2 id="overview">1. 概要と作業の流れ</h2>
+<p>すべてのコマンドは <code>script2video &lt;コマンド&gt; &lt;台本.txt&gt;</code> の形で使い、台本のあるフォルダ(以下「台本フォルダ」)を基準に読み書きします。1 本の動画は、次の順に作ります。</p>
+
+<div class="flow" role="list">
+  <div class="step" role="listitem"><div class="n">1</div><div class="t">台本を書く</div><div class="d">台詞・シーン・カット・ト書き</div></div>
+  <div class="arrow" aria-hidden="true">→</div>
+  <div class="step cmd" role="listitem"><div class="n">2</div><div class="t"><code>number</code></div><div class="d">台詞・シーン・カット・ト書きに番号を付ける</div></div>
+  <div class="arrow" aria-hidden="true">→</div>
+  <div class="step" role="listitem"><div class="n">3</div><div class="t">収録する</div><div class="d">台詞ごとの wav を <code>voices/</code> に</div></div>
+  <div class="arrow" aria-hidden="true">→</div>
+  <div class="step cmd" role="listitem"><div class="n">4</div><div class="t"><code>build</code></div><div class="d">音声・字幕・タイムラインを作る</div></div>
+  <div class="arrow" aria-hidden="true">→</div>
+  <div class="step cmd" role="listitem"><div class="n">5</div><div class="t"><code>prompts</code></div><div class="d">素材を作るためのプロンプト</div></div>
+  <div class="arrow" aria-hidden="true">→</div>
+  <div class="step" role="listitem"><div class="n">6</div><div class="t">素材を置く</div><div class="d">画像・動画を <code>tracks/</code> に</div></div>
+  <div class="arrow" aria-hidden="true">→</div>
+  <div class="step cmd" role="listitem"><div class="n">7</div><div class="t"><code>bubbles</code></div><div class="d">吹き出し・ト書きを画面で調整(任意)</div></div>
+  <div class="arrow" aria-hidden="true">→</div>
+  <div class="step cmd" role="listitem"><div class="n">8</div><div class="t"><code>render</code></div><div class="d"><code>output.mp4</code> を書き出す</div></div>
+</div>
+
+<pre><code>script2video number  第1話.txt
+script2video build   第1話.txt [--voice-dir 収録/] [--config 設定.toml] [--no-cache]
+script2video prompts 第1話.txt [--config 設定.toml]
+script2video bubbles 第1話.txt [--config 設定.toml] [--port N] [--no-open]
+script2video render  第1話.txt [--config 設定.toml]</code></pre>
+
+<div class="note">
+<strong>台本や収録を直したら</strong>
+<p><code>build</code> をやり直してから、<code>prompts</code>・<code>bubbles</code>・<code>render</code> に進みます。<code>timeline.json</code> には台本と音声の SHA-256 が記録されていて、後のコマンドが食い違いを検査します。</p>
+</div>
+
+<!-- 2 -->
+<h2 id="install">2. インストールと前提</h2>
+<h3>インストール</h3>
+<pre><code># リポジトリの直下で実行。~/.cargo/bin/script2video.exe に入ります(PATH に ~/.cargo/bin が必要)
+cargo install --path crates/s2v-cli --locked
+script2video --help</code></pre>
+<p>コードを更新したら、同じコマンドをもう一度実行して入れ直します(同じ版でも入れ直すなら <code>--force</code>)。</p>
+
+<h3>前提</h3>
+<table>
+<thead><tr><th>もの</th><th>必要なコマンド</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td>ffmpeg・ffprobe 6.0 以上</td><td><code>bubbles</code>・<code>render</code></td><td>PATH に置くか、<code>[render] ffmpeg</code>・<code>ffprobe</code> で場所を指定します。git の日付版(2023 年以降)も使えます。版が古いと失敗し、版を読み取れないときは警告して続けます。</td></tr>
+<tr><td>縦書きのフォント</td><td><code>bubbles</code>・<code>render</code></td><td>既定は <code>C:\Windows\Fonts\YuGothM.ttc</code>(游ゴシック Medium)。縦書き用の機能(<code>vrt2</code> か <code>vert</code>)と縦書きの寸法(<code>vhea</code>・<code>vmtx</code>)が必要です。</td></tr>
+<tr><td>ブラウザ</td><td><code>bubbles</code></td><td>既定のブラウザ(Chrome で確認済み)。Windows では自動で開きます。</td></tr>
+</tbody>
+</table>
+
+<!-- 3 -->
+<h2 id="folder">3. 台本フォルダの構成</h2>
+<pre><code>台本フォルダ/
+├─ 第1話.txt              台本
+├─ 第1話.bak .ids .html   number の出力(バックアップ・番号の記録・閲覧用の台本)
+├─ voices/                収録(S01_L001.wav …)。build は読むだけ
+├─ full_dialogue.wav      build: 台詞・BGM・SE を合成した音声
+├─ timeline/
+│   ├─ timeline.json      build: 後のコマンドが読む正本(v3)
+│   ├─ subtitles.srt      build: 字幕
+│   └─ timeline.fcpxml    build: 動画編集ソフト(Filmora)向け
+├─ tracks/                build: dialogue.wav / bgm.wav / se.wav
+│                         あなたが置く: 画像・動画の素材(S01.png、S01_C02.mp4 …)
+├─ prompts/               prompts: S01.md … と index.md
+├─ bubbles.json           bubbles: 手動で置いた吹き出し・ト書き(.bak も)
+├─ output.mp4             render: 完成動画
+├─ output.stale.mp4       build が改名した前回の output.mp4
+├─ work/                  中間ファイル(消してよい)
+└─ Process.log            処理の記録・警告・エラー</code></pre>
+<ul>
+<li>台本のファイル名に、予約名(<code>full_dialogue.wav</code>・<code>Process.log</code>・<code>output.mp4</code>・<code>output.stale.mp4</code>・<code>bubbles.json</code>・<code>bubbles.json.bak</code>・<code>.script2video.lock</code>・<code>prompts</code>)は使えません(大文字小文字を区別しません)。</li>
+<li><code>work/</code>・<code>tracks/</code>・<code>timeline/</code>・<code>voices/</code>・<code>prompts/</code> をリンク(シンボリックリンク・ジャンクション)や台本フォルダの外にしないでください。どのコマンドも何も消さずに止まります。</li>
+<li>同じ台本フォルダで 2 つのコマンドを同時に動かすと、後から始めた方が「別の script2video が実行中」で止まります(<code>.script2video.lock</code> による排他)。</li>
+</ul>
+
+<!-- 4 -->
+<h2 id="script">4. 台本の書き方</h2>
+<p>詳しい規則は <code>台本仕様.md</code> を参照してください。ここでは主な書き方をまとめます。</p>
+<pre><code>@scene 居間
+朝の居間。明るく静かな雰囲気。
+@pause
+sentence 500
+cast 300
+paragraph 1000
+@cast
+田中:田中,pan=-25,distance=1.2
+30代の男性。短髪で、紺のカーディガンを着ている。
+
+佐藤:佐藤,pan=25,distance=1.2
+20代の女性。肩までの黒髪。白いシャツ。
+
+@script
+#paragraph 朝の居間
+#visual (image) 朝の光が差し込む居間。
+#note 翌朝、居間。
+田中:おはよう。今日は早いね。
+佐藤:おはよう。コーヒー、淹れたよ。
+#cut
+#visual (video loop) カーテンが風に揺れる。
+田中(volume=-0.2):ありがとう。いい香りだ。</code></pre>
+
+<h3 id="script-sections">セクション</h3>
+<table>
+<thead><tr><th>セクション</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>@scene 名称</code></td><td>場面。次の行に雰囲気の説明。音響の <code>room_size=</code>・<code>reverb_wet=</code>(0.0〜1.0)を書けます。</td></tr>
+<tr><td><code>@pause</code></td><td>無音の長さ(ミリ秒)。<code>sentence</code> 文の間、<code>cast</code> 話者の交替、<code>paragraph</code> シーンの間。</td></tr>
+<tr><td><code>@asset</code></td><td><code>bgm_dir = 絶対パス</code>、<code>se_dir = 絶対パス</code>。</td></tr>
+<tr><td><code>@cast</code></td><td><code>役名:話者名,pan=度,distance=m,height=m,volume=倍率</code>。定義行の次の行から空行までが、その役の外見(プロンプトに使います)。</td></tr>
+<tr><td><code>@script</code></td><td>台詞とコマンド。</td></tr>
+</tbody>
+</table>
+
+<h3 id="script-lines">台詞</h3>
+<pre><code>[S01-L003] 役名(臨時パラメータ):台詞</code></pre>
+<ul>
+<li><code>[S01-L003]</code> は台詞 ID で、<code>number</code> が書き込みます。自分で書くときは省略できます。</li>
+<li>役名と台詞の区切りは半角の <code>:</code> だけです(全角の <code>:</code> は区切りになりません)。</li>
+<li>臨時パラメータは <code>@cast</code> の値への増減です(<code>pan</code>・<code>distance</code>・<code>height</code>・<code>volume</code>)。</li>
+<li>台詞を重ねるときは <code>overlap=ミリ秒</code>(直前の台詞の終わりの何ミリ秒手前から)か、<code>at=L003+500</code>(指定の台詞の開始の何ミリ秒後から。別のシーンなら <code>S01-L003</code>)を書きます。</li>
+</ul>
+
+<h3 id="script-commands">コマンド</h3>
+<table>
+<thead><tr><th>コマンド</th><th>意味</th></tr></thead>
+<tbody>
+<tr><td><code>#paragraph[S02] 名称</code></td><td>シーンの区切り。番号は <code>number</code> が書き込みます。名称は省略できます。</td></tr>
+<tr><td><code>#cut[C02]</code></td><td>シーンの中で素材を切り替えます(シーンの頭は暗黙の <code>C01</code>)。</td></tr>
+<tr><td><code>#visual (印) 本文</code></td><td>直前のカットの情景。印は <code>image</code>・<code>video</code>・<code>loop</code>(例 <code>(video loop)</code>)。</td></tr>
+<tr><td><code>#note[N01] 本文</code></td><td>ト書き。動画では枠の中に縦書きで表示します。</td></tr>
+<tr><td><code>#pause ミリ秒</code></td><td>無音。台本の最後に書くと、その長さだけ音声の末尾の無音になります。</td></tr>
+<tr><td><code>#bgm_start ファイル.wav</code> / <code>#bgm_stop</code></td><td>BGM の開始と停止。</td></tr>
+<tr><td><code>#se ファイル.wav at=L003+200 gain=-3</code></td><td>効果音。<code>at=</code>・<code>end=</code>で台詞に合わせて置けます。</td></tr>
+<tr><td><code># コメント</code></td><td><code>#</code> の後に空白があればコメントです。</td></tr>
+</tbody>
+</table>
+
+<h3 id="script-video">カット・情景・ト書き</h3>
+<ul>
+<li><strong>カット</strong>は、その行の時点から、次の <code>#cut</code> かシーンの終わりまで続きます。カットごとに素材を 1 つ置きます(<a href="#assets">8. 素材の置き方</a>)。</li>
+<li><strong><code>#visual</code> の印</strong>: <code>image</code>・<code>video</code> は素材の種類の希望(省略すると未指定)、<code>loop</code> は動画の素材がカットより短いときに繰り返す指定です。<code>loop</code> が無い動画は、最後のコマで止まります。</li>
+<li><strong>ト書き</strong>は、その行の時点から、同じシーンの次の <code>#note</code>・次の <code>#cut</code>・シーンの終わりのうち、最も早いところまで表示します。</li>
+<li><strong>吹き出し</strong>は、台詞の音声が鳴っている間だけ表示します。位置と大きさは自動で決まり、<code>bubbles</code> で手動に直せます。</li>
+</ul>
+
+<!-- 5 -->
+<h2 id="cmd-number">5. number(番号付け)</h2>
+<pre><code>script2video number 第1話.txt</code></pre>
+<p>台詞・シーン・カット・ト書きに番号を書き込みます(<code>[S01-L003]</code>・<code>#paragraph[S02]</code>・<code>#cut[C02]</code>・<code>#note[N01]</code>)。既存の番号は変えず、欠番も詰めません。台本名の <code>.bak</code>(書き換え前)・<code>.ids</code>(番号の記録)・<code>.html</code>(閲覧用)も出力します。</p>
+
+<!-- 6 -->
+<h2 id="cmd-build">6. build(音声・字幕・タイムライン)</h2>
+<pre><code>script2video build 第1話.txt
+script2video build 第1話.txt --voice-dir 収録/     # 収録を別の場所に置いたとき</code></pre>
+<h3>収録ファイル</h3>
+<ul>
+<li>台詞ごとに 1 ファイル、モノラルの wav を <code>voices/</code> に置きます。ファイル名は台詞 ID の <code>-</code> を <code>_</code> にしたもの(<code>S01_L003.wav</code>)。番号の桁数は問いません(<code>S01_L3.wav</code> も同じ台詞)。</li>
+<li>台詞は自動で同じ音量(ラウドネス)にそろえます。</li>
+</ul>
+<h3>出力</h3>
+<table>
+<thead><tr><th>ファイル</th><th>内容</th></tr></thead>
+<tbody>
+<tr><td><code>full_dialogue.wav</code></td><td>台詞・BGM・SE の合成(24bit)</td></tr>
+<tr><td><code>tracks/dialogue.wav</code> <code>bgm.wav</code> <code>se.wav</code></td><td>動画編集ソフト用の別トラック(32bit 浮動小数)</td></tr>
+<tr><td><code>timeline/timeline.json</code></td><td>後のコマンドが読む正本(v3)</td></tr>
+<tr><td><code>timeline/subtitles.srt</code></td><td>字幕</td></tr>
+<tr><td><code>timeline/timeline.fcpxml</code></td><td>Filmora 向け(3 トラック)</td></tr>
+</tbody>
+</table>
+<div class="note warn">
+<strong>build は output.mp4 を作りません</strong>
+<p>前回の <code>output.mp4</code> があれば、出力を始める時点で <code>output.stale.mp4</code> に改名します(古い動画を新しいものと取り違えないため)。動画は <code>render</code> で作り直してください。</p>
+</div>
+
+<!-- 7 -->
+<h2 id="cmd-prompts">7. prompts(素材のプロンプトを作る)</h2>
+<pre><code>script2video prompts 第1話.txt</code></pre>
+<p><code>timeline.json</code> から、画像・動画を生成するためのプロンプトをカットごとに作り、<code>prompts/</code> に書きます。</p>
+<ul>
+<li><code>prompts/S01.md</code> …: シーンごとのファイル。カットごとに、作る素材のファイル名・種類・長さ(動画と種類未指定のとき)・プロンプト本文(コピーしやすいようコードブロック)を書きます。</li>
+<li>プロンプト本文の順: <code>[prompts] style</code> → シーン名 → <code>#visual</code> → 登場人物と外見 → <code>[prompts] suffix</code>。登場人物は、そのカットの間に話す人を台本の初出順に並べます。</li>
+<li><code>prompts/index.md</code>: 全カットの表(カット・ファイル名・種類・長さ・素材の有無)。<code>tracks/</code> の誤り(重複・種類違い・リンク)は末尾の「tracks/ の確認事項」に書きます。</li>
+<li><code>prompts/</code> の中で書き換え・削除するのは <code>index.md</code> と <code>S&lt;数字&gt;.md</code> だけです。自分のメモは別の名前(<code>memo.md</code> など)で置けます。</li>
+</ul>
+
+<!-- 8 -->
+<h2 id="assets">8. 素材の置き方</h2>
+<p>台本フォルダの <code>tracks/</code> に、カットごとに 1 つ置きます。名前はカット ID から決まります。</p>
+<table>
+<thead><tr><th>カット ID</th><th>素材のファイル名の例</th></tr></thead>
+<tbody>
+<tr><td><code>S01-C01</code>(シーンの頭)</td><td><code>tracks/S01.png</code></td></tr>
+<tr><td><code>S01-C02</code></td><td><code>tracks/S01_C02.mp4</code></td></tr>
+<tr><td><code>S03-C01</code></td><td><code>tracks/S03.jpg</code></td></tr>
+</tbody>
+</table>
+<ul>
+<li>拡張子: 画像は <code>png</code>・<code>jpg</code>・<code>jpeg</code>、動画は <code>mp4</code>・<code>mov</code>・<code>webm</code>(大文字小文字は区別しません。WebP は使えません)。</li>
+<li>同じカットに 2 つ置く(拡張子違いを含む)、画像のカットに動画を置くなど種類が台本と違う、HDR や BT.2020 の色の動画は、<code>render</code> がエラーにします。</li>
+<li>素材が足りないカットは、設定の <code>[render] default_image</code> があればその画像で代わりに書き出します(警告)。</li>
+</ul>
+
+<!-- 9 -->
+<h2 id="cmd-bubbles">9. bubbles(吹き出し・ト書きの配置を画面で調整する)</h2>
+<pre><code>script2video bubbles 第1話.txt
+script2video bubbles 第1話.txt --port 8765 --no-open</code></pre>
+<p>自動配置された吹き出し・ト書きを、ブラウザの画面で動かしたり、大きさ・尻尾・表示の時刻を直したりして、<code>bubbles.json</code> に保存します。<code>render</code> はこの配置を使います。調整しない項目は、毎回自動で配置されます。</p>
+<ul>
+<li>起動すると <code>http://127.0.0.1:&lt;ポート&gt;/?token=…</code> の 1 行を表示し、既定のブラウザで開きます(Windows)。開けなかったときや <code>--no-open</code> のときは、表示された URL を自分で開きます。</li>
+<li><code>--port</code> を省くと、空いているポートを自動で選びます。</li>
+<li>先に <code>build</code> を済ませておきます。ffmpeg・ffprobe とフォントの検査は <code>render</code> と同じです。</li>
+</ul>
+
+<h3 id="bubbles-screen">画面の構成</h3>
+<div class="screen" aria-label="画面の構成の図">
+  <div class="top"><span class="label">上</span><span class="muted">状態(未保存の変更・保存の結果・警告)、「保存」「終了」のボタン</span></div>
+  <div><span class="label">左: 一覧</span><span class="muted">シーン → カット → 台詞・ト書き。「手動」「切詰」の印。クリックでその項目の開始のコマへ</span></div>
+  <div><span class="label">中央: プレビュー</span><span class="muted">動画と同じ縦横比。カットの素材を背景に、吹き出し・ト書きを render と同じ見た目で重ねる</span></div>
+  <div><span class="label">右: 数値の欄</span><span class="muted">x・y・幅・高さ・尻尾 dx/dy・開始のずれ(ms)・終了のずれ(ms)、「自動に戻す」</span></div>
+  <div class="bottom"><span class="label">下: コマのスライダーと再生/停止</span><span class="muted">再生中は full_dialogue.wav を鳴らし、動画の素材は消音で音声に合わせる</span></div>
+</div>
+<ul>
+<li>時刻はコマ番号で扱います。表示の出入りやカットの切り替えのコマは、<code>render</code> と同じ計算です。</li>
+<li>動画の素材は、ループの指定があれば繰り返し、無ければ最後のコマで止まります(<code>render</code> と同じ)。</li>
+<li>ブラウザで再生できない動画の素材は、サーバーが ffmpeg でコマの画像にして見せます。</li>
+</ul>
+
+<h3 id="bubbles-ops">操作</h3>
+<table>
+<thead><tr><th>したいこと</th><th>操作</th></tr></thead>
+<tbody>
+<tr><td>項目を選ぶ</td><td>左の一覧をクリック(その項目の開始のコマへ移ります)、またはプレビューの枠をクリック(重なっているときは前面のもの)</td></tr>
+<tr><td>動かす</td><td>本体をドラッグ。または矢印キーで 1px、<kbd>Shift</kbd>+矢印で 10px(数値の欄に入力中のときは、矢印キーは欄の操作になります)</td></tr>
+<tr><td>大きさを変える</td><td>四隅のつまみをドラッグ</td></tr>
+<tr><td>尻尾の向きを変える</td><td>尻尾の先のつまみをドラッグ</td></tr>
+<tr><td>数値で指定する</td><td>右の欄に入力し、<kbd>Enter</kbd> を押すか欄から離れると確定</td></tr>
+<tr><td>表示の時刻をずらす</td><td>「開始のずれ」「終了のずれ」(ミリ秒。±60000 まで)</td></tr>
+<tr><td>自動の配置に戻す</td><td>「自動に戻す」</td></tr>
+<tr><td>保存する</td><td>「保存」か <kbd>Ctrl</kbd>+<kbd>S</kbd></td></tr>
+</tbody>
+</table>
+<div class="note">
+<strong>文字が入らない大きさにはできません</strong>
+<p>小さすぎる大きさにすると、直前に確定した値に戻り、「確定できません: …文字が枠に収まりません」と理由が出ます。自動の項目は、手動の項目を避けて置き直されます。元に戻す・やり直しの機能はこの版にはありません。</p>
+</div>
+
+<h3 id="bubbles-save">保存と終了</h3>
+<ul>
+<li>保存されるのは手動で置いた項目だけです。保存のたびに直前の <code>bubbles.json</code> を <code>bubbles.json.bak</code> に残します。</li>
+<li>「終了」は、未保存の変更があると確認を出します。タブを閉じるときも警告します。</li>
+<li>ターミナルで <kbd>Ctrl</kbd>+<kbd>C</kbd> を押すとすぐに終わり、未保存の変更は失われます。</li>
+</ul>
+<div class="note warn">
+<strong>bubbles の起動中は、素材を差し替えられません</strong>
+<p><code>tracks/</code> の素材と <code>full_dialogue.wav</code> は、起動中ずっと上書き・削除・改名できないように開いています。差し替えるときは <code>bubbles</code> を終えてから行います。また、起動中は同じ台本フォルダで <code>build</code> や <code>render</code> を動かせません(ロック)。</p>
+</div>
+<div class="note">
+<strong>「セッションが切れました」と出たら</strong>
+<p><code>bubbles</code> を起動し直したときなどに出ます。そのページでは操作できないので、<code>bubbles</code> を起動し直して、新しく表示された URL を開いてください。URL の <code>token</code> は起動のたびに変わる使い捨ての合言葉です。</p>
+</div>
+
+<!-- 10 -->
+<h2 id="cmd-render">10. render(動画を書き出す)</h2>
+<pre><code>script2video render 第1話.txt</code></pre>
+<p><code>build</code> の出力・<code>tracks/</code> の素材・<code>bubbles.json</code>(あれば)から、吹き出し・ト書き・音声を合成して <code>output.mp4</code>(H.264 + AAC、既定 1920×1080・30fps)を書き出します。中間ファイルは <code>work/render/</code> に作ります(消してよい)。</p>
+<ul>
+<li>吹き出しとト書きは縦書きで描き、手動の配置が無い項目は自動で配置します。</li>
+<li>自動の吹き出しが長すぎて画面に入らないときは、画面の大きさに切り詰めて警告します(終了コード 1)。手動の項目の文字が保存した枠に入らないときは、枠を広げて警告します。</li>
+<li>フォントに無い文字は、項目ごとに警告して代わりの字形で描きます。</li>
+<li>書き出した動画は、寸法・コマ数・音声の長さとずれを検査してから <code>output.mp4</code> に置き換えます。失敗したときは前回の <code>output.mp4</code> を変えません。</li>
+</ul>
+<div class="note warn">
+<strong>台本だけを直したとき</strong>
+<p><code>build</code> の後に台本だけが変わっていると、警告(終了コード 1)を出して続けます。収録を変えた(<code>full_dialogue.wav</code> が <code>timeline.json</code> と食い違う)ときは失敗するので、<code>build</code> をやり直してください。</p>
+</div>
+
+<!-- 11 -->
+<h2 id="config">11. 設定(config.toml)</h2>
+<p><code>--config 設定.toml</code> を省くと、同梱の <code>config.toml</code> を使います。全項目は同梱のファイルを参照してください。よく使うものは次のとおりです。</p>
+<h3>[render]</h3>
+<table>
+<thead><tr><th>キー</th><th>既定</th><th>意味</th></tr></thead>
+<tbody>
+<tr><td><code>width</code> / <code>height</code></td><td>1920 / 1080</td><td>解像度(偶数)</td></tr>
+<tr><td><code>fps</code></td><td>30</td><td>フレームレート</td></tr>
+<tr><td><code>fit</code></td><td><code>contain</code></td><td>素材の収め方(<code>contain</code> は余白あり、<code>cover</code> は切り取り)</td></tr>
+<tr><td><code>default_image</code></td><td>なし</td><td>素材が無いカットの代わりの画像</td></tr>
+<tr><td><code>font_path</code></td><td><code>C:\Windows\Fonts\YuGothM.ttc</code></td><td>縦書きに使うフォント</td></tr>
+<tr><td><code>ffmpeg</code> / <code>ffprobe</code></td><td>PATH から</td><td>ffmpeg・ffprobe の場所</td></tr>
+<tr><td><code>jobs</code></td><td>1</td><td>カットを同時に作る ffmpeg の数</td></tr>
+</tbody>
+</table>
+<h3>[prompts]</h3>
+<table>
+<thead><tr><th>キー</th><th>既定</th><th>意味</th></tr></thead>
+<tbody>
+<tr><td><code>style</code></td><td>空</td><td>プロンプトの先頭に付ける画風</td></tr>
+<tr><td><code>suffix</code></td><td>縦横比 16:9。画像の中に文字・吹き出しを入れない。</td><td>プロンプトの末尾に付ける注意書き</td></tr>
+</tbody>
+</table>
+
+<!-- 12 -->
+<h2 id="exit">12. 終了コードとログ</h2>
+<table>
+<thead><tr><th>コード</th><th>意味</th></tr></thead>
+<tbody>
+<tr><td><code>0</code></td><td>正常に終わりました</td></tr>
+<tr><td><code>1</code></td><td>警告があります(出力はできています)。<code>Process.log</code> を確かめてください</td></tr>
+<tr><td><code>2</code></td><td>失敗しました(出力していないか、前回の出力を残しています)</td></tr>
+</tbody>
+</table>
+<p>処理の記録・警告・エラーは、台本フォルダの <code>Process.log</code> に書きます。<code>build</code> は作り直し、<code>prompts</code>・<code>bubbles</code>・<code>render</code> は <code>== render 2026-10-16 12:34:56 ==</code> のような区切り(時刻は UTC)を付けて追記します。</p>
+
+<!-- 13 -->
+<h2 id="trouble">13. 困ったとき</h2>
+<table>
+<thead><tr><th>症状・表示</th><th>原因と対処</th></tr></thead>
+<tbody>
+<tr><td>「別の script2video が実行中」</td><td>同じ台本フォルダで他のコマンド(<code>bubbles</code> の起動中を含む)が動いています。終わるのを待つか、<code>bubbles</code> を終了してください。</td></tr>
+<tr><td>「timeline.json がありません。先に build を実行してください」</td><td><code>build</code> をまだ実行していません。</td></tr>
+<tr><td>「full_dialogue.wav が timeline.json と別の build のものです」</td><td>収録や音声が変わっています。<code>build</code> をやり直してください。</td></tr>
+<tr><td>「素材が足りません」</td><td><code>tracks/</code> に素材を置くか、<code>[render] default_image</code> を指定します。<code>prompts/index.md</code> の「素材」の列で不足が分かります。</td></tr>
+<tr><td>同じカットに素材が 2 つある・種類が違う</td><td>どちらかを消すか、台本の <code>#visual</code> の印(<code>image</code>/<code>video</code>)を直します。</td></tr>
+<tr><td>HDR・BT.2020 の動画でエラー</td><td>BT.709(SDR)の動画に変換してから置きます。</td></tr>
+<tr><td>「ffmpeg が見つかりません」「古すぎます」</td><td>ffmpeg・ffprobe 6.0 以上を入れて PATH に置くか、<code>[render] ffmpeg</code>・<code>ffprobe</code> で場所を指定します。</td></tr>
+<tr><td>フォントを読めない・縦書きの機能が無い</td><td><code>[render] font_path</code> に、縦書きに対応したフォント(<code>vrt2</code> か <code>vert</code>、<code>vhea</code>・<code>vmtx</code> を持つもの)を指定します。</td></tr>
+<tr><td>bubbles で「セッションが切れました」</td><td><code>bubbles</code> を起動し直し、新しい URL を開きます。</td></tr>
+<tr><td>bubbles で素材が「素材なし」になる</td><td>他のプログラムが素材を書き込みのために開いています。そのプログラムを閉じて、<code>bubbles</code> を起動し直します。</td></tr>
+<tr><td><code>output.mp4</code> が <code>output.stale.mp4</code> になった</td><td><code>build</code> をやり直したためです(古い動画)。<code>render</code> で作り直してください。</td></tr>
+</tbody>
+</table>
+
+<!-- 14 -->
+<h2 id="limits">14. 現在の制限と未確認の事項</h2>
+<div class="grid2">
+<div class="card">
+<h4>この版の制限</h4>
+<ul>
+<li><code>bubbles</code> に元に戻す・やり直しの機能はありません。</li>
+<li><code>bubbles</code> のブラウザの自動起動は Windows だけです。</li>
+<li><code>bubbles</code> は同じ PC の他のプログラムからは守れません(他のウェブページ・他のローカルのサービスからの操作は防ぎます)。</li>
+<li>WebP の素材、BT.709 以外の色の動画は使えません。</li>
+</ul>
+</div>
+<div class="card">
+<h4>まだ人の目で確かめていないこと</h4>
+<ul>
+<li>sample の台本で <code>number</code> → <code>build</code> → <code>prompts</code> → 素材 → <code>bubbles</code> → <code>render</code> を通し、画面の配置と <code>output.mp4</code> が一致することの、最終の目視確認(受け入れ条件)。</li>
+<li>30 分級の性能試験(<code>cargo test -p s2v-cli --release --test render_perf -- --ignored --nocapture</code>)。</li>
+<li><code>bubbles</code> のドラッグの途中のキャンセル(ウィンドウの外へ出るなど)。</li>
+</ul>
+</div>
+</div>
+<p>開発者向けの設計は <code>docs/superpowers/specs/</code>、台本の詳しい規則は <code>台本仕様.md</code>、コマンドの詳細は <code>README.md</code> を参照してください。</p>
+
+<footer>Script2Video 取扱説明書 — 2026-10-16 時点の main(計画 2a・2b・2c・2d-1・2d-2 を取り込み済み)に基づく。</footer>
+</main>
+</div>
+</body>
+</html>
