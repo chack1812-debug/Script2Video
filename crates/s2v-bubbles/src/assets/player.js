@@ -190,8 +190,11 @@ export function createPlayer(o) {
     o.setN(n);
     const wait = apply(r.actions, n);
     if (st.playing) o.onFrame(n);
-    else if (wait) redrawAfterSeeked(n);
-    else o.redraw(n);
+    else if (wait) {
+      // seeked を待つ間も、コマの表示と重ね画像は新しいコマにそろえる(背景は seeked の後)
+      o.onFrame(n);
+      redrawAfterSeeked(n);
+    } else o.redraw(n);
   }
 
   function onCutChange(cut) {

@@ -144,3 +144,12 @@ test("stop_without_video_redraws_immediately", () => {
   t.p.stop();
   assert.deepEqual(t.calls.filter((c) => c[0] === "redraw"), [["redraw", 10]]);
 });
+
+test("止まっているときのカットまたぎのシークは、seeked を待たずにコマの表示を新しいコマにする", () => {
+  const t = setup(99);
+  t.p.seek(100); // C1 → C3(動画の seeked を待つ)
+  assert.ok(t.calls.some((c) => c[0] === "onFrame" && c[1] === 100), "待つ間にコマの表示を更新する");
+  assert.ok(!t.calls.some((c) => c[0] === "redraw"));
+  t.vid.fire("seeked");
+  assert.deepEqual(t.calls.filter((c) => c[0] === "redraw"), [["redraw", 100]]);
+});
