@@ -1115,3 +1115,88 @@ fn forbidden_checker_allows_good_code() {
         assert_eq!(forbidden::check_html(ok), Vec::<String>::new(), "{ok}");
     }
 }
+
+/// 保存のあとの /api/state は、保存した手動配置を返す(再読み込みで保存済みの項目が消えない)。
+#[test]
+fn state_after_save_returns_saved_manual() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_default(dir.path());
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    let manual_of = |id: &str| -> serde_json::Value {
+        let r = Req::new("GET", "/api/state", p).cookie(&c).send(p);
+        assert_eq!(r.status, 200);
+        r.json()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|it| it["id"] == id)
+            .unwrap()["manual"]
+            .clone()
+    };
+    assert!(manual_of("S01-L001").is_null());
+    let a = format!(
+        r#"{{"manual":{{"S01-L001":{}}}}}"#,
+        bubble_json(100, 10, 200, 160, 0, 0)
+    );
+    assert_eq!(post_json(p, &c, "/api/save", &a).status, 200);
+    assert_eq!(manual_of("S01-L001")["x"], 100);
+    // GUI は再読み込みの後、返された A を含む全体を送る
+    let ab = format!(
+        r#"{{"manual":{{"S01-L001":{},"S01-L002":{}}}}}"#,
+        bubble_json(100, 10, 200, 160, 0, 0),
+        bubble_json(20, 20, 280, 150, 0, 0)
+    );
+    let r = post_json(p, &c, "/api/save", &ab);
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(manual_of("S01-L001")["x"], 100);
+    assert_eq!(manual_of("S01-L002")["x"], 20);
+}
+
+/// 保存を重ねても、timeline に無い ID は bubbles.json に残り続ける。
+#[test]
+fn unknown_ids_survive_repeated_saves() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, audio) = locked_file(dir.path(), "full_dialogue.wav", 4096);
+    let session = session_in(dir.path(), "あいう", BTreeMap::new());
+    let unknown: s2v_render::bubbles::Placed =
+        serde_json::from_str(&bubble_json(5, 5, 50, 50, 0, 0)).unwrap();
+    session
+        .loaded
+        .lock()
+        .unwrap()
+        .insert("S09-L777".into(), unknown);
+    let srv = start(session, BTreeMap::new(), audio);
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    for x in [100, 110] {
+        let body = format!(
+            r#"{{"manual":{{"S01-L001":{}}}}}"#,
+            bubble_json(x, 10, 200, 160, 0, 0)
+        );
+        assert_eq!(post_json(p, &c, "/api/save", &body).status, 200);
+        let saved = std::fs::read_to_string(dir.path().join("bubbles.json")).unwrap();
+        assert!(saved.contains("S09-L777"), "{saved}");
+    }
+}
+
+/// 無効なクッキーの HEAD は、メディアの枠より先に 403 になる(503 にならない)。
+#[test]
+fn head_media_with_wrong_cookie_is_403() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_default(dir.path());
+    let p = srv.port;
+    let bad = format!("s2v_{p}={}", "0".repeat(64));
+    for path in [
+        "/media/asset/S01-C01",
+        "/media/audio",
+        "/media/frame/S01-C01?n=0",
+    ] {
+        for m in ["HEAD", "GET"] {
+            let r = Req::new(m, path, p).cookie(&bad).send(p);
+            assert_eq!(r.status, 403, "{m} {path}");
+            let r = Req::new(m, path, p).send(p);
+            assert_eq!(r.status, 403, "{m} {path} (cookie なし)");
+        }
+    }
+}

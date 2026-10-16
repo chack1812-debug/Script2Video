@@ -380,7 +380,13 @@ impl Server {
                 if method != Method::Get {
                     return method_not_allowed(req, "GET");
                 }
-                let v = api::state_json(&self.session, &self.session.loaded);
+                let loaded = self
+                    .session
+                    .loaded
+                    .lock()
+                    .unwrap_or_else(|e| e.into_inner())
+                    .clone();
+                let v = api::state_json(&self.session, &loaded);
                 reply_json(req, 200, &v);
                 Flow::Continue
             }

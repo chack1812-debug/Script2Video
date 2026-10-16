@@ -8,6 +8,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
+use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
@@ -44,8 +45,9 @@ pub struct Session {
     pub items: Vec<Item>,
     /// カット ID → 素材
     pub assets: BTreeMap<String, SessionAsset>,
-    /// 読み込んだ `bubbles.json` の全項目(拡大縮小済み、timeline に無い ID を含む)
-    pub loaded: BTreeMap<String, Placed>,
+    /// 現在保存されている `bubbles.json` の全項目(拡大縮小済み、timeline に無い ID を含む)。
+    /// 起動時に読み込み、保存に成功するたびに保存した中身で置き換える。
+    pub loaded: Mutex<BTreeMap<String, Placed>>,
     pub warnings: Vec<String>,
 }
 
@@ -482,7 +484,7 @@ fn save_with(
     // 中身 = 要求の手動配置 + 読み込んだもののうち timeline に無い ID
     let known = known_ids(&s.timeline);
     let mut items = manual.clone();
-    for (id, p) in &s.loaded {
+    for (id, p) in s.loaded.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         if !known.contains(id.as_str()) {
             items.insert(id.clone(), p.clone());
         }
@@ -509,6 +511,9 @@ fn save_with(
     }
     atomic_replace_with(&main, text.as_bytes(), hook)
         .map_err(|_| ApiError::Internal("bubbles.json を書けません".into()))?;
+
+    // 保存に成功したので、以後の /api/state と未知の ID の引き継ぎは保存した中身を使う
+    *s.loaded.lock().unwrap_or_else(|e| e.into_inner()) = file.items;
 
     let items = items_for(s, manual)?;
     let mut warnings = Vec::new();
@@ -620,7 +625,7 @@ mod tests {
             dir: dir.to_path_buf(),
             items,
             assets: BTreeMap::new(),
-            loaded: BTreeMap::new(),
+            loaded: Mutex::new(BTreeMap::new()),
             warnings: vec![],
         }
     }
@@ -809,8 +814,11 @@ mod tests {
     #[test]
     fn save_writes_bak_and_keeps_unknown_ids() {
         let dir = tempfile::tempdir().unwrap();
-        let mut s = session_in(dir.path(), "あ");
-        s.loaded.insert("S09-L001".into(), bubble(20, 20, 60, 60));
+        let s = session_in(dir.path(), "あ");
+        s.loaded
+            .lock()
+            .unwrap()
+            .insert("S09-L001".into(), bubble(20, 20, 60, 60));
         let original = br#"{"version":1,"canvas":{"w":320,"h":180},"items":{}}"#.to_vec();
         std::fs::write(dir.path().join("bubbles.json"), &original).unwrap();
         let manual = one("S01-L001", bubble(100, 40, 120, 120));
