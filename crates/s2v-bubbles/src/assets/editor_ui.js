@@ -154,6 +154,8 @@ export function attachEditing({ view, editor, state, ui, player, cache, redraw, 
 
   box.addEventListener("pointerdown", (e) => {
     if (ui.sessionLost || e.button !== 0 || drag) return;
+    // 数値の欄にフォーカスが残らないよう、入力を確定して外す(以後の矢印キーを項目へ渡す)
+    session.releaseInput(() => document.activeElement.blur());
     const c = canvasPoint(e);
     const sel = selectedVisible();
     const kind = sel ? hitHandle(shadow && shadow.id === sel.id ? shadow.placed : sel.placed, c.x, c.y, curFit().scale) : null;

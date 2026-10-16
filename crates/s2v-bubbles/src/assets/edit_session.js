@@ -116,6 +116,18 @@ export class EditSession {
     return r.kind === "commit" ? r.promise : Promise.resolve();
   }
 
+  /**
+   * プレビューの操作の開始: 入力中の欄があれば、先に確定してから blur() で外す。
+   * (pointerdown の既定の動作を止めるとフォーカスが欄に残り、続く矢印キーが欄に入ってしまう)
+   * 戻り値は確定の Promise。
+   */
+  releaseInput(blur) {
+    if (!this.activeInput()) return Promise.resolve();
+    const p = this.flushInput();
+    blur();
+    return p;
+  }
+
   /** 保存・終了の前: 保留中の矢印と入力中の欄を確定の待ち行列へ入れる。 */
   async flushAll() {
     await Promise.all([this.flushArrow(), this.flushInput()]);

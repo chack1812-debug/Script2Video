@@ -157,3 +157,26 @@ test("タイマーを差し込まない既定でも、矢印キーは this つ�
     globalThis.clearTimeout = origClear;
   }
 });
+
+test("releaseInput は入力中の欄を確定してから blur する", async () => {
+  const { s, editor, sent, setActive } = setup();
+  const order = [];
+  setActive({ id: "a", field: "x", text: "300" });
+  const p = s.releaseInput(() => order.push("blur"));
+  order.push("after");
+  await p;
+  await editor.flush();
+  assert.deepEqual(order, ["blur", "after"]);
+  assert.equal(sent.length, 1);
+  assert.equal(sent[0].placement.x, 300);
+  assert.equal(sent[0].opts.fromNumber, true);
+});
+
+test("releaseInput は入力中の欄が無ければ blur しない", async () => {
+  const { s } = setup();
+  let blurred = false;
+  await s.releaseInput(() => {
+    blurred = true;
+  });
+  assert.equal(blurred, false);
+});
