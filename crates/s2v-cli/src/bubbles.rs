@@ -152,7 +152,7 @@ fn serve(
         dir: dir.to_path_buf(),
         items,
         assets: session_assets,
-        loaded: manual,
+        loaded: std::sync::Mutex::new(manual),
         warnings,
     };
     let server = Server::bind(

@@ -1,97 +1,330 @@
-// 仮の画面。状態を取得して一覧にし、保存と終了のボタンだけを持つ。
-// 文字列は textContent だけで入れる(HTML として解釈させない)。
-(function () {
-  "use strict";
-  var manual = {};
+// 入口。状態(state・editor・cache・frames・ui)を持ち、view.js に描かせる。
+// 再生(player.js)は Task 6、編集(editor_ui.js)は Task 7・8 がここに繋ぐ(下の ext と redraw が口)。
+import { createApi } from "./api.js";
+import { Editor, FrameFetcher, ImageCache, withKind } from "./model.js";
+import { attachEditing } from "./editor_ui.js";
+import { assetFrame, cutAt, itemsAt, redrawMode } from "./timeline.js";
+import { createPlayer } from "./player.js";
+import { acceptFrame, ImageRequestTracker } from "./request_guard.js";
+import { mountView } from "./view.js";
+import { QUIT_DONE_TEXT, SESSION_LOST_QUIT_TEXT, decideQuit, formatSaveResult } from "./save_quit.js";
 
-  function setStatus(text) {
-    document.getElementById("status").textContent = text;
+const SESSION_LOST_TEXT = "セッションが切れました。bubbles を起動し直してください";
+
+async function main() {
+  const ui = { n: 0, selected: null, playing: false, dragging: false, sessionLost: false, saving: false, savePromise: null };
+  // 後続のタスクが差し込む口(player: Task 6、editing: Task 7・8)
+  const ext = { player: null, editing: null };
+  let view = null;
+
+  const setStatus = (text) => {
+    if (view) view.setStatus(text);
+    else document.getElementById("status").textContent = text;
+  };
+
+  const onSessionLost = () => {
+    ui.sessionLost = true;
+    ui.playing = false;
+    // 後から結線される player も含めて再生を止め、背景のメディアの読み込みも止める(表示は最後のまま)
+    if (ext.player && typeof ext.player.stop === "function") ext.player.stop();
+    if (view) view.releaseBackground();
+    setStatus(SESSION_LOST_TEXT);
+  };
+
+  const api = createApi((url, init) => fetch(url, init), onSessionLost);
+  const got = await api.getState();
+  if (got.ok === false) {
+    setStatus((got.errors || ["状態を取得できません"]).join(" / "));
+    return;
+  }
+  const state = got;
+  const editor = new Editor(api, state, () => ui.sessionLost);
+  const cache = new ImageCache(300, (u) => URL.revokeObjectURL(u));
+  const frames = new FrameFetcher((cutId, n) => api.frame(cutId, n));
+
+  // --- 背景 ---
+  const frameMode = new Set(); // 動画を読み込めず frame に切り替えたカットの ID
+  let frameShown = null; // { cutId, n, url }: 表示中の frame
+
+  const bgSpec = (kind, extra) => ({ kind, fit: state.fit, background: state.background, ...extra });
+
+  // frame の blob URL を解放する(frame 以外の背景へ切り替えた後に呼ぶ)
+  function dropFrame() {
+    if (frameShown) URL.revokeObjectURL(frameShown.url);
+    frameShown = null;
   }
 
-  function fill(listId, lines, cls) {
-    var ul = document.getElementById(listId);
-    while (ul.firstChild) {
-      ul.removeChild(ul.firstChild);
+  function showFrame(cut, n) {
+    if (ui.sessionLost) return;
+    frames.setCurrent(cut.id, n);
+    if (frameShown && frameShown.cutId === cut.id && frameShown.n === n) {
+      view.setBackground(bgSpec("frame", { url: frameShown.url, cutId: cut.id }));
+      return;
     }
-    lines.forEach(function (line) {
-      var li = document.createElement("li");
-      li.textContent = line;
-      if (cls) {
-        li.className = cls;
-      }
-      ul.appendChild(li);
-    });
-  }
-
-  function post(path, body) {
-    return fetch(path, {
-      method: "POST",
-      credentials: "same-origin",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify(body),
-    });
-  }
-
-  function show(state) {
-    manual = {};
-    state.items.forEach(function (it) {
-      if (it.manual) {
-        manual[it.id] = it.manual;
-      }
-    });
-    var scenes = [];
-    state.scenes.forEach(function (sc) {
-      scenes.push(sc.id + (sc.name ? " " + sc.name : "") + "(カット " + sc.cuts.length + ")");
-      sc.cuts.forEach(function (c) {
-        scenes.push("  " + c.id + " コマ " + c.frames[0] + "-" + c.frames[1] + (c.asset ? " " + c.asset.kind : " 素材なし"));
-      });
-    });
-    fill("scenes", scenes);
-    fill(
-      "items",
-      state.items.map(function (it) {
-        return it.id + " " + it.kind + " コマ " + it.frames[0] + "-" + it.frames[1];
-      })
+    frames.request(
+      cut.id,
+      n,
+      (blob) => {
+        if (ui.sessionLost) return;
+        // 取得の間に別のカット・コマへ移っていたら捨てる
+        const now = cutAt(state, ui.n);
+        if (!acceptFrame({ cutId: now ? now.id : null, n: ui.n }, { cutId: cut.id, n })) return;
+        const url = URL.createObjectURL(blob);
+        const old = frameShown;
+        frameShown = { cutId: cut.id, n, url };
+        view.setBackground(bgSpec("frame", { url, cutId: cut.id }));
+        if (old) URL.revokeObjectURL(old.url);
+      },
+      () => {
+        if (ui.sessionLost) return;
+        const now = cutAt(state, ui.n);
+        if (!acceptFrame({ cutId: now ? now.id : null, n: ui.n }, { cutId: cut.id, n })) return;
+        view.setBackground(bgSpec("unavailable"));
+        dropFrame();
+      },
     );
-    fill("warnings", state.warnings, "warn");
-    setStatus("シーン " + state.scenes.length + " 件、項目 " + state.items.length + " 件、警告 " + state.warnings.length + " 件");
   }
 
-  function load() {
-    fetch("/api/state", { credentials: "same-origin" })
-      .then(function (r) {
-        if (!r.ok) {
-          throw new Error("状態を取得できません(" + r.status + ")");
+  // 素材の読み込みエラー: HEAD で 403 ならセッション切れ(api が onSessionLost を呼ぶ)
+  async function onAssetError(cut, kind) {
+    if (ui.sessionLost) return;
+    const status = await api.head(cut.asset.url);
+    if (status === 403 || ui.sessionLost) return;
+    // 待つ間に別のカットへ移っていたら、このカットのエラーは今の表示に関係しない
+    const now = cutAt(state, ui.n);
+    if (!now || now.id !== cut.id) {
+      if (kind === "video" && cut.asset.frame_url) frameMode.add(cut.id);
+      return;
+    }
+    if (kind === "video" && cut.asset.frame_url) {
+      frameMode.add(cut.id);
+      refresh();
+    } else {
+      view.setBackground(bgSpec("unavailable"));
+      dropFrame();
+    }
+  }
+
+  function updateBackground(cut, n) {
+    // frame を使わない背景(画像・通常の動画・素材なし・再生中)へ移るので、取得中の応答は無効にする。
+    // frame を使う場合は showFrame が setCurrent で改めて今のコマを登録する。
+    frames.clear();
+    if (!cut || !cut.asset) {
+      view.setBackground(bgSpec("none"));
+      dropFrame();
+      return;
+    }
+    const a = cut.asset;
+    if (a.kind !== "video") {
+      view.setBackground(bgSpec("image", { url: a.url, cutId: cut.id, onError: () => onAssetError(cut, "image") }));
+      dropFrame();
+      return;
+    }
+    if (frameMode.has(cut.id)) {
+      if (ui.playing) {
+        // 再生中は frame を要求しない。最後に表示した画像のまま(無ければ素材なしの表示)
+        if (frameShown) view.setBackground(bgSpec("frame", { url: frameShown.url, cutId: frameShown.cutId }));
+        else view.setBackground(bgSpec("none"));
+        return;
+      }
+      showFrame(cut, n);
+      return;
+    }
+    // 止まっているときは素材の中のコマ k の時刻に置く(再生中の同期は player.js)
+    const k = assetFrame(n, cut.frames[0], a.frames, a.looped);
+    view.setBackground(
+      bgSpec("video", { url: a.url, cutId: cut.id, time: k / state.fps, onError: () => onAssetError(cut, "video") }),
+    );
+    dropFrame();
+  }
+
+  // --- 重ね画像 ---
+  const imageRequests = new ImageRequestTracker(); // 実行中の「ID:版」だけ(完了で忘れる)
+
+  function requestImage(item) {
+    if (ui.sessionLost) return;
+    const v = cache.version(item.id);
+    if (!imageRequests.shouldRequest(item.id, v)) return;
+    const finish = () => imageRequests.done(item.id, v);
+    api.render({ id: item.id, manual: withKind(editor.confirmed, editor.items) }).then((r) => {
+      finish();
+      if (!r.ok) {
+        setStatus("重ね画像を取得できません: " + (r.errors || []).join(" / "));
+        return;
+      }
+      // 版が変わっていれば set が false を返し、blob URL も解放される
+      if (cache.set(item.id, URL.createObjectURL(r.png), v)) refresh();
+    }, finish);
+  }
+
+  // --- コマの描画 ---
+  function redraw(n) {
+    if (ui.sessionLost) return;
+    ui.n = n;
+    view.setFrame(n);
+    const cut = cutAt(state, n);
+    updateBackground(cut, n);
+    view.renderFrame({
+      n,
+      cut,
+      items: itemsAt(editor.items, n),
+      cache,
+      selected: ui.selected,
+      onMissing: requestImage,
+    });
+    if (ext.editing) ext.editing.sync();
+  }
+
+  function refreshChrome() {
+    view.renderList(editor.items, ui.selected);
+    view.setNumbers(editor.items.find((it) => it.id === ui.selected) || null);
+    view.setDirty(editor.isDirty());
+  }
+
+  // --- 操作 ---
+  const handlers = {
+    onSelectItem(id) {
+      if (ui.sessionLost) return;
+      ui.selected = id;
+      const it = editor.items.find((x) => x.id === id);
+      refreshChrome();
+      if (it && !(it.frames[0] <= ui.n && ui.n < it.frames[1])) seek(it.frames[0]);
+      else refresh();
+    },
+    onSeek: (n) => {
+      if (!ui.sessionLost) seek(n);
+    },
+    onPlayToggle() {
+      if (ui.sessionLost) return;
+      if (ext.player) ui.playing ? ext.player.stop() : ext.player.play();
+    },
+    onSave() {
+      if (ui.sessionLost || ui.saving) return ui.savePromise;
+      ui.saving = true;
+      view.setSaving(true);
+      ui.savePromise = (async () => {
+        try {
+          // editor.save が保留中の入力の確定 → 待ち行列を空に → 確定した一式の送信、の順で行う
+          const r = await editor.save();
+          if (ui.sessionLost) return; // セッション切れの表示を上書きしない
+          const f = formatSaveResult(r);
+          view.setWarnings([...state.warnings, ...f.lines]);
+          setStatus(f.status);
+        } finally {
+          ui.saving = false;
+          ui.savePromise = null;
+          view.setSaving(false);
+          view.setDirty(editor.isDirty());
         }
-        return r.json();
-      })
-      .then(show)
-      .catch(function (e) {
-        setStatus(String(e.message || e));
+      })();
+      return ui.savePromise;
+    },
+    async onQuit() {
+      if (ui.sessionLost) {
+        setStatus(SESSION_LOST_QUIT_TEXT);
+        return;
+      }
+      const d = await decideQuit({
+        pendingSave: () => ui.savePromise,
+        flushers: () => [editor.runPendingFlushers()],
+        flush: () => editor.flush(),
+        isDirty: () => editor.isDirty(),
+        confirm: (t) => window.confirm(t),
+        quit: () => api.quit(),
+        sessionLost: () => ui.sessionLost,
       });
+      view.setDirty(editor.isDirty());
+      if (d.result === "quit") setStatus(QUIT_DONE_TEXT);
+      else if (d.result === "lost") setStatus(SESSION_LOST_QUIT_TEXT);
+      else if (d.result === "failed") setStatus("終了できません: " + d.errors.join(" / "));
+    },
+    onRevertAuto(id) {
+      if (ext.editing) ext.editing.revertAuto(id);
+    },
+    onNumberCommit(id, field, value) {
+      if (ext.editing) ext.editing.commitNumber(id, field, value);
+    },
+  };
+
+  function seek(n) {
+    if (ui.sessionLost) return;
+    // player に任せる(動画の seeked を待つ場合も含め、描き直しは player が redraw を呼ぶ)
+    if (ext.player) ext.player.seek(n);
+    else redraw(n);
   }
 
-  document.getElementById("save").addEventListener("click", function () {
-    post("/api/save", { manual: manual })
-      .then(function (r) {
-        return r.json().then(function (j) {
-          setStatus(r.ok ? "保存しました" : "保存できません: " + (j.error || (j.errors || []).join(" / ")));
-        });
-      })
-      .catch(function (e) {
-        setStatus(String(e.message || e));
-      });
+  // 今のコマの描き直し。再生中は背景の動画を巻き戻さないよう重ね画像だけ
+  function refresh() {
+    if (redrawMode(ui.playing) === "overlay") drawPlaying(ui.n);
+    else redraw(ui.n);
+  }
+
+  // 再生中のコマの更新(背景の動画には触れず、スライダーと重ね画像だけ)
+  function drawPlaying(n) {
+    if (ui.sessionLost) return;
+    ui.n = n;
+    view.setFrame(n);
+    view.renderFrame({
+      n,
+      cut: cutAt(state, n),
+      items: itemsAt(editor.items, n),
+      cache,
+      selected: ui.selected,
+      onMissing: requestImage,
+    });
+    // 選択の枠とつまみも、再生中の描き直しにそろえる
+    if (ext.editing) ext.editing.sync();
+  }
+
+  const audio = document.createElement("audio");
+  audio.preload = "auto";
+  audio.src = "/media/audio";
+  ext.player = createPlayer({
+    audio,
+    video: () => view.videoElement(),
+    state,
+    getN: () => ui.n,
+    setN: (n) => {
+      ui.n = n;
+    },
+    frames,
+    isLost: () => ui.sessionLost,
+    showCut: (cut, n) => updateBackground(cut, n),
+    redraw: (n) => redraw(n),
+    onFrame: drawPlaying,
+    onPlayingChange: (p) => {
+      ui.playing = p;
+      view.setPlaying(p);
+    },
+    onAudioError: async () => {
+      const status = await api.head("/media/audio");
+      if (status !== 403 && !ui.sessionLost) setStatus("音声を読み込めません");
+    },
   });
 
-  document.getElementById("quit").addEventListener("click", function () {
-    post("/api/quit", {})
-      .then(function () {
-        setStatus("終了しました。このタブは閉じてかまいません");
-      })
-      .catch(function (e) {
-        setStatus(String(e.message || e));
-      });
+  view = mountView(document.body, state, handlers);
+  view.setWarnings(state.warnings);
+  ext.editing = attachEditing({ view, editor, state, ui, player: ext.player, cache, redraw, toast: setStatus });
+  setStatus(
+    "シーン " + state.scenes.length + " 件、項目 " + state.items.length + " 件、警告 " + state.warnings.length + " 件",
+  );
+  // Ctrl+S は保存(ブラウザの保存ダイアログは出さない)
+  document.addEventListener("keydown", (e) => {
+    if ((e.ctrlKey || e.metaKey) && !e.altKey && !e.shiftKey && (e.key === "s" || e.key === "S")) {
+      e.preventDefault();
+      handlers.onSave();
+    }
   });
+  // 未保存の変更があるときだけ、閉じる前の確認を出す
+  window.addEventListener("beforeunload", (e) => {
+    if (editor.isDirty()) {
+      e.preventDefault();
+      e.returnValue = "";
+    }
+  });
+  refreshChrome();
+  redraw(0);
+  if (ui.sessionLost) setStatus(SESSION_LOST_TEXT);
+}
 
-  load();
-})();
+main();

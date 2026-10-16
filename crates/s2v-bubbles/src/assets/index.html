@@ -7,18 +7,27 @@
 <link rel="stylesheet" href="/app.css">
 </head>
 <body>
-<h1>bubbles(仮の画面)</h1>
-<p id="status" class="status"></p>
-<div class="buttons">
+<header class="top">
+<h1>bubbles</h1>
+<span id="status" class="status"></span>
+<span id="dirty" class="dirty"></span>
+<span class="spacer"></span>
 <button id="save" type="button">保存</button>
 <button id="quit" type="button">終了</button>
+</header>
+<main class="main">
+<nav id="list" class="list" aria-label="シーンとカットと項目"></nav>
+<section class="center">
+<div id="preview" class="preview"></div>
+<div class="bottom">
+<button id="play" type="button">再生</button>
+<input id="seek" type="range" min="0" max="0" step="1" value="0" aria-label="コマ">
+<span id="frame-label" class="frame-label"></span>
 </div>
-<h2>警告</h2>
-<ul id="warnings"></ul>
-<h2>シーンとカット</h2>
-<ul id="scenes"></ul>
-<h2>項目</h2>
-<ul id="items"></ul>
-<script src="/app.js"></script>
+<ul id="warnings" class="warnings"></ul>
+</section>
+<aside id="numbers" class="numbers"></aside>
+</main>
+<script type="module" src="/app.js"></script>
 </body>
 </html>

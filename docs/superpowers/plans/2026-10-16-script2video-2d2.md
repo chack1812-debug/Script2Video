@@ -81,7 +81,7 @@
 
 - `app.js` が状態を持つ: `state`(`/api/state`)、`editor`(`model.Editor`)、`cache`(`model.ImageCache`)、`frames`(`model.FrameFetcher`)、`ui = {n, selected, playing, dragging}`。他のモジュールは `app.js` から渡された関数と値だけを使う。
 - `view.js`(Task 5)の公開: `mountView(root, state, handlers)`(`handlers = {onSelectItem(id), onSeek(n), onPlayToggle(), onSave(), onQuit(), onRevertAuto(id), onNumberCommit(id, field, value)}`)→ `{renderList(items, selected), renderFrame({n, cut, items, cache, selected}), setBackground(spec), setStatus(text), setWarnings(list), setDirty(bool), setNumbers(item|null), previewElement(), overlayLayer()}`。`setBackground(spec)` の `spec` は `{kind:"none"|"image"|"video"|"frame"|"unavailable", url?, fit, background}`。
-- `player.js`(Task 6)の公開: `createPlayer({audio, video, state, getN, setN, frames, onSessionLost})` → `{play(), stop(), seek(n), onCutChange(cut), tick()}`(`timeline.playerStep` の結果を DOM に適用する)。
+- `player.js`(Task 6)の公開(実装の際に更新。Ruling 9): `createPlayer({audio, video(要素か、要素を返す関数), state, getN, setN, frames, showCut, redraw, onFrame, onPlayingChange, isLost, onAudioError})` → `{play(), stop(), seek(n), onCutChange(cut), tick()}`(`timeline.playerStep` の結果を DOM に適用する)。
 - `editor_ui.js`(Task 7・8)の公開: `attachEditing({view, editor, state, ui, player, cache, redraw, toast})` → `{flushPending(): Promise}`(矢印キーの待ちと入力中の数値の欄を `enqueue` する。保存・終了の前に呼ぶ)。
 
 ---

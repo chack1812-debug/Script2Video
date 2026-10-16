@@ -61,6 +61,7 @@ fn requests_without_cookie_are_403() {
         "/",
         "/app.js",
         "/app.css",
+        "/geom.js",
         "/api/state",
         "/media/audio",
         "/media/asset/S01-C01",
@@ -251,6 +252,7 @@ fn common_headers_on_every_response() {
         ("/", "text/html; charset=utf-8"),
         ("/app.js", "text/javascript; charset=utf-8"),
         ("/app.css", "text/css; charset=utf-8"),
+        ("/geom.js", "text/javascript; charset=utf-8"),
     ] {
         let r = Req::new("GET", path, p).cookie(&c).send(p);
         assert_eq!(r.status, 200, "{path}");
@@ -672,17 +674,68 @@ fn two_servers_do_not_share_cookie() {
 }
 
 #[test]
+fn embedded_modules_are_served() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_default(dir.path());
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    for path in [
+        "/geom.js",
+        "/timeline.js",
+        "/model.js",
+        "/api.js",
+        "/view.js",
+        "/player.js",
+        "/app.js",
+    ] {
+        let r = Req::new("GET", path, p).cookie(&c).send(p);
+        assert_eq!(r.status, 200, "{path}");
+        assert_eq!(
+            r.header("Content-Type"),
+            Some("text/javascript; charset=utf-8"),
+            "{path}"
+        );
+        assert!(!r.body.is_empty(), "{path}");
+        let r = Req::new("GET", path, p).send(p);
+        assert_eq!(r.status, 403, "{path}");
+    }
+}
+
+#[test]
+fn index_loads_app_as_module() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_default(dir.path());
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    let r = Req::new("GET", "/", p).cookie(&c).send(p);
+    assert_eq!(r.status, 200);
+    let t = r.text();
+    assert!(t.contains(r#"type="module""#), "{t}");
+    assert!(t.contains(r#"src="/app.js""#), "{t}");
+}
+
+#[test]
 fn embedded_assets_have_no_inner_html() {
-    let js = include_str!("../src/assets/app.js");
     let html = include_str!("../src/assets/index.html");
     let css = include_str!("../src/assets/app.css");
-    assert!(!js.contains("innerHTML"));
-    assert!(!js.contains("outerHTML"));
-    assert!(!js.contains("insertAdjacentHTML"));
-    assert!(!js.contains("document.write"));
-    assert!(!js.contains("eval("));
+    let found = forbidden::check_html(html);
+    assert!(found.is_empty(), "index.html: {found:?}");
+    // src/assets の全ての .js を対象にする(Node が無くても最低限の検査が残る)
+    let dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("src/assets");
+    let mut checked = 0;
+    for entry in std::fs::read_dir(&dir).unwrap() {
+        let path = entry.unwrap().path();
+        if path.extension().and_then(|e| e.to_str()) != Some("js") {
+            continue;
+        }
+        let js = std::fs::read_to_string(&path).unwrap();
+        let found = forbidden::check_js(&js);
+        assert!(found.is_empty(), "{}: {found:?}", path.display());
+        checked += 1;
+    }
+    assert!(checked >= 2, "app.js と geom.js を検査できていません");
     // CSP: インラインのスクリプト・スタイルを使わない
-    assert!(html.contains(r#"<script src="/app.js"#));
+    assert!(html.contains(r#"<script type="module" src="/app.js">"#));
     assert!(html.contains(r#"href="/app.css""#));
     assert!(!html.contains("<style"));
     assert!(!html.contains(" style="));
@@ -1004,5 +1057,146 @@ fn frame_spawn_failure_is_500_and_next_request_succeeds() {
         assert_eq!(r.status, 503);
         assert!(Instant::now() < deadline, "回復しません");
         std::thread::sleep(Duration::from_millis(100));
+    }
+}
+
+#[test]
+fn forbidden_checker_detects_violations() {
+    for bad in [
+        "a.innerHTML = x",
+        "e.outerHTML=1",
+        "e.insertAdjacentHTML('a', s)",
+        "document.write(s)",
+        "eval(s)",
+        "new Function('x')",
+        "setTimeout('f()', 1)",
+        "setInterval(\"f()\", 1)",
+        "e.setAttribute('style', 'x')",
+        "e.setAttribute(\"onclick\", f)",
+        "e.style.cssText = s",
+    ] {
+        assert!(!forbidden::check_js(bad).is_empty(), "{bad}");
+    }
+    for bad in [
+        "<div onclick=\"x\">",
+        "<DIV\nONLOAD=x>",
+        "<p style = \"a\">",
+        "<STYLE>p{}</STYLE>",
+        "<script>alert(1)</script>",
+        "<script src=\"https://cdn.example/x.js\"></script>",
+        "<script src=\"//cdn.example/x.js\"></script>",
+        "<link rel=\"stylesheet\" href=\"https://cdn.example/x.css\">",
+        "<link href=\"//cdn/x.css\">",
+        "<img src=\"https://x/y.png\">",
+    ] {
+        assert!(!forbidden::check_html(bad).is_empty(), "{bad}");
+    }
+}
+
+#[test]
+fn forbidden_checker_allows_good_code() {
+    for ok in [
+        "e.style.left = '1px'",
+        "e.textContent = s",
+        "setTimeout(() => f(), 300)",
+        "// innerHTML は使わない(コメント)",
+        "/* eval( */ const a = 1;",
+        "e.addEventListener('click', f)",
+        "retrieval(x); // eval(",
+    ] {
+        assert_eq!(forbidden::check_js(ok), Vec::<String>::new(), "{ok}");
+    }
+    for ok in [
+        "<script type=\"module\" src=\"/app.js\"></script>",
+        "<link rel=\"stylesheet\" href=\"/app.css\">",
+        "<p>style や onclick という言葉は本文なら可</p>",
+        "<button id=\"save\" type=\"button\">保存</button>",
+    ] {
+        assert_eq!(forbidden::check_html(ok), Vec::<String>::new(), "{ok}");
+    }
+}
+
+/// 保存のあとの /api/state は、保存した手動配置を返す(再読み込みで保存済みの項目が消えない)。
+#[test]
+fn state_after_save_returns_saved_manual() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_default(dir.path());
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    let manual_of = |id: &str| -> serde_json::Value {
+        let r = Req::new("GET", "/api/state", p).cookie(&c).send(p);
+        assert_eq!(r.status, 200);
+        r.json()["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|it| it["id"] == id)
+            .unwrap()["manual"]
+            .clone()
+    };
+    assert!(manual_of("S01-L001").is_null());
+    let a = format!(
+        r#"{{"manual":{{"S01-L001":{}}}}}"#,
+        bubble_json(100, 10, 200, 160, 0, 0)
+    );
+    assert_eq!(post_json(p, &c, "/api/save", &a).status, 200);
+    assert_eq!(manual_of("S01-L001")["x"], 100);
+    // GUI は再読み込みの後、返された A を含む全体を送る
+    let ab = format!(
+        r#"{{"manual":{{"S01-L001":{},"S01-L002":{}}}}}"#,
+        bubble_json(100, 10, 200, 160, 0, 0),
+        bubble_json(20, 20, 280, 150, 0, 0)
+    );
+    let r = post_json(p, &c, "/api/save", &ab);
+    assert_eq!(r.status, 200, "{}", r.text());
+    assert_eq!(manual_of("S01-L001")["x"], 100);
+    assert_eq!(manual_of("S01-L002")["x"], 20);
+}
+
+/// 保存を重ねても、timeline に無い ID は bubbles.json に残り続ける。
+#[test]
+fn unknown_ids_survive_repeated_saves() {
+    let dir = tempfile::tempdir().unwrap();
+    let (_, audio) = locked_file(dir.path(), "full_dialogue.wav", 4096);
+    let session = session_in(dir.path(), "あいう", BTreeMap::new());
+    let unknown: s2v_render::bubbles::Placed =
+        serde_json::from_str(&bubble_json(5, 5, 50, 50, 0, 0)).unwrap();
+    session
+        .loaded
+        .lock()
+        .unwrap()
+        .insert("S09-L777".into(), unknown);
+    let srv = start(session, BTreeMap::new(), audio);
+    let p = srv.port;
+    let c = login(p, &srv.token);
+    for x in [100, 110] {
+        let body = format!(
+            r#"{{"manual":{{"S01-L001":{}}}}}"#,
+            bubble_json(x, 10, 200, 160, 0, 0)
+        );
+        assert_eq!(post_json(p, &c, "/api/save", &body).status, 200);
+        let saved = std::fs::read_to_string(dir.path().join("bubbles.json")).unwrap();
+        assert!(saved.contains("S09-L777"), "{saved}");
+    }
+}
+
+/// 無効なクッキーの HEAD は、メディアの枠より先に 403 になる(503 にならない)。
+#[test]
+fn head_media_with_wrong_cookie_is_403() {
+    let dir = tempfile::tempdir().unwrap();
+    let srv = start_default(dir.path());
+    let p = srv.port;
+    let bad = format!("s2v_{p}={}", "0".repeat(64));
+    for path in [
+        "/media/asset/S01-C01",
+        "/media/audio",
+        "/media/frame/S01-C01?n=0",
+    ] {
+        for m in ["HEAD", "GET"] {
+            let r = Req::new(m, path, p).cookie(&bad).send(p);
+            assert_eq!(r.status, 403, "{m} {path}");
+            let r = Req::new(m, path, p).send(p);
+            assert_eq!(r.status, 403, "{m} {path} (cookie なし)");
+        }
     }
 }
