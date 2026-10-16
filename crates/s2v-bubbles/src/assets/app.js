@@ -5,6 +5,7 @@ import { Editor, FrameFetcher, ImageCache, withKind } from "./model.js";
 import { attachEditing } from "./editor_ui.js";
 import { assetFrame, cutAt, itemsAt, redrawMode } from "./timeline.js";
 import { createPlayer } from "./player.js";
+import { acceptFrame, ImageRequestTracker } from "./request_guard.js";
 import { mountView } from "./view.js";
 import { QUIT_DONE_TEXT, SESSION_LOST_QUIT_TEXT, decideQuit, formatSaveResult } from "./save_quit.js";
 
@@ -65,6 +66,9 @@ async function main() {
       n,
       (blob) => {
         if (ui.sessionLost) return;
+        // 取得の間に別のカット・コマへ移っていたら捨てる
+        const now = cutAt(state, ui.n);
+        if (!acceptFrame({ cutId: now ? now.id : null, n: ui.n }, { cutId: cut.id, n })) return;
         const url = URL.createObjectURL(blob);
         const old = frameShown;
         frameShown = { cutId: cut.id, n, url };
@@ -73,6 +77,8 @@ async function main() {
       },
       () => {
         if (ui.sessionLost) return;
+        const now = cutAt(state, ui.n);
+        if (!acceptFrame({ cutId: now ? now.id : null, n: ui.n }, { cutId: cut.id, n })) return;
         view.setBackground(bgSpec("unavailable"));
         dropFrame();
       },
@@ -100,6 +106,9 @@ async function main() {
   }
 
   function updateBackground(cut, n) {
+    // frame を使わない背景(画像・通常の動画・素材なし・再生中)へ移るので、取得中の応答は無効にする。
+    // frame を使う場合は showFrame が setCurrent で改めて今のコマを登録する。
+    frames.clear();
     if (!cut || !cut.asset) {
       view.setBackground(bgSpec("none"));
       dropFrame();
@@ -130,22 +139,22 @@ async function main() {
   }
 
   // --- 重ね画像 ---
-  const requested = new Set(); // 要求済みの「ID@版」(失敗しても同じ版では繰り返さない)
+  const imageRequests = new ImageRequestTracker(); // 実行中の「ID:版」だけ(完了で忘れる)
 
   function requestImage(item) {
     if (ui.sessionLost) return;
     const v = cache.version(item.id);
-    const key = item.id + "@" + v;
-    if (requested.has(key)) return;
-    requested.add(key);
+    if (!imageRequests.shouldRequest(item.id, v)) return;
+    const finish = () => imageRequests.done(item.id, v);
     api.render({ id: item.id, manual: withKind(editor.confirmed, editor.items) }).then((r) => {
+      finish();
       if (!r.ok) {
         setStatus("重ね画像を取得できません: " + (r.errors || []).join(" / "));
         return;
       }
       // 版が変わっていれば set が false を返し、blob URL も解放される
       if (cache.set(item.id, URL.createObjectURL(r.png), v)) refresh();
-    });
+    }, finish);
   }
 
   // --- コマの描画 ---

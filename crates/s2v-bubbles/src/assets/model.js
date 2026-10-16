@@ -175,6 +175,11 @@ export class FrameFetcher {
     this._cur = { cutId, n };
   }
 
+  // 今のコマが frame を要らなくなった(別のカット・画像・素材なし・再生中)ときに、取得中の応答を無効にする。
+  clear() {
+    this._cur = null;
+  }
+
   request(cutId, n, onResult, onError) {
     const req = { cutId, n, onResult, onError };
     if (this._busy) {

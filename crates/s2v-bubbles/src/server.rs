@@ -53,6 +53,11 @@ const PAGES: &[(&str, &str, &str)] = &[
     ),
     ("/player.js", include_str!("assets/player.js"), JS_TYPE),
     (
+        "/request_guard.js",
+        include_str!("assets/request_guard.js"),
+        JS_TYPE,
+    ),
+    (
         "/save_quit.js",
         include_str!("assets/save_quit.js"),
         JS_TYPE,
