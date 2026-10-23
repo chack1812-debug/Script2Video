@@ -3,7 +3,7 @@
   配布用 zip(dist\script2video-<版>.zip)を作る。
 .DESCRIPTION
   release ビルド → 依存 DLL の検査 → zip 作成。zip の中身(平らに展開される):
-    script2video.exe / install-ffmpeg.ps1 / Operating Manual.html / README.md
+    script2video.exe / install-ffmpeg.ps1 / Operating Manual.html / README.md / LICENSE / THIRD-PARTY-NOTICES.txt
   展開先は PATH の通ったフォルダを想定。ffmpeg は同梱せず、install-ffmpeg.ps1 が入れる。
 #>
 [CmdletBinding()]
@@ -35,7 +35,9 @@ try {
         @{ From = $exe; To = 'script2video.exe' },
         @{ From = (Join-Path $root 'scripts\install-ffmpeg.ps1'); To = 'install-ffmpeg.ps1' },
         @{ From = (Join-Path $root 'docs\Operating Manual.html'); To = 'Operating Manual.html' },
-        @{ From = (Join-Path $root 'README.md'); To = 'README.md' }
+        @{ From = (Join-Path $root 'README.md'); To = 'README.md' },
+        @{ From = (Join-Path $root 'LICENSE'); To = 'LICENSE' },
+        @{ From = (Join-Path $root 'THIRD-PARTY-NOTICES.txt'); To = 'THIRD-PARTY-NOTICES.txt' }
     )
     $stage = Join-Path ([IO.Path]::GetTempPath()) ("s2v-pkg-" + [Guid]::NewGuid().ToString('N'))
     New-Item -ItemType Directory -Path $stage | Out-Null

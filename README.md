@@ -238,3 +238,12 @@ tracks/S01_C02.mp4     S01-C02 の動画
 確認の内容: 測定範囲が 400ms 以上の台詞は、フェード前の音量が目標の ±1 LU に入ること。400ms 未満の台詞は、適用ゲインが「目標 − 測定値」と一致すること。ゲインが制限に掛かった台詞は対象外。出力は何も書き換えない。
 
 終了コード: 0=すべて OK、1=不合格あり、2=確認できない(`timeline/timeline.json`・`work/cache.json`・`work/lines_prefade/` がない、確認できる台詞が 0 件など)。
+
+## ライセンス
+
+Copyright (C) 2026 村上孝伸(宇摩コードワークス / UmaCodeWorks)
+
+本ソフトウェアは [GNU General Public License v3.0 以降(GPL-3.0-or-later)](LICENSE) で公開しています。無保証です。
+組み込んでいるオープンソースのクレートのライセンスは [THIRD-PARTY-NOTICES.txt](THIRD-PARTY-NOTICES.txt) にまとめています。
+動画の書き出しに使う ffmpeg は同梱せず、別のプログラムとして呼び出します。
+
