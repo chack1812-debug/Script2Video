@@ -208,6 +208,9 @@ pub fn cut_args(
         "-video_track_timescale",
     ]));
     a.push((s.fps * 1000).to_string());
+    // movie timescale が既定の 1000 だと edit list の長さがミリ秒に丸められ、duration_ts が N*1000 からずれることがある
+    a.push("-movie_timescale".into());
+    a.push((s.fps * 1000).to_string());
     a.push(out.to_string());
     a
 }
@@ -478,11 +481,13 @@ mod tests {
                 "concat"
             ]
         );
-        let tail: Vec<&str> = a.iter().rev().take(4).map(|x| x.as_str()).collect();
+        let tail: Vec<&str> = a.iter().rev().take(6).map(|x| x.as_str()).collect();
         assert_eq!(
             tail,
             vec![
                 "cut_0001.mp4",
+                "30000",
+                "-movie_timescale",
                 "30000",
                 "-video_track_timescale",
                 "colorprim=bt709:transfer=bt709"
@@ -690,7 +695,7 @@ mod cut_args_golden_tests {
         );
         v.push(cut_filter(bg, 60, &s));
         v.extend(
-            "-map [v] -an -frames:v 60 -fps_mode cfr -threads 4 -c:v libx264 -preset medium -crf 20 -profile:v high -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -x264-params colorprim=bt709:transfer=bt709 -video_track_timescale 30000 cut.mp4"
+            "-map [v] -an -frames:v 60 -fps_mode cfr -threads 4 -c:v libx264 -preset medium -crf 20 -profile:v high -pix_fmt yuv420p -colorspace bt709 -color_primaries bt709 -color_trc bt709 -color_range tv -x264-params colorprim=bt709:transfer=bt709 -video_track_timescale 30000 -movie_timescale 30000 cut.mp4"
                 .split(' ')
                 .map(|x| x.to_string()),
         );
