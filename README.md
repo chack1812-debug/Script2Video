@@ -1,6 +1,13 @@
 # Script2Video
 
 台本と収録音声から、動画用の音声・字幕・タイムラインを作るコマンドラインツール。
+開発・運営: [宇摩コードワークス（UmaCodeWorks）](https://umacodeworks.jp)
+
+## 紹介動画
+
+Script2Videoの概要と使い方を紹介した動画です。
+
+[![Script2Video 紹介動画](https://img.youtube.com/vi/NBrsLwSNa7U/maxresdefault.jpg)](https://youtu.be/NBrsLwSNa7U)
 
 ```
 script2video number <台本.txt>
@@ -22,6 +29,16 @@ script2video render <台本.txt> [--config <設定.toml>]
 同じ台本フォルダで `number`・`build` を同時に実行すると、後から始めた方が終了コード 2 で止まります(`.script2video.lock` で排他)。失敗の理由は `Process.log` に記録します。
 
 ## インストール
+
+### 配布パッケージを使う(Rust 不要)
+
+`dist/script2video-0.1.0.zip` をダウンロードして展開する。中身は `script2video.exe`・`install-ffmpeg.ps1`・`Operating Manual.html`・`README.md`。
+
+1. PATH の通ったフォルダ(なければ作って PATH に追加)に展開する。
+2. ffmpeg は同梱していない。PowerShell で `install-ffmpeg.ps1` を実行して入れる。
+3. `script2video --help` で動作を確認する。
+
+### ソースからビルドする
 
 ```bash
 # リポジトリ直下で実行。~/.cargo/bin/script2video(.exe) に入る(PATH に ~/.cargo/bin が必要)

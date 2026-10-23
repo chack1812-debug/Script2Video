@@ -10,4 +10,4 @@
 # テスト用の台本・収録・出力(git 管理外)
 /sample/
 
-/dist/
+# 配布パッケージ(scripts/package.ps1 が作る zip)は git 管理する

@@ -204,7 +204,9 @@ script2video render  第1話.txt [--config 設定.toml]</code></pre>
 
 <!-- 2 -->
 <h2 id="install">2. インストールと前提</h2>
-<h3>インストール</h3>
+<h3>インストール(配布パッケージ)</h3>
+<p>Rust は不要です。<code>script2video-0.1.0.zip</code> を、PATH の通ったフォルダに展開します。ffmpeg は同梱していないので、展開した <code>install-ffmpeg.ps1</code> を PowerShell で実行して入れます。<code>script2video --help</code> で動作を確認します。</p>
+<h3>インストール(ソースからビルド)</h3>
 <pre><code># リポジトリの直下で実行。~/.cargo/bin/script2video.exe に入ります(PATH に ~/.cargo/bin が必要)
 cargo install --path crates/s2v-cli --locked
 script2video --help</code></pre>
