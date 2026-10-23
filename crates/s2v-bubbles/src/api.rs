@@ -4,7 +4,7 @@
 //! (`s2v_render::scene`・`s2v_render::bubbles::validate_file`・`s2v_video::frames`)を使う。
 //! ここに同じ処理を書き直さない。
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fs;
 use std::io::Write;
 use std::path::{Path, PathBuf};
@@ -49,7 +49,19 @@ pub struct Session {
     /// 起動時に読み込み、保存に成功するたびに保存した中身で置き換える。
     pub loaded: Mutex<BTreeMap<String, Placed>>,
     pub warnings: Vec<String>,
+    /// 項目の画像の大きさの記憶(`/api/layout` が全項目を描き直さないため)。
+    pub draw_dims: DrawDims,
 }
+
+/// 画像の原点と大きさ `(dx, dy, w, h)`、または描けない理由。
+type DrawResult = Result<(i32, i32, u32, u32), String>;
+
+/// 画像の大きさは項目の ID・枠の大きさ・尻尾・切り詰めの有無だけで決まる(位置 x・y には依存しない)。
+/// 項目の本文と種類は起動中は変わらないので、鍵に入れない。
+type DrawKey = (String, u32, u32, Option<(i32, i32)>, bool);
+
+#[derive(Default)]
+pub struct DrawDims(Mutex<HashMap<DrawKey, DrawResult>>);
 
 #[derive(Debug, PartialEq)]
 pub enum ApiError {
@@ -126,11 +138,26 @@ fn items_value(
             continue;
         };
         let clipped = placement.clipped.contains(&it.id);
-        let image = match draw_item(it, p, clipped, &s.cfg, &s.face) {
-            Ok(ov) => json!({
-                "dx": ov.dx, "dy": ov.dy,
-                "w": ov.pixmap.width(), "h": ov.pixmap.height(),
-            }),
+        let key: DrawKey = (it.id.clone(), p.w, p.h, p.tail.map(|t| (t.dx, t.dy)), clipped);
+        let cached = s
+            .draw_dims
+            .0
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .get(&key)
+            .cloned();
+        let dims = cached.unwrap_or_else(|| {
+            let d = draw_item(it, p, clipped, &s.cfg, &s.face)
+                .map(|ov| (ov.dx, ov.dy, ov.pixmap.width(), ov.pixmap.height()));
+            s.draw_dims
+                .0
+                .lock()
+                .unwrap_or_else(|e| e.into_inner())
+                .insert(key, d.clone());
+            d
+        });
+        let image = match dims {
+            Ok((dx, dy, w, h)) => json!({"dx": dx, "dy": dy, "w": w, "h": h}),
             Err(m) => {
                 warnings.push(format!("{}: {m}", it.id));
                 json!({"dx": 0, "dy": 0, "w": 0, "h": 0})
@@ -627,6 +654,7 @@ mod tests {
             assets: BTreeMap::new(),
             loaded: Mutex::new(BTreeMap::new()),
             warnings: vec![],
+            draw_dims: Default::default(),
         }
     }
 

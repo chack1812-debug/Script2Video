@@ -154,6 +154,7 @@ fn serve(
         assets: session_assets,
         loaded: std::sync::Mutex::new(manual),
         warnings,
+        draw_dims: Default::default(),
     };
     let server = Server::bind(
         session,

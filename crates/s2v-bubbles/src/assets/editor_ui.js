@@ -104,7 +104,13 @@ export function attachEditing({ view, editor, state, ui, player, cache, redraw, 
     if (shadow === token) shadow = null;
     if (ui.sessionLost) return;
     if (r.rejected) toast("確定できません: " + (r.errors || []).join(" / "));
-    else cache.drop(r.changed);
+    else {
+      cache.drop(r.changed);
+      // 確定の検証で描いた PNG をそのまま使う(改めて /api/render を待たず、消えて見える間をなくす)
+      if (r.png && r.changed.includes(id) && typeof URL.createObjectURL === "function") {
+        cache.set(id, URL.createObjectURL(r.png), cache.version(id));
+      }
+    }
     // 失敗したときも、輪郭・数値の欄を確定値へ戻す
     refresh(!fromNumber);
   }

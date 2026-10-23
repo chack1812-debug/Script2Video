@@ -112,6 +112,7 @@ pub fn session_in(dir: &Path, l1_text: &str, assets: BTreeMap<String, SessionAss
         assets,
         loaded: std::sync::Mutex::new(BTreeMap::new()),
         warnings: vec![],
+        draw_dims: Default::default(),
     }
 }
 

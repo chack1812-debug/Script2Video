@@ -123,12 +123,13 @@ export class Editor {
     try {
       const r = await this.api.render({ id, manual: withKind(next, this.items) });
       if (!r || !r.ok) return { rejected: true, id, errors: errorsOf(r) };
+      const png = r.png;
       const l = await this.api.layout({ manual: withKind(next, this.items) });
       if (!l || !l.ok) return { rejected: true, id, errors: errorsOf(l) };
       const changed = changedImages(this.items, l.items);
       this.confirmed = next;
       this.items = l.items;
-      return { ok: true, changed };
+      return { ok: true, changed, png };
     } catch (e) {
       return { rejected: true, id, errors: [String(e && e.message ? e.message : e)] };
     }
