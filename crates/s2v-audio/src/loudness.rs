@@ -212,7 +212,10 @@ mod tests {
 
     #[test]
     fn different_recording_levels_end_at_the_same_target() {
-        let cfg = s2v_core::NormalizeConfig::default();
+        let cfg = s2v_core::NormalizeConfig {
+            target_lufs: -23.0,
+            ..s2v_core::NormalizeConfig::default()
+        };
         for amp in [0.01, 0.1] {
             let mut x = sine(997.0, amp, 96_000);
             let g = decide_gain(lufs(measure_mono(&x)), &cfg).unwrap();
@@ -236,7 +239,10 @@ mod tests {
 
     #[test]
     fn gain_is_clamped_and_recorded() {
-        let cfg = s2v_core::NormalizeConfig::default();
+        let cfg = s2v_core::NormalizeConfig {
+            target_lufs: -23.0,
+            ..s2v_core::NormalizeConfig::default()
+        };
         let g = decide_gain(-31.0, &cfg).unwrap();
         assert_eq!(
             g,
@@ -318,7 +324,10 @@ mod tests {
 
     #[test]
     fn non_finite_inputs_give_no_gain_decision() {
-        let cfg = s2v_core::NormalizeConfig::default();
+        let cfg = s2v_core::NormalizeConfig {
+            target_lufs: -23.0,
+            ..s2v_core::NormalizeConfig::default()
+        };
         for v in [f64::NAN, f64::INFINITY, f64::NEG_INFINITY] {
             assert_eq!(decide_gain(v, &cfg), None, "{v}");
         }

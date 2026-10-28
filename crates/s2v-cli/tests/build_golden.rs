@@ -279,7 +279,7 @@ fn out_of_range_config_fails_without_output() {
             .unwrap();
     fs::write(
         &cfg,
-        builtin.replace("target_lufs = -23.0", "target_lufs = -5.0"),
+        builtin.replace("target_lufs = -17.3", "target_lufs = -5.0"),
     )
     .unwrap();
     assert_eq!(run_build(&args(&f, Some(cfg), false)), Outcome::Failed);
@@ -488,7 +488,7 @@ fn syntax_error_rerun_leaves_previous_outputs_untouched() {
             .unwrap();
     fs::write(
         &cfg,
-        builtin.replace("target_lufs = -23.0", "target_lufs = -5.0"),
+        builtin.replace("target_lufs = -17.3", "target_lufs = -5.0"),
     )
     .unwrap();
     fs::write(&f.script, ONE_LINE).unwrap();

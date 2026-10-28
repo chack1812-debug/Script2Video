@@ -40,7 +40,7 @@ placeholder_ms_per_char = 200
 allow_flac = false
 
 [normalize]
-target_lufs = -23.0
+target_lufs = -17.3        # 番組の収録用: 基準距離の台詞のピークが -1 dBFS 前後になる(マスターの上限は [mix] master_ceiling_db)
 max_boost_db = 24.0
 max_cut_db = 24.0
 dump_prefade = false

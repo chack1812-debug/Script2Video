@@ -309,7 +309,7 @@ pub struct NormalizeConfig {
 }
 
 fn d_target_lufs() -> f64 {
-    -23.0
+    -17.3
 }
 fn d_gain_limit_db() -> f64 {
     24.0
@@ -698,7 +698,7 @@ request_timeout_s = 5
         assert_eq!(c.voice.trim_tail_margin_ms, 80);
         assert_eq!(c.voice.placeholder_ms_per_char, 200);
         assert!(!c.voice.allow_flac);
-        assert_eq!(c.normalize.target_lufs, -23.0);
+        assert_eq!(c.normalize.target_lufs, -17.3);
         assert_eq!(c.normalize.max_boost_db, 24.0);
         assert_eq!(c.normalize.max_cut_db, 24.0);
         assert!(!c.normalize.dump_prefade);
