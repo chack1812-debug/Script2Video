@@ -1,6 +1,6 @@
 # Script2Video
 
-台本と収録音声から、動画用の音声・字幕・タイムラインを作るコマンドラインツール。
+台本と収録音声(または音声合成)から、動画用の音声・字幕・タイムラインを作るコマンドラインツール。
 開発・運営: [宇摩コードワークス（UmaCodeWorks）](https://umacodeworks.jp)
 
 ## 紹介動画
@@ -32,7 +32,7 @@ script2video render <台本.txt> [--config <設定.toml>]
 
 ### 配布パッケージを使う(Rust 不要)
 
-[宇摩コードワークスのサイト](https://umacodeworks.jp/script2video.html)から `Script2Video_v0.1.0.zip` をダウンロードして展開する(GitHub には zip を置いていない)。中身は `script2video.exe`・`install-ffmpeg.ps1`・`Operating Manual.html`・`README.md`。
+[宇摩コードワークスのサイト](https://umacodeworks.jp/script2video.html)から `Script2Video_v0.2.0.zip` をダウンロードして展開する(GitHub には zip を置いていない)。中身は `script2video.exe`・`install-ffmpeg.ps1`・`Operating Manual.html`・`README.md`。
 
 1. PATH の通ったフォルダ(なければ作って PATH に追加)に展開する。
 2. ffmpeg は同梱していない。PowerShell で `install-ffmpeg.ps1` を実行して入れる。
@@ -54,7 +54,7 @@ script2video --help
 # 1. 台本に台詞IDとシーン番号を書き込む(台本名.bak・台本名.ids・台本名.html も出力)
 script2video number 第1話.txt
 
-# 2. 台詞ごとに収録する(ファイル名は台詞IDの - を _ にしたもの: S01_L003.wav。モノラル)
+# 2. 台詞ごとに収録する(ファイル名は台詞IDの - を _ にしたもの: S01_L003.wav。モノラル。合成役の台詞は収録不要)
 #    台詞番号の桁数は問いません(S01_L1.wav も S01_L001.wav も同じ台詞)
 
 # 3. 音声・字幕・タイムラインを作る(出力は台本と同じフォルダ。収録は 台本フォルダ/voices/ に置く)
@@ -102,7 +102,7 @@ B:田中,pan=20
 - 範囲ファイル(テイク。`S01_L003-L007.wav`)と合成役の組み合わせは未対応です。
 
 エンジンの接続先は `config.toml` に書きます(合成役を使うときだけ必要。すべて省略可)。
-VOICEVOX / AivisSpeech の実行ファイルは、`exe_path` を省略すると、インストール先(VOICEVOX 0.26 以降の `%APPDATA%oicevoxvpp-engines\…` と、0.25 以前の `Program Files\VOICEVOXv-engine` など)から自動で探します。使ったエンジンの接続先と実行ファイルのパスは、`build` のたびに `Process.log` に記録されます(自動検出したときもそのパスが残ります)。
+VOICEVOX / AivisSpeech の実行ファイルは、`exe_path` を省略すると、インストール先(VOICEVOX 0.26 以降の `%APPDATA%\voicevox\vvpp-engines\…` と、0.25 以前の `Program Files\VOICEVOX\vv-engine` など)から自動で探します。使ったエンジンの接続先と実行ファイルのパスは、`build` のたびに `Process.log` に記録されます(自動検出したときもそのパスが残ります)。
 
 ```toml
 [voicevox]

@@ -1,6 +1,6 @@
 ﻿<#
 .SYNOPSIS
-  配布用 zip(dist\script2video-<版>.zip)を作る。
+  配布用 zip(dist\Script2Video_v<版>.zip)を作る。
 .DESCRIPTION
   release ビルド → 依存 DLL の検査 → zip 作成。zip の中身(平らに展開される):
     script2video.exe / install-ffmpeg.ps1 / Operating Manual.html / README.md / LICENSE / THIRD-PARTY-NOTICES.txt
@@ -48,7 +48,7 @@ try {
         }
         $dist = Join-Path $root 'dist'
         New-Item -ItemType Directory -Path $dist -Force | Out-Null
-        $zip = Join-Path $dist "script2video-$version.zip"
+        $zip = Join-Path $dist "Script2Video_v$version.zip"
         if (Test-Path -LiteralPath $zip) { Remove-Item -LiteralPath $zip }
         Compress-Archive -Path (Join-Path $stage '*') -DestinationPath $zip
     }
