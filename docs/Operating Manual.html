@@ -280,7 +280,7 @@ paragraph 1000
 <tr><td><code>@scene 名称</code></td><td>場面。次の行に雰囲気の説明。音響の <code>room_size=</code>・<code>reverb_wet=</code>(0.0〜1.0)を書けます。</td></tr>
 <tr><td><code>@pause</code></td><td>無音の長さ(ミリ秒)。<code>sentence</code> 文の間、<code>cast</code> 話者の交替、<code>paragraph</code> シーンの間。</td></tr>
 <tr><td><code>@asset</code></td><td><code>bgm_dir = 絶対パス</code>、<code>se_dir = 絶対パス</code>。</td></tr>
-<tr><td><code>@cast</code></td><td><code>役名:話者名,pan=度,distance=m,height=m,volume=倍率</code>。定義行の次の行から空行までが、その役の外見(プロンプトに使います)。エンジン名を書くと音声合成の役(合成役)になります(<code>役名:話者名:style,voicevox,k=v…</code>。エンジンは <code>voicevox</code>・<code>aivis</code>・<code>xtts</code>)。同じ役を書き直すと、以後の台詞に適用されます。</td></tr>
+<tr><td><code>@cast</code></td><td><code>役名:話者名,pan=度,distance=m,height=m,volume=倍率</code>。定義行の次の行から空行までが、その役の外見(プロンプトに使います)。エンジン名を書くと音声合成の役(合成役)になります(<code>役名:話者名:style,voicevox,k=v…</code>。エンジンは <code>voicevox</code>・<code>aivis</code>・<code>xtts</code>)。同じ役を書き直すと、合成の設定(合成するか・エンジン・声・style など)は以後の台詞に適用されます。音響パラメータ(<code>pan</code> など)は <code>@scene</code> ごとで、同じ <code>@scene</code> の中で最後の定義がその <code>@scene</code> の全台詞に使われます。</td></tr>
 <tr><td><code>@script</code></td><td>台詞とコマンド。</td></tr>
 </tbody>
 </table>
@@ -335,7 +335,8 @@ script2video build 第1話.txt --voice-dir 収録/     # 収録を別の場所�
 <h3>合成役の台詞</h3>
 <ul>
 <li><code>@cast</code> にエンジン名を書いた役の台詞は、<code>build</code> が音声合成して <code>voices/S01_L003.wav</code> に書きます(<code>number</code> は合成しません)。合成する台詞が無ければエンジンは起動しません。</li>
-<li>文面や設定が変わっていなければ再合成しません。変わったとき、または別のファイル(肉声など)があるときは、既存のファイルを <code>voices/backup/S01_L003.日時(UTC).wav</code> に退避してから合成し直します。記録は <code>voices/synth.json</code> です。</li>
+<li>文面や設定が変わっていなければ再合成しません。変わったとき、または別のファイル(肉声など)があるときは、既存のファイルを <code>voices/backup/S01_L003.日時(UTC).wav</code> に退避してから合成し直します。同じ台詞とみなされる別の名前のファイル(<code>S01_L3.wav</code> など)も、元の名前のまま日時を入れて退避します。退避すると警告になるので、その回の終了コードは 1 です。記録は <code>voices/synth.json</code> です。</li>
+<li><code>--no-cache</code> では再合成しません。合成し直させたいときは <code>voices/S01_L003.wav</code> を削除します(削除したファイルは退避されません)。</li>
 <li>エンジンが使えない・合成に失敗した台詞は不足として仮の無音で配置し、終了コード 1 になります。</li>
 <li><code>--voice-dir</code> を指定したときは、そのフォルダが無いと合成しません(省略時の <code>voices/</code> は自動で作ります)。範囲ファイル(テイク)との組み合わせは未対応です。</li>
 </ul>
