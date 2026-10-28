@@ -1583,6 +1583,7 @@ dependencies = [
  "s2v-audio",
  "s2v-bubbles",
  "s2v-core",
+ "s2v-engines",
  "s2v-export",
  "s2v-render",
  "s2v-timeline",

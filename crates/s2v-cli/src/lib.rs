@@ -12,6 +12,7 @@ pub mod proclog;
 pub mod prompts;
 pub mod prompts_md;
 pub mod render;
+pub mod synth;
 pub mod verify;
 pub mod work;
 
