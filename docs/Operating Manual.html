@@ -339,6 +339,15 @@ script2video build 第1話.txt --voice-dir 収録/     # 収録を別の場所�
 <li><code>--no-cache</code> では再合成しません。合成し直させたいときは <code>voices/S01_L003.wav</code> を削除します(削除したファイルは退避されません)。</li>
 <li>エンジンが使えない・合成に失敗した台詞は不足として仮の無音で配置し、終了コード 1 になります。</li>
 <li><code>--voice-dir</code> を指定したときは、そのフォルダが無いと合成しません(省略時の <code>voices/</code> は自動で作ります)。範囲ファイル(テイク)との組み合わせは未対応です。</li>
+<li>VOICEVOX / AivisSpeech の実行ファイルは、<code>exe_path</code> を省略すると、インストール先から自動で探します(VOICEVOX 0.26 以降の <code>%APPDATA%oicevoxvpp-engines\…</code> と、0.25 以前の <code>Program Files\VOICEVOXv-engine</code> など)。未起動のエンジンは <code>build</code> が起動し、終わると停止します。</li>
+<li>使ったエンジンの接続先と実行ファイル(自動検出したパスを含む)、エンジンの探索・起動・停止の記録は、<code>Process.log</code> に残ります。</li>
+</ul>
+<h3 id="build-level">音量と定位</h3>
+<ul>
+<li><strong>音量</strong>: 台詞ごとに同じラウドネスへそろえます(<code>[normalize] target_lufs</code>、既定 <code>-17.3</code>)。番組の収録用に、基準距離(<code>reference_dist</code> = 1.0 m)の台詞のピークが -1 dBFS 前後になる値です。全体のピークは、マスターのソフトリミッタ(<code>[mix] master_ceiling_db</code>、既定 -1.0 dBFS)で抑えます。ハードクリップは出ません。</li>
+<li><strong>声ごとのピーク差</strong>: ラウドネスをそろえても、声の質によってピークは数 dB 変わります。ピークをそろえたい役は、<code>@cast</code> の <code>volume</code> で調整します(例: ピークが低い役は <code>volume=1.4</code>)。Script2Voice の <code>engine_volume_offsets</code>(エンジン別の音量補正)に当たる設定はありません。</li>
+<li><strong>音量の確かめ方</strong>: <code>full_dialogue.wav</code> のピークは -1.0 dBFS 前後です。台詞ごとの値は <code>timeline/timeline.json</code> の <code>measured_lufs</code>・<code>norm_gain_db</code> で分かります。重ねた台詞(<code>overlap=</code>)の合計がマスターの上限を超える箇所は、ソフトリミッタが少し抑えます。</li>
+<li><strong>定位</strong>: <code>pan</code>(度。+ は右、- は左)は、ステレオのマイク(間隔 0.2 m)で拾った音として左右の音量差と時間差で表します。マイクは単一指向性(<code>[audio] mic_directivity = 0.5</code>)で、左右のマイクを外側へ 30°(<code>mic_angle = 30.0</code>)向けた設定が既定です。±25° で左右の音量差が 2〜3 dB 程度です。もっとはっきりさせたいときは、<code>pan</code> を広げます(±60° など)。</li>
 </ul>
 <h3>出力</h3>
 <table>
@@ -483,6 +492,18 @@ script2video bubbles 第1話.txt --port 8765 --no-open</code></pre>
 </tbody>
 </table>
 
+<h3>[audio] / [normalize] / [mix]</h3>
+<table>
+<thead><tr><th>キー</th><th>既定</th><th>意味</th></tr></thead>
+<tbody>
+<tr><td><code>[normalize] target_lufs</code></td><td>-17.3</td><td>台詞の目標ラウドネス。番組の収録用に、基準距離の台詞のピークが -1 dBFS 前後になる値です(-40〜-10)。</td></tr>
+<tr><td><code>[mix] master_ceiling_db</code></td><td>-1.0</td><td>マスターのソフトリミッタの上限(-6〜0)。</td></tr>
+<tr><td><code>[audio] reference_dist</code></td><td>1.0</td><td>音量の基準になるマイクまでの距離(m)。<code>distance</code> がこれより遠い役は小さくなります。</td></tr>
+<tr><td><code>[audio] mic_directivity</code></td><td>0.5</td><td>マイクの指向性(0〜1)。0.5 は単一指向性(カーディオイド)、0 は無指向です。大きいほど左右の音量差が出ます。</td></tr>
+<tr><td><code>[audio] mic_angle</code></td><td>30.0</td><td>左右のマイクを外側へ向ける角度(度)。大きくすると左右差が増えますが、中央の音が薄くなる(中抜け)ことがあります。</td></tr>
+</tbody>
+</table>
+
 <h3>[voicevox] / [aivis] / [xtts] / [http]</h3>
 <p>合成役を使うときだけ必要です(すべて省略可)。エンジンの接続先は <code>url</code>、未起動時に自動起動する実行ファイルは <code>exe_path</code>(引数は <code>args</code>、待機秒数は <code>startup_timeout_s</code>)で指定します。<code>[http]</code> の <code>connect_timeout_s</code>(既定 10)・<code>request_timeout_s</code>(既定 180)はエンジンへの通信のタイムアウトです。</p>
 
@@ -497,12 +518,16 @@ script2video bubbles 第1話.txt --port 8765 --no-open</code></pre>
 </tbody>
 </table>
 <p>処理の記録・警告・エラーは、台本フォルダの <code>Process.log</code> に書きます。<code>build</code> は作り直し、<code>prompts</code>・<code>bubbles</code>・<code>render</code> は <code>== render 2026-10-16 12:34:56 ==</code> のような区切り(時刻は UTC)を付けて追記します。</p>
+<p>合成役を使った <code>build</code> では、使ったエンジンの接続先と実行ファイルのパス(<code>exe_path</code> を省略したときは、自動検出したパス)、エンジンの探索・起動・接続確認・停止の記録も <code>Process.log</code> に残ります。エンジンの記録に警告があると、終了コードは 1 になります。</p>
 
 <!-- 13 -->
 <h2 id="trouble">13. 困ったとき</h2>
 <table>
 <thead><tr><th>症状・表示</th><th>原因と対処</th></tr></thead>
 <tbody>
+<tr><td>音声が小さい・番組のピークが -1 dB にならない</td><td><code>full_dialogue.wav</code> のピークを確かめます。全体を上げるときは <code>[normalize] target_lufs</code> を上げます(既定 -17.3。上げ過ぎるとソフトリミッタが働きます)。声ごとの差は <code>@cast</code> の <code>volume</code> で直します(§6「音量と定位」)。</td></tr>
+<tr><td><code>pan</code> が効かない・左右の差が小さい</td><td>マイク間隔 0.2 m のモデルなので、±25° では左右差が 2〜3 dB です。<code>pan</code> を広げる(±60° など)か、<code>[audio] mic_directivity</code> を上げます。</td></tr>
+<tr><td>合成役の台詞が不足になる</td><td><code>Process.log</code> でエンジンの記録を確かめます。「実行ファイルは見つかりません」なら、エンジンをインストールするか、<code>exe_path</code> を指定します。話者名が見つからないときは、エンジンにその話者がありません(VOICEVOX・AivisSpeech の話者名を確かめます)。</td></tr>
 <tr><td>「別の script2video が実行中」</td><td>同じ台本フォルダで他のコマンド(<code>bubbles</code> の起動中を含む)が動いています。終わるのを待つか、<code>bubbles</code> を終了してください。</td></tr>
 <tr><td>「timeline.json がありません。先に build を実行してください」</td><td><code>build</code> をまだ実行していません。</td></tr>
 <tr><td>「full_dialogue.wav が timeline.json と別の build のものです」</td><td>収録や音声が変わっています。<code>build</code> をやり直してください。</td></tr>
