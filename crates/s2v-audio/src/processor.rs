@@ -564,6 +564,7 @@ mod tests {
             height: None,
             height_offset: 0.0,
             appearance: None,
+            synth: None,
         }
     }
 

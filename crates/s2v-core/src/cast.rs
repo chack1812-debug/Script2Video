@@ -1,9 +1,23 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
-/// 役(`@cast` の1行)。音声合成エンジン関連の項目は持たない(台本仕様 §2.4)。
+/// 合成音声の指定(`@cast` のエンジン書式)。検証は後段(Task 4)で行う。
+#[derive(Debug, Clone, PartialEq, Deserialize, Serialize)]
+pub struct SynthSpec {
+    /// "voicevox" | "aivis" | "xtts"
+    pub engine: String,
+    pub speaker_name: String,
+    /// 省略時 "ノーマル"。xtts は "default"。
+    pub style: String,
+    /// 省略時 "ja"。
+    pub language: String,
+    /// エンジン固有パラメータ。BTreeMap は記録のハッシュを安定させるため。
+    pub params: BTreeMap<String, Value>,
+}
+
+/// 役(`@cast` の1行)。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 pub struct Cast {
     pub name: String,
@@ -24,6 +38,9 @@ pub struct Cast {
     /// 役の外見・特徴の自由記述(画像/動画生成プロンプト作成用)。
     #[serde(default)]
     pub appearance: Option<String>,
+    /// 合成音声の指定。None = 肉声役。
+    #[serde(default)]
+    pub synth: Option<SynthSpec>,
 }
 
 impl Cast {
@@ -58,6 +75,7 @@ mod tests {
             height: None,
             height_offset: 0.0,
             appearance: None,
+            synth: None,
         }
     }
 

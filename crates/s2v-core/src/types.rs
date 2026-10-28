@@ -68,6 +68,12 @@ pub enum ScriptItem {
         overlap_ms: Option<f64>,
         /// `at=台詞ID+ミリ秒`
         at: Option<LineRef>,
+        /// 合成役の台詞のみ Some(台詞を読んだ時点の役の指定)。
+        synth: Option<crate::cast::SynthSpec>,
+        /// 行内 `voice=rec`。
+        voice_rec: bool,
+        /// 読み置換後のテキスト(合成役のみ)。
+        synth_text: Option<String>,
         scene_config: SceneConfig,
     },
     Command(ScriptCommand),
@@ -214,6 +220,9 @@ mod tests {
             offset_params: HashMap::new(),
             overlap_ms: None,
             at: None,
+            synth: None,
+            voice_rec: false,
+            synth_text: None,
             scene_config: SceneConfig::new("室内"),
         };
         if let ScriptItem::Speech {
@@ -293,6 +302,7 @@ mod tests {
             height: None,
             height_offset: 0.0,
             appearance: None,
+            synth: None,
         };
         scene.casts.insert("主人公".to_string(), cast);
         assert!(scene.casts.contains_key("主人公"));

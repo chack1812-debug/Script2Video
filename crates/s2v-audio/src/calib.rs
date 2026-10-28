@@ -71,6 +71,7 @@ pub fn reference_cast(reference_dist: f64) -> Cast {
         height: None,
         height_offset: 0.0,
         appearance: None,
+        synth: None,
     }
 }
 

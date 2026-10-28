@@ -10,7 +10,7 @@ pub mod validate;
 pub mod visual_timeline;
 pub mod voices;
 
-pub use cast::Cast;
+pub use cast::{Cast, SynthSpec};
 pub use config::{
     AudioConfig, BgmConfig, Config, EarlyConfig, ExportConfig, MaterialConfig, MixConfig,
     NormalizeConfig, VoiceConfig,

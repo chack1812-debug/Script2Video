@@ -1,8 +1,8 @@
-use std::collections::HashMap;
+use std::collections::{BTreeMap, HashMap};
 
 use serde_json::Value;
 
-use crate::cast::Cast;
+use crate::cast::{Cast, SynthSpec};
 use crate::ids::{parse_line_ref, parse_scene_id, split_line_id_prefix, LineRef};
 use crate::types::{
     PauseConfig, Scene, SceneConfig, ScriptCommand, ScriptItem, SeAnchor, VisualKind,
@@ -271,7 +271,7 @@ impl ScriptParser {
                 !role.trim().is_empty()
                     && !role.contains(char::is_whitespace)
                     && rest.contains('=')
-                    && !rest.contains(':')
+                    && rest.split_once(':').is_none_or(|(_, r)| r.contains(','))
             }
             None => false,
         }
@@ -297,7 +297,11 @@ impl ScriptParser {
             });
             return;
         }
-        if remain.contains(':') {
+        // エンジン書式: 「話者名:style,エンジン名,language=…,k=v…」(2つ目の要素にカンマを含む)
+        let engine_form = remain
+            .split_once(':')
+            .filter(|(_, rest)| rest.contains(','));
+        if engine_form.is_none() && remain.contains(':') {
             self.warnings.push(ParseWarning {
                 line_no,
                 message: format!(
@@ -306,12 +310,22 @@ impl ScriptParser {
             });
             return;
         }
-        let mut parts = remain.splitn(2, ',');
-        let first = parts.next().unwrap_or("").trim();
-        let (speaker_name, params_str) = if first.contains('=') {
-            (String::new(), remain.trim())
+        let mut synth_head: Option<(String, String, String)> = None; // (話者名, style, エンジン名)
+        let (speaker_name, params_str) = if let Some((speaker, rest)) = engine_form {
+            let mut it = rest.splitn(3, ',');
+            let style = it.next().unwrap_or("").trim().to_string();
+            let engine = it.next().unwrap_or("").trim().to_string();
+            let speaker = speaker.trim().to_string();
+            synth_head = Some((speaker.clone(), style, engine));
+            (speaker, it.next().unwrap_or(""))
         } else {
-            (first.to_string(), parts.next().unwrap_or(""))
+            let mut parts = remain.splitn(2, ',');
+            let first = parts.next().unwrap_or("").trim();
+            if first.contains('=') {
+                (String::new(), remain.trim())
+            } else {
+                (first.to_string(), parts.next().unwrap_or(""))
+            }
         };
 
         let (mut params, rejected) = extract_cast_params(params_str);
@@ -335,18 +349,42 @@ impl ScriptParser {
         let distance = take_number("distance").unwrap_or(1.0);
         let volume = take_number("volume").unwrap_or(1.0);
         let height = take_number("height");
+        let language = params.remove("language");
 
         // room_size / reverb_wet は役ごとの残響の上書きとして残す(流用元と同じ優先順 Cast > Scene > 設定)
         let mut kept = HashMap::new();
         let mut unknown: Vec<String> = Vec::new();
+        let mut synth_params: BTreeMap<String, Value> = BTreeMap::new();
         for (k, v) in params {
             match k.as_str() {
                 "room_size" | "reverb_wet" if v.as_f64().is_some() => {
                     kept.insert(k, v);
                 }
+                // エンジン書式ではそれ以外の k=v はエンジン固有パラメータ(検証は後段)
+                _ if synth_head.is_some() => {
+                    synth_params.insert(k, v);
+                }
                 _ => unknown.push(k),
             }
         }
+        let synth = synth_head.map(|(speaker_name, style, engine)| {
+            let style = if style.is_empty() {
+                if engine == "xtts" { "default" } else { "ノーマル" }.to_string()
+            } else {
+                style
+            };
+            let language = match language {
+                Some(Value::String(s)) if !s.is_empty() => s,
+                _ => "ja".to_string(),
+            };
+            SynthSpec {
+                engine,
+                speaker_name,
+                style,
+                language,
+                params: synth_params,
+            }
+        });
         unknown.sort();
         for k in unknown {
             self.warnings.push(ParseWarning {
@@ -370,6 +408,7 @@ impl ScriptParser {
                 height,
                 height_offset: 0.0,
                 appearance: None,
+                synth,
             },
         );
         self.pending_cast_name = Some(cast_key);
@@ -609,15 +648,28 @@ impl ScriptParser {
             return None;
         }
 
-        let (offset_params, overlap_ms, at) = self.parse_speech_params(params_str, line_no);
+        let (offset_params, overlap_ms, at, voice_rec) =
+            self.parse_speech_params(params_str, line_no);
+        // 台詞を読んだ時点の役の synth を複製する(@cast の再定義は以後の台詞にだけ効く)
+        let synth = self.casts.get(role).and_then(|c| c.synth.clone());
+        let raw_text = raw_text.trim();
+        let (text, synth_text) = if synth.is_some() {
+            let (display, reading) = split_reading(raw_text);
+            (display, Some(reading))
+        } else {
+            (raw_text.to_string(), None)
+        };
         Some(ScriptItem::Speech {
             id,
             line_no,
             cast_name: role.to_string(),
-            text: raw_text.trim().to_string(),
+            text,
             offset_params,
             overlap_ms,
             at,
+            synth,
+            voice_rec,
+            synth_text,
             scene_config: crate::types::SceneConfig::new(String::new()),
         })
     }
@@ -732,8 +784,9 @@ impl ScriptParser {
         &mut self,
         s: &str,
         line_no: usize,
-    ) -> (HashMap<String, f64>, Option<f64>, Option<LineRef>) {
+    ) -> (HashMap<String, f64>, Option<f64>, Option<LineRef>, bool) {
         let mut offsets = HashMap::new();
+        let mut voice_rec = false;
         let mut overlap = None;
         let mut at = None;
         for part in s.split(',') {
@@ -761,6 +814,16 @@ impl ScriptParser {
                         ),
                     }),
                 },
+                "voice" => {
+                    if v == "rec" {
+                        voice_rec = true;
+                    } else {
+                        self.warnings.push(ParseWarning {
+                            line_no,
+                            message: format!("voice= の値が正しくありません（voice=rec のみ。無視します）: {v}"),
+                        });
+                    }
+                }
                 "overlap" => match v.parse::<f64>() {
                     Ok(ms) if ms.is_finite() && ms >= 0.0 => overlap = Some(ms),
                     _ => self.warnings.push(ParseWarning {
@@ -780,7 +843,7 @@ impl ScriptParser {
                 }),
             }
         }
-        (offsets, overlap, at)
+        (offsets, overlap, at, voice_rec)
     }
 }
 
@@ -788,6 +851,19 @@ impl Default for ScriptParser {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 読みの記法 `'単語|読み'` の正規表現。半角パイプのみを区切りとする(全角｜は対象外)。
+fn reading_re() -> &'static regex::Regex {
+    static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
+    RE.get_or_init(|| regex::Regex::new(r"'([^'|]+?)\|([^'|]+?)'").expect("読み正規表現が不正"))
+}
+
+/// `'単語|読み'` を展開し、(表示用, 合成用) を返す。
+fn split_reading(raw: &str) -> (String, String) {
+    let display = reading_re().replace_all(raw, "$1").into_owned();
+    let synth = reading_re().replace_all(raw, "$2").into_owned();
+    (display, synth)
 }
 
 /// カンマ区切り `key=value` 文字列から数値パラメータを抽出する。
@@ -1669,7 +1745,7 @@ A:x
     fn legacy_script2voice_cast_line_is_rejected_with_warning() {
         let mut p = ScriptParser::new();
         let scenes = p
-            .parse_str("@scene 居間\n@cast\nA:ずんだもん:ノーマル,voicevox,pan=-30\n\n@script\n")
+            .parse_str("@scene 居間\n@cast\nA:ずんだもん:ノーマル\n\n@script\n")
             .unwrap();
         assert!(!scenes[0].casts.contains_key("A"));
         assert_eq!(p.warnings().len(), 1);
@@ -2090,5 +2166,144 @@ A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
             .unwrap();
         assert_eq!(scenes.len(), 1);
         assert_eq!(scenes[0].items.len(), 1);
+    }
+
+    fn first_speech(scenes: &[Scene], idx: usize) -> &ScriptItem {
+        scenes
+            .iter()
+            .flat_map(|s| s.items.iter())
+            .filter(|i| matches!(i, ScriptItem::Speech { .. }))
+            .nth(idx)
+            .unwrap()
+    }
+
+    #[test]
+    fn cast_with_engine_sets_synth() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str("@scene s
+@cast
+A:ずんだもん:あまあま,voicevox,pan=10
+@script
+A:こんにちは
+")
+            .unwrap();
+        assert_eq!(scenes[0].casts["A"].pan, 10.0);
+        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else { panic!() };
+        assert_eq!(
+            synth,
+            &Some(SynthSpec {
+                engine: "voicevox".into(),
+                speaker_name: "ずんだもん".into(),
+                style: "あまあま".into(),
+                language: "ja".into(),
+                params: BTreeMap::new(),
+            })
+        );
+    }
+
+    #[test]
+    fn cast_without_engine_has_no_synth() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str("@scene s
+@cast
+A:話者,pan=0
+@script
+A:やあ
+")
+            .unwrap();
+        assert!(p.warnings().is_empty(), "{:?}", p.warnings());
+        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else { panic!() };
+        assert!(synth.is_none());
+    }
+
+    #[test]
+    fn xtts_language_and_params() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str("@scene s
+@cast
+E:Ana:default,xtts,language=en,speed=1.2
+@script
+E:hi
+")
+            .unwrap();
+        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else { panic!() };
+        let synth = synth.as_ref().unwrap();
+        assert_eq!(synth.language, "en");
+        assert_eq!(synth.params["speed"], serde_json::json!(1.2));
+        assert!(!synth.params.contains_key("language"));
+    }
+
+    #[test]
+    fn recast_applies_only_to_later_lines() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str(
+                "@scene s
+@cast
+A:ずんだもん:ノーマル,voicevox
+@script
+A:一
+
+@cast
+A:肉声
+@script
+A:二
+",
+            )
+            .unwrap();
+        let ScriptItem::Speech { synth: s1, .. } = first_speech(&scenes, 0) else { panic!() };
+        let ScriptItem::Speech { synth: s2, .. } = first_speech(&scenes, 1) else { panic!() };
+        assert!(s1.is_some());
+        assert!(s2.is_none());
+    }
+
+    #[test]
+    fn voice_rec_option() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str("@scene s
+@cast
+A:話者
+@script
+A(voice=rec):台詞
+")
+            .unwrap();
+        assert!(p.warnings().is_empty(), "{:?}", p.warnings());
+        let ScriptItem::Speech { voice_rec, offset_params, .. } = first_speech(&scenes, 0) else { panic!() };
+        assert!(*voice_rec);
+        assert!(!offset_params.contains_key("voice"));
+    }
+
+    #[test]
+    fn reading_markup_for_synth_role() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str("@scene s
+@cast
+A:ずんだもん:ノーマル,voicevox
+
+B:話者
+@script
+A:'東京|とうきょう'へ行く
+B:'東京|とうきょう'へ行く
+")
+            .unwrap();
+        let ScriptItem::Speech { text, synth_text, .. } = first_speech(&scenes, 0) else { panic!() };
+        assert_eq!(text, "東京へ行く");
+        assert_eq!(synth_text.as_deref(), Some("とうきょうへ行く"));
+        let ScriptItem::Speech { text, synth_text, .. } = first_speech(&scenes, 1) else { panic!() };
+        assert_eq!(text, "'東京|とうきょう'へ行く");
+        assert!(synth_text.is_none());
+    }
+
+    #[test]
+    fn fullwidth_bar_is_not_a_separator() {
+        assert_eq!(
+            split_reading("'東京｜とうきょう'"),
+            ("'東京｜とうきょう'".to_string(), "'東京｜とうきょう'".to_string())
+        );
     }
 }
