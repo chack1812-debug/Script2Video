@@ -589,12 +589,20 @@ fn synthesize_lines(
         return Ok(HashSet::new());
     }
     let mut record = synth::load_record(voice_dir, log);
-    let plan = synth::plan(&items, voice_dir, &record, &utc_stamp())
-        .with_context(|| format!("収録フォルダを読めません: {}", voice_dir.display()))?;
+    let plan = synth::plan(
+        &items,
+        voice_dir,
+        &record,
+        &utc_stamp(),
+        config.voice.allow_flac,
+    )
+    .with_context(|| format!("収録フォルダを読めません: {}", voice_dir.display()))?;
     for w in &plan.warnings {
         log.warn(w);
     }
     if plan.jobs.is_empty() {
+        // 合成済みの台詞にある別の綴りのファイルだけを退避する(エンジンは起動しない)
+        synth::move_aside(&plan.backups, log);
         log.info(format!(
             "音声合成: 合成記録と一致 {} 行(合成なし)",
             plan.skipped
@@ -942,6 +950,59 @@ A:ずんだもん:ノーマル,voicevox
         assert!(log.contains("合成に失敗しました"), "{log}");
         assert!(log.contains("不足"), "{log}");
         assert_eq!(timeline_takes(&dir)[0]["reason"], "no_file");
+    }
+
+    /// 合成役の台詞に別の綴りのファイル(`S01_L1.wav`・許可された `.flac`)があっても、
+    /// 退避してから合成するので重複(不足)にならない。2回目以降も同じ。
+    #[test]
+    fn build_other_spelling_files_are_backed_up_not_duplicate() {
+        let fake = FakeVoicevox::ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ep");
+        let voices = dir.join("voices");
+        std::fs::create_dir_all(&voices).unwrap();
+        let script = dir.join("ep.txt");
+        std::fs::write(&script, SYNTH_ONLY).unwrap();
+        std::fs::write(voices.join("S01_L1.wav"), tone_wav(48_000, 1)).unwrap();
+        std::fs::write(voices.join("S01_L001.flac"), b"flac").unwrap();
+        let config = config_for(tmp.path(), &fake);
+        let base = std::fs::read_to_string(&config).unwrap();
+        assert!(base.contains("allow_flac = false"));
+        std::fs::write(
+            &config,
+            base.replace("allow_flac = false", "allow_flac = true"),
+        )
+        .unwrap();
+        let args = BuildArgs {
+            script,
+            voice_dir: Some(voices.clone()),
+            config: Some(config),
+            no_cache: false,
+        };
+        for _ in 0..2 {
+            let o = run_build(&args);
+            assert!(matches!(o, Outcome::Ok | Outcome::Warnings), "{o:?}");
+            let log = std::fs::read_to_string(dir.join("Process.log")).unwrap();
+            assert!(!log.contains("複数あります"), "{log}");
+            assert_eq!(timeline_takes(&dir)[0]["reason"], serde_json::Value::Null);
+            assert!(!timeline_lines(&dir)[0]["measured_lufs"].is_null());
+        }
+        assert!(!voices.join("S01_L1.wav").exists());
+        assert!(!voices.join("S01_L001.flac").exists());
+        let mut names: Vec<String> = std::fs::read_dir(voices.join("backup"))
+            .unwrap()
+            .map(|e| e.unwrap().file_name().to_string_lossy().into_owned())
+            .collect();
+        names.sort();
+        assert_eq!(names.len(), 2, "{names:?}");
+        assert!(
+            names[0].starts_with("S01_L001.") && names[0].ends_with(".flac"),
+            "{names:?}"
+        );
+        assert!(
+            names[1].starts_with("S01_L1.") && names[1].ends_with(".wav"),
+            "{names:?}"
+        );
     }
 
     fn timeline_takes(out: &Path) -> Vec<serde_json::Value> {

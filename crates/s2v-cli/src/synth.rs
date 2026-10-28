@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::Context;
 use s2v_audio::input::WORK_SAMPLE_RATE;
+use s2v_core::voices::match_voice_files;
 use s2v_core::{LineId, ScriptItem, SynthSpec};
 use s2v_engines::{EngineManager, SynthRequest};
 use serde::{Deserialize, Serialize};
@@ -26,12 +27,14 @@ pub struct SynthJob {
     pub req: SynthRequest,
     /// 記録する設定のハッシュ(`params_hash`)。
     pub params_hash: String,
+    /// 合成の直前に退避する既存ファイル(`out` と、同じ台詞の別の綴りのファイル)。退避先は `SynthPlan::backups`。
+    pub replaces: Vec<PathBuf>,
 }
 
 #[derive(Debug, Default)]
 pub struct SynthPlan {
     pub jobs: Vec<SynthJob>,
-    /// (元, 退避先)
+    /// (元, 退避先)。ジョブの `replaces` に入っていないものは、合成と関係なく退避する。
     pub backups: Vec<(PathBuf, PathBuf)>,
     pub warnings: Vec<String>,
     /// 記録と一致したため合成しない台詞の数。
@@ -116,34 +119,50 @@ pub fn params_hash(spec: &SynthSpec) -> String {
     )
 }
 
-/// 退避ファイル名 `S01_L003.20261028T153012.wav`。
-pub fn backup_name(id: LineId, now: &str) -> String {
-    format!("{}.{}.wav", id.file_stem(), now)
+/// 退避ファイル名。元の名前の綴りと拡張子を保ち、拡張子の前に日時を入れる
+/// (`S01_L003.wav` → `S01_L003.20261028T153012.wav`、`n > 0` なら `S01_L003.20261028T153012.1.wav`)。
+pub fn backup_name(file_name: &str, now: &str, n: usize) -> String {
+    let (stem, ext) = file_name.rsplit_once('.').unwrap_or((file_name, "wav"));
+    if n == 0 {
+        format!("{stem}.{now}.{ext}")
+    } else {
+        format!("{stem}.{now}.{n}.{ext}")
+    }
 }
 
-fn backup_path(voice_dir: &Path, id: LineId, now: &str) -> PathBuf {
+/// `from` の退避先。既にあるファイルと、同じ計画で選んだ退避先(大文字小文字を区別しない)を避ける。
+fn backup_path(voice_dir: &Path, from: &Path, now: &str, taken: &mut HashSet<String>) -> PathBuf {
     let dir = voice_dir.join("backup");
-    let first = dir.join(backup_name(id, now));
-    if !first.exists() {
-        return first;
-    }
-    let mut n = 1;
+    let name = file_label(from);
+    let mut n = 0;
     loop {
-        let p = dir.join(format!("{}.{}.{}.wav", id.file_stem(), now, n));
-        if !p.exists() {
+        let candidate = backup_name(&name, now, n);
+        let p = dir.join(&candidate);
+        if !p.exists() && taken.insert(candidate.to_lowercase()) {
             return p;
         }
         n += 1;
     }
 }
 
+/// 合成の計画を立てる。`allow_flac` は照合(`match_voice_files`)と同じ値を渡す。
+/// 照合が同じ台詞とみなすファイル(`S01_L3.wav` などの別の綴り、許可された `.flac`)も、
+/// 合成する台詞では退避の対象にする(残すと照合で重複になるため)。
 pub fn plan(
     items: &[(LineId, &ScriptItem)],
     voice_dir: &Path,
     record: &SynthRecord,
     now: &str,
+    allow_flac: bool,
 ) -> anyhow::Result<SynthPlan> {
     let mut plan = SynthPlan::default();
+    let ids: Vec<LineId> = items.iter().map(|(id, _)| *id).collect();
+    let found = if voice_dir.is_dir() {
+        match_voice_files(voice_dir, &ids, allow_flac)?.files
+    } else {
+        BTreeMap::new()
+    };
+    let mut taken: HashSet<String> = HashSet::new();
     for (id, item) in items {
         let ScriptItem::Speech {
             id: item_id,
@@ -166,7 +185,14 @@ pub fn plan(
             continue;
         }
         let out = voice_dir.join(format!("{}.wav", id.file_stem()));
-        let existing = if out.is_file() {
+        // 照合がこの台詞に対応付けるファイル。合成の出力と同じ名前のもの以外は「別の綴り」
+        let files = found.get(id).map(Vec::as_slice).unwrap_or(&[]);
+        let has_out = files.iter().any(|f| f.file_name() == out.file_name());
+        let others: Vec<&PathBuf> = files
+            .iter()
+            .filter(|f| f.file_name() != out.file_name())
+            .collect();
+        let existing = if has_out {
             let bytes =
                 std::fs::read(&out).with_context(|| format!("{} を読めません", out.display()))?;
             Some(sha256_hex(&bytes))
@@ -189,10 +215,60 @@ pub fn plan(
         }
 
         let send_text = synth_text.clone().unwrap_or_else(|| text.clone());
-        let job = SynthJob {
+        let mut replaces: Vec<PathBuf> = Vec::new();
+        match (&existing, entry) {
+            (None, _) => {}
+            (Some(h), Some(e)) if *h == e.file_sha256 => {
+                if e.engine == spec.engine
+                    && e.text == send_text
+                    && e.params_hash == params_hash(spec)
+                {
+                    // 最新。別の綴りのファイルがあれば、それだけを退避して合成済みのファイルを使う
+                    plan.skipped += 1;
+                    for o in others {
+                        plan.warnings.push(format!(
+                            "{}: 同じ台詞の別の名前のファイルを退避します({})。合成済みの {}.wav を使います",
+                            id.display(),
+                            file_label(o),
+                            id.file_stem()
+                        ));
+                        plan.backups
+                            .push((o.clone(), backup_path(voice_dir, o, now, &mut taken)));
+                    }
+                    continue;
+                }
+                plan.warnings.push(format!(
+                    "{}: 台詞またはパラメータが変わったため、{}.wav を退避して再合成します",
+                    id.display(),
+                    id.file_stem()
+                ));
+                replaces.push(out.clone());
+            }
+            (Some(_), _) => {
+                plan.warnings.push(format!(
+                    "{}: 合成記録にないファイルを退避して合成します({}.wav)",
+                    id.display(),
+                    id.file_stem()
+                ));
+                replaces.push(out.clone());
+            }
+        }
+        for o in others {
+            plan.warnings.push(format!(
+                "{}: 同じ台詞の別の名前のファイルを退避して合成します({})",
+                id.display(),
+                file_label(o)
+            ));
+            replaces.push(o.clone());
+        }
+        for f in &replaces {
+            plan.backups
+                .push((f.clone(), backup_path(voice_dir, f, now, &mut taken)));
+        }
+        plan.jobs.push(SynthJob {
             id: *id,
-            out: out.clone(),
-            text: send_text.clone(),
+            out,
+            text: send_text,
             engine: spec.engine.clone(),
             params_hash: params_hash(spec),
             req: SynthRequest {
@@ -205,40 +281,30 @@ pub fn plan(
                     .map(|(k, v)| (k.clone(), v.clone()))
                     .collect::<HashMap<_, _>>(),
             },
-        };
-
-        match (&existing, entry) {
-            (None, _) => plan.jobs.push(job),
-            (Some(h), Some(e)) if *h == e.file_sha256 => {
-                if e.engine == spec.engine
-                    && e.text == send_text
-                    && e.params_hash == params_hash(spec)
-                {
-                    plan.skipped += 1;
-                    continue; // 最新
-                }
-                plan.warnings.push(format!(
-                    "{}: 台詞またはパラメータが変わったため、{}.wav を退避して再合成します",
-                    id.display(),
-                    id.file_stem()
-                ));
-                plan.backups
-                    .push((out.clone(), backup_path(voice_dir, *id, now)));
-                plan.jobs.push(job);
-            }
-            (Some(_), _) => {
-                plan.warnings.push(format!(
-                    "{}: 合成記録にないファイルを退避して合成します({}.wav)",
-                    id.display(),
-                    id.file_stem()
-                ));
-                plan.backups
-                    .push((out.clone(), backup_path(voice_dir, *id, now)));
-                plan.jobs.push(job);
-            }
-        }
+            replaces,
+        });
     }
     Ok(plan)
+}
+
+/// 合成と関係なく行う退避(合成済みの台詞にある別の綴りのファイル)を実行する。
+/// 退避できなければ警告する(そのファイルは残り、照合で重複になる)。
+pub fn move_aside(backups: &[(PathBuf, PathBuf)], log: &mut ProcLog) {
+    for (from, to) in backups {
+        if let Err(e) = move_file(from, to) {
+            log.warn(format!("{e:#}"));
+        }
+    }
+}
+
+/// `from` を `to` へ移す(退避先のフォルダが無ければ作る)。
+fn move_file(from: &Path, to: &Path) -> anyhow::Result<()> {
+    if let Some(dir) = to.parent() {
+        std::fs::create_dir_all(dir)
+            .with_context(|| format!("退避先を作れません: {}", dir.display()))?;
+    }
+    std::fs::rename(from, to)
+        .with_context(|| format!("{} を {} へ退避できません", from.display(), to.display()))
 }
 
 /// `voices/synth.json` を読む。壊れていれば破棄して空から作り直し、警告する。
@@ -277,6 +343,18 @@ pub fn run(
         skipped: plan.skipped,
         ..SynthOutcome::default()
     };
+    let in_jobs: HashSet<&Path> = plan
+        .jobs
+        .iter()
+        .flat_map(|j| j.replaces.iter().map(PathBuf::as_path))
+        .collect();
+    let standalone: Vec<(PathBuf, PathBuf)> = plan
+        .backups
+        .iter()
+        .filter(|(from, _)| !in_jobs.contains(from.as_path()))
+        .cloned()
+        .collect();
+    move_aside(&standalone, log);
     if plan.jobs.is_empty() {
         return outcome;
     }
@@ -321,8 +399,12 @@ pub fn run(
             outcome.failed.insert(job.id);
             continue;
         }
-        let backup = backups.get(job.out.as_path()).copied();
-        match synthesize_one(&rt, manager, job, backup) {
+        let job_backups: Vec<(&Path, &Path)> = job
+            .replaces
+            .iter()
+            .filter_map(|f| backups.get(f.as_path()).map(|to| (f.as_path(), *to)))
+            .collect();
+        match synthesize_one(&rt, manager, job, &job_backups) {
             Ok(file_sha256) => {
                 record.set(
                     job.id,
@@ -348,21 +430,17 @@ pub fn run(
 }
 
 /// 1台詞を合成して `job.out` に書き、そのファイルの SHA-256 を返す。
-/// 既存ファイルは合成の直前に退避し、失敗したら元の場所へ戻す。
+/// 既存ファイル(`(元, 退避先)`)は合成の直前に退避し、失敗したら元の場所へ戻す。
 fn synthesize_one(
     rt: &tokio::runtime::Runtime,
     manager: &EngineManager,
     job: &SynthJob,
-    backup: Option<&Path>,
+    backups: &[(&Path, &Path)],
 ) -> anyhow::Result<String> {
-    if let Some(to) = backup {
-        if let Some(dir) = to.parent() {
-            std::fs::create_dir_all(dir)
-                .with_context(|| format!("退避先を作れません: {}", dir.display()))?;
+    for (i, &(from, to)) in backups.iter().enumerate() {
+        if let Err(e) = move_file(from, to) {
+            return Err(restore(&backups[..i], e));
         }
-        std::fs::rename(&job.out, to).with_context(|| {
-            format!("{} を {} へ退避できません", job.out.display(), to.display())
-        })?;
     }
     let tmp = job.out.with_extension("synth.tmp");
     let result = (|| -> anyhow::Result<String> {
@@ -376,17 +454,24 @@ fn synthesize_one(
     })();
     let Err(e) = result else { return result };
     let _ = std::fs::remove_file(&tmp);
-    let Some(to) = backup else { return Err(e) };
-    match std::fs::rename(to, &job.out) {
-        Ok(()) => Err(e.context(format!(
-            "退避していた {} を元の場所に戻しました",
-            file_label(&job.out)
-        ))),
-        Err(re) => Err(e.context(format!(
-            "退避した {} を元の場所に戻せません({re})。手で戻してください",
-            to.display()
-        ))),
+    Err(restore(backups, e))
+}
+
+/// 退避したファイルを元の場所へ戻し、その結果をエラーに書き添える。
+fn restore(moved: &[(&Path, &Path)], mut e: anyhow::Error) -> anyhow::Error {
+    for &(from, to) in moved {
+        e = match std::fs::rename(to, from) {
+            Ok(()) => e.context(format!(
+                "退避していた {} を元の場所に戻しました",
+                file_label(from)
+            )),
+            Err(re) => e.context(format!(
+                "退避した {} を元の場所に戻せません({re})。手で戻してください",
+                to.display()
+            )),
+        };
     }
+    e
 }
 
 fn file_label(p: &Path) -> String {
@@ -507,7 +592,97 @@ mod tests {
     }
 
     fn run(item: &ScriptItem, dir: &Path, rec: &SynthRecord) -> SynthPlan {
-        plan(&[(ID, item)], dir, rec, NOW).unwrap()
+        plan(&[(ID, item)], dir, rec, NOW, false).unwrap()
+    }
+
+    #[test]
+    fn other_spelling_file_is_backed_up_too() {
+        let d = TempDir::new().unwrap();
+        let other = d.path().join("S01_L3.wav");
+        std::fs::write(&other, b"human").unwrap();
+        let item = speech("こんにちは", Some(spec()), false, Some(ID));
+        let p = run(&item, d.path(), &SynthRecord::default());
+        assert_eq!(p.jobs.len(), 1);
+        assert_eq!(
+            p.backups,
+            vec![(
+                other.clone(),
+                d.path().join("backup").join("S01_L3.20261028T153012.wav")
+            )]
+        );
+        assert_eq!(p.jobs[0].replaces, vec![other]);
+        assert!(p.warnings.iter().any(|w| w.contains("S01_L3.wav")));
+    }
+
+    #[test]
+    fn flac_is_backed_up_when_allowed() {
+        let d = TempDir::new().unwrap();
+        let flac = d.path().join("S01_L003.flac");
+        std::fs::write(&flac, b"human").unwrap();
+        let item = speech("こんにちは", Some(spec()), false, Some(ID));
+        let p = plan(&[(ID, &item)], d.path(), &SynthRecord::default(), NOW, true).unwrap();
+        assert_eq!(p.jobs.len(), 1);
+        assert_eq!(
+            p.backups,
+            vec![(
+                flac,
+                d.path()
+                    .join("backup")
+                    .join("S01_L003.20261028T153012.flac")
+            )]
+        );
+        // 許可されていなければ照合でも無視されるので、退避しない
+        let p = run(&item, d.path(), &SynthRecord::default());
+        assert_eq!(p.jobs.len(), 1);
+        assert!(p.backups.is_empty());
+    }
+
+    #[test]
+    fn up_to_date_with_other_spelling_backs_up_only_the_other() {
+        let d = TempDir::new().unwrap();
+        wav(d.path(), b"RIFFaudio");
+        let other = d.path().join("S01_L0003.wav");
+        std::fs::write(&other, b"human").unwrap();
+        let item = speech("こんにちは", Some(spec()), false, Some(ID));
+        let p = run(&item, d.path(), &record_for("こんにちは", b"RIFFaudio"));
+        assert!(p.jobs.is_empty());
+        assert_eq!(p.skipped, 1);
+        assert_eq!(
+            p.backups,
+            vec![(
+                other,
+                d.path()
+                    .join("backup")
+                    .join("S01_L0003.20261028T153012.wav")
+            )]
+        );
+        assert!(p.warnings.iter().any(|w| w.contains("S01_L0003.wav")));
+    }
+
+    #[test]
+    fn changed_text_backs_up_canonical_and_other_spelling() {
+        let d = TempDir::new().unwrap();
+        let src = wav(d.path(), b"RIFFaudio");
+        let other = d.path().join("S01_L3.wav");
+        std::fs::write(&other, b"human").unwrap();
+        let item = speech("変えた", Some(spec()), false, Some(ID));
+        let p = run(&item, d.path(), &record_for("こんにちは", b"RIFFaudio"));
+        assert_eq!(p.jobs.len(), 1);
+        let froms: Vec<&PathBuf> = p.backups.iter().map(|(f, _)| f).collect();
+        assert_eq!(froms, vec![&src, &other]);
+        assert_eq!(p.jobs[0].replaces, vec![src, other]);
+    }
+
+    #[test]
+    fn backups_in_one_plan_do_not_share_a_name() {
+        // 大文字小文字だけ違う名前(Windows では同じ退避先になりうる)
+        let d = TempDir::new().unwrap();
+        let b = d.path().join("backup");
+        let mut taken = HashSet::new();
+        let a = backup_path(d.path(), Path::new("S01_L003.wav"), NOW, &mut taken);
+        let c = backup_path(d.path(), Path::new("S01_L003.WAV"), NOW, &mut taken);
+        assert_eq!(a, b.join("S01_L003.20261028T153012.wav"));
+        assert_eq!(c, b.join("S01_L003.20261028T153012.1.WAV"));
     }
 
     #[test]
@@ -645,7 +820,14 @@ mod tests {
 
     #[test]
     fn backup_name_format() {
-        assert_eq!(backup_name(ID, NOW), "S01_L003.20261028T153012.wav");
+        assert_eq!(
+            backup_name("S01_L003.wav", NOW, 0),
+            "S01_L003.20261028T153012.wav"
+        );
+        assert_eq!(
+            backup_name("S01_L3.flac", NOW, 2),
+            "S01_L3.20261028T153012.2.flac"
+        );
     }
 
     #[test]
@@ -828,7 +1010,7 @@ pub(crate) mod run_tests {
     fn run_once(items: &[(LineId, ScriptItem)], dir: &Path, m: &EngineManager) -> SynthOutcome {
         let refs: Vec<(LineId, &ScriptItem)> = items.iter().map(|(id, i)| (*id, i)).collect();
         let mut record = SynthRecord::load(dir).unwrap();
-        let p = plan(&refs, dir, &record, NOW).unwrap();
+        let p = plan(&refs, dir, &record, NOW, false).unwrap();
         run(p, &mut record, m, dir, &mut log())
     }
 
@@ -945,6 +1127,60 @@ pub(crate) mod run_tests {
         assert!(o.failed.is_empty(), "{:?}", o.failed);
         let b = d.path().join("backup").join("S01_L003.20261028T153012.wav");
         assert_eq!(std::fs::read(b).unwrap(), human);
+    }
+
+    #[test]
+    fn success_moves_other_spelling_to_backup() {
+        let fake = FakeVoicevox::ok();
+        let d = TempDir::new().unwrap();
+        std::fs::write(d.path().join("S01_L3.wav"), b"human").unwrap();
+        let m = manager(&[("voicevox", fake.uri())]);
+        let o = run_once(&[(L3, speech(L3, "voicevox"))], d.path(), &m);
+        assert!(o.failed.is_empty(), "{:?}", o.failed);
+        assert!(!d.path().join("S01_L3.wav").exists());
+        assert!(d.path().join("S01_L003.wav").is_file());
+        let b = d.path().join("backup").join("S01_L3.20261028T153012.wav");
+        assert_eq!(std::fs::read(b).unwrap(), b"human");
+    }
+
+    #[test]
+    fn failure_restores_every_backup() {
+        let fake = FakeVoicevox::start(ResponseTemplate::new(500));
+        let d = TempDir::new().unwrap();
+        let canonical = d.path().join("S01_L003.wav");
+        let other = d.path().join("S01_L3.wav");
+        std::fs::write(&canonical, b"one").unwrap();
+        std::fs::write(&other, b"two").unwrap();
+        let m = manager(&[("voicevox", fake.uri())]);
+        let o = run_once(&[(L3, speech(L3, "voicevox"))], d.path(), &m);
+        assert_eq!(o.failed, HashSet::from([L3]));
+        assert_eq!(std::fs::read(&canonical).unwrap(), b"one");
+        assert_eq!(std::fs::read(&other).unwrap(), b"two");
+        let left: Vec<PathBuf> = std::fs::read_dir(d.path().join("backup"))
+            .map(|r| r.map(|e| e.unwrap().path()).collect())
+            .unwrap_or_default();
+        assert!(left.is_empty(), "退避先に残さない: {left:?}");
+    }
+
+    #[test]
+    fn up_to_date_line_moves_other_spelling_without_engine() {
+        let fake = FakeVoicevox::ok();
+        let d = TempDir::new().unwrap();
+        let m = manager(&[("voicevox", fake.uri())]);
+        let items = [(L3, speech(L3, "voicevox"))];
+        run_once(&items, d.path(), &m);
+        let n = fake.requests();
+        std::fs::write(d.path().join("S01_L0003.wav"), b"human").unwrap();
+        let o = run_once(&items, d.path(), &m);
+        assert_eq!(fake.requests(), n, "合成済みならエンジンを呼ばない");
+        assert_eq!((o.synthesized, o.skipped), (0, 1));
+        assert!(!d.path().join("S01_L0003.wav").exists());
+        assert!(d
+            .path()
+            .join("backup")
+            .join("S01_L0003.20261028T153012.wav")
+            .is_file());
+        assert!(d.path().join("S01_L003.wav").is_file());
     }
 
     #[test]
