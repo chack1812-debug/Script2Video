@@ -78,6 +78,51 @@ script2video build 第1話.txt --voice-dir 収録/
 
 詳しくは [台本仕様.md](台本仕様.md) の §2.8(`#cut`・`#visual`)・§2.9(`#note`)を参照。
 
+## 合成役(音声合成で台詞を作る)
+
+`@cast` にエンジン名を書いた役(合成役)の台詞は、収録しなくても `build` が音声合成して `voices/S01_L003.wav` に書きます。書かない役(肉声役)は従来どおり収録ファイルを使います。
+
+```
+@cast
+A:ずんだもん:ノーマル,voicevox,speedScale=1.1,pan=-20
+B:田中,pan=20
+
+@script
+[S01-L001] A:'東京|とうきょう'へ行こう。
+[S01-L002] B:いいね。
+[S01-L003] A(voice=rec):ここだけは肉声で。
+```
+
+- 書式は `役名:話者名:style,エンジン名,language=…,k=v…`。エンジン名は `voicevox` / `aivis` / `xtts`。`pan`・`distance`・`height`・`volume` と外見描写は合成役にも使えます。
+- 台詞行の `(voice=rec)` で、その台詞だけ合成せず肉声にできます。`'単語|読み'` は合成役だけで使え、表示は単語、エンジンへは読みを渡します(区切りは半角 `|`)。
+- 合成は `build` だけが行い(`number` は触りません)、合成する台詞が無ければエンジンを起動しません。文面や設定が変わっていない台詞は再合成しません。変わったときや、別のファイル(肉声など)があるときは、既存の `voices/S01_L003.wav` を `voices/backup/S01_L003.<UTC日時>.wav` に退避してから合成し直します。合成の記録は `voices/synth.json` です。
+- エンジンが使えない・合成に失敗した台詞は不足として仮の無音で配置し、終了コード 1 になります。`--voice-dir` を指定したときは、そのフォルダが無いと合成せず従来どおりエラーになります(省略時の `voices/` は自動で作ります)。
+- 範囲ファイル(テイク。`S01_L003-L007.wav`)と合成役の組み合わせは未対応です。
+
+エンジンの接続先は `config.toml` に書きます(合成役を使うときだけ必要。すべて省略可)。
+
+```toml
+[voicevox]
+url = "http://127.0.0.1:50021"
+# exe_path = "C:/VOICEVOX/vv-engine/run.exe"  # 未起動時に自動起動する実行ファイル(省略時はインストール先から探す)
+# args = []                                    # exe_path に渡す引数
+# startup_timeout_s = 60                       # 自動起動の待機秒数
+
+[aivis]
+url = "http://127.0.0.1:10101"   # exe_path / args / startup_timeout_s は [voicevox] と同じ
+
+[xtts]
+url = "http://localhost:8020"
+# exe_path = "python"
+# args = ["-m", "xtts_api_server", "--port", "8020"]
+
+[http]
+connect_timeout_s = 10    # エンジンへの接続のタイムアウト
+request_timeout_s = 180   # エンジンへの要求のタイムアウト
+```
+
+詳しくは [台本仕様.md](台本仕様.md) の §2.4・§2.5・§3.7 を参照。
+
 台本の書式は [台本仕様.md](台本仕様.md)、設計は [docs/superpowers/specs/2026-10-12-script2video-design.md](docs/superpowers/specs/2026-10-12-script2video-design.md) と、映像工程の設計 [docs/superpowers/specs/2026-10-14-script2video-video-design.md](docs/superpowers/specs/2026-10-14-script2video-video-design.md) を参照。
 
 ## prompts(素材のプロンプトを作る)
