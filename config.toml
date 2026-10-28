@@ -8,8 +8,8 @@ air_absorption_coeff = 0.05
 room_size = 0.1
 reverb_wet = 1.0           # 物理基準値 wet_base へのスケーラ(1.0 = 物理量そのまま)
 reference_dist = 1.0
-mic_directivity = 0.2
-mic_angle = 30.0
+mic_directivity = 0.5          # 単一指向性(カーディオイド)
+mic_angle = 30.0              # 左右のマイクを外側へ向ける角度(度。外開き)
 
 [audio.early_reflections]
 enabled = true

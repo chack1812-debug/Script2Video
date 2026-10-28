@@ -684,6 +684,13 @@ request_timeout_s = 5
     }
 
     #[test]
+    fn builtin_mic_is_cardioid_opened_30_degrees_outward() {
+        let c = Config::builtin();
+        assert_eq!(c.audio.mic_directivity, 0.5);
+        assert_eq!(c.audio.mic_angle, 30.0);
+    }
+
+    #[test]
     fn omitted_sections_use_defaults() {
         let c = Config::from_toml(MINIMAL).unwrap();
         assert_eq!(c.voice.trim_threshold_db, -50.0);
