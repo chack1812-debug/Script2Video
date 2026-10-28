@@ -1595,6 +1595,7 @@ dependencies = [
  "tempfile",
  "tiny-skia",
  "tokio",
+ "tracing",
  "wiremock",
 ]
 

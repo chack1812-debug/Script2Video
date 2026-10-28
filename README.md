@@ -102,6 +102,7 @@ B:田中,pan=20
 - 範囲ファイル(テイク。`S01_L003-L007.wav`)と合成役の組み合わせは未対応です。
 
 エンジンの接続先は `config.toml` に書きます(合成役を使うときだけ必要。すべて省略可)。
+VOICEVOX / AivisSpeech の実行ファイルは、`exe_path` を省略すると、インストール先(VOICEVOX 0.26 以降の `%APPDATA%oicevoxvpp-engines\…` と、0.25 以前の `Program Files\VOICEVOXv-engine` など)から自動で探します。使ったエンジンの接続先と実行ファイルのパスは、`build` のたびに `Process.log` に記録されます(自動検出したときもそのパスが残ります)。
 
 ```toml
 [voicevox]

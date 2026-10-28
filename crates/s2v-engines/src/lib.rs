@@ -27,8 +27,25 @@ fn build_http_client(http: &HttpConfig) -> reqwest::Client {
 /// 設定から3エンジン(voicevox/aivis/xtts)を登録した `EngineManager` を構築する。
 /// voicevox/aivis の実行ファイルは、`exe_path` が無効または未設定ならインストール先から自動で探す。
 pub fn build_engine_manager(cfg: &EnginesConfig) -> EngineManager {
+    build_engine_manager_with_paths(cfg).0
+}
+
+/// [`build_engine_manager`] に加えて、エンジンごとに決まった実行ファイルのパス(見つからなければ `None`)を返す。
+/// 返す順は voicevox、aivis、xtts。
+pub fn build_engine_manager_with_paths(
+    cfg: &EnginesConfig,
+) -> (EngineManager, Vec<(&'static str, Option<String>)>) {
     let timeout = |secs: Option<u64>| Duration::from_secs(secs.unwrap_or(60));
     let client = Arc::new(build_http_client(&cfg.http));
+    let voicevox_exe =
+        discover::resolve_installed_exe_path("voicevox", cfg.voicevox.exe_path.as_deref());
+    let aivis_exe = discover::resolve_installed_exe_path("aivis", cfg.aivis.exe_path.as_deref());
+    let xtts_exe = cfg.xtts.exe_path.clone();
+    let paths = vec![
+        ("voicevox", voicevox_exe.clone()),
+        ("aivis", aivis_exe.clone()),
+        ("xtts", xtts_exe.clone()),
+    ];
     let mut em = EngineManager::new();
     em.register(
         "voicevox",
@@ -37,7 +54,7 @@ pub fn build_engine_manager(cfg: &EnginesConfig) -> EngineManager {
                 "voicevox",
                 &cfg.voicevox.url,
                 Arc::clone(&client),
-                discover::resolve_installed_exe_path("voicevox", cfg.voicevox.exe_path.as_deref()),
+                voicevox_exe,
             )
             .with_args(cfg.voicevox.args.clone())
             .with_startup_timeout(timeout(cfg.voicevox.startup_timeout_s)),
@@ -46,30 +63,20 @@ pub fn build_engine_manager(cfg: &EnginesConfig) -> EngineManager {
     em.register(
         "aivis",
         Arc::new(
-            HttpEngine::with_exe_path(
-                "aivis",
-                &cfg.aivis.url,
-                Arc::clone(&client),
-                discover::resolve_installed_exe_path("aivis", cfg.aivis.exe_path.as_deref()),
-            )
-            .with_args(cfg.aivis.args.clone())
-            .with_startup_timeout(timeout(cfg.aivis.startup_timeout_s)),
+            HttpEngine::with_exe_path("aivis", &cfg.aivis.url, Arc::clone(&client), aivis_exe)
+                .with_args(cfg.aivis.args.clone())
+                .with_startup_timeout(timeout(cfg.aivis.startup_timeout_s)),
         ),
     );
     em.register(
         "xtts",
         Arc::new(
-            XttsEngine::with_exe_path(
-                "xtts",
-                &cfg.xtts.url,
-                Arc::clone(&client),
-                cfg.xtts.exe_path.clone(),
-            )
-            .with_args(cfg.xtts.args.clone())
-            .with_startup_timeout(timeout(cfg.xtts.startup_timeout_s)),
+            XttsEngine::with_exe_path("xtts", &cfg.xtts.url, Arc::clone(&client), xtts_exe)
+                .with_args(cfg.xtts.args.clone())
+                .with_startup_timeout(timeout(cfg.xtts.startup_timeout_s)),
         ),
     );
-    em
+    (em, paths)
 }
 
 #[cfg(test)]
@@ -79,5 +86,15 @@ mod build_tests {
     #[test]
     fn builds_manager_from_default_config() {
         let _em = build_engine_manager(&EnginesConfig::default());
+    }
+
+    #[test]
+    fn paths_follow_the_configured_exe_path() {
+        let mut cfg = EnginesConfig::default();
+        cfg.xtts.exe_path = Some("python".to_string());
+        let (_em, paths) = build_engine_manager_with_paths(&cfg);
+        let names: Vec<&str> = paths.iter().map(|(n, _)| *n).collect();
+        assert_eq!(names, ["voicevox", "aivis", "xtts"]);
+        assert_eq!(paths[2].1.as_deref(), Some("python"));
     }
 }

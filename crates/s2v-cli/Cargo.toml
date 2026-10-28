@@ -27,6 +27,7 @@ clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
 hound = "3"
 tokio = { version = "1", features = ["rt", "time", "net"] }
+tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3"

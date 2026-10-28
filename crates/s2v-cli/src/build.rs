@@ -23,8 +23,9 @@ use s2v_export::timeline_json::{
 use s2v_export::wavio::{write_f32_stereo, write_i24_stereo};
 use s2v_export::{mix, MixRequest};
 
-use s2v_engines::{build_engine_manager, EngineManager};
+use s2v_engines::{build_engine_manager_with_paths, EngineManager};
 
+use crate::enginelog;
 use crate::layout::{check_layout, script_dir};
 use crate::proclog::{utc_stamp, ProcLog};
 use crate::synth;
@@ -614,9 +615,27 @@ fn synthesize_lines(
             .with_context(|| format!("収録フォルダを作れません: {}", voice_dir.display()))?;
         log.info(format!("収録フォルダを作りました: {}", voice_dir.display()));
     }
-    let engines = EngineGuard(build_engine_manager(&config.engines));
-    let o = synth::run(plan, &mut record, &engines.0, voice_dir, log);
-    drop(engines);
+    let used: HashSet<String> = plan.jobs.iter().map(|j| j.engine.clone()).collect();
+    // エンジンの探索・起動・停止の記録(s2v-engines の tracing)を集めて Process.log に書く
+    let (o, engine_log) = enginelog::capture(|| {
+        let (manager, paths) = build_engine_manager_with_paths(&config.engines);
+        for (name, exe) in &paths {
+            if used.contains(*name) {
+                log.info(engine_line(name, exe.as_deref(), &config.engines));
+            }
+        }
+        let engines = EngineGuard(manager);
+        let o = synth::run(plan, &mut record, &engines.0, voice_dir, log);
+        drop(engines);
+        o
+    });
+    for (level, msg) in engine_log {
+        match level {
+            tracing::Level::ERROR => log.error(msg),
+            tracing::Level::WARN => log.warn(msg),
+            _ => log.info(msg),
+        }
+    }
     log.info(format!(
         "音声合成: 合成 {} 行、合成記録と一致 {} 行、失敗 {} 行",
         o.synthesized,
@@ -624,6 +643,21 @@ fn synthesize_lines(
         o.failed.len()
     ));
     Ok(o.failed)
+}
+
+/// 使うエンジンの接続先と実行ファイル(自動検出を含む)を Process.log に残す 1 行。
+fn engine_line(name: &str, exe: Option<&str>, cfg: &s2v_core::config::EnginesConfig) -> String {
+    let url = match name {
+        "voicevox" => &cfg.voicevox.url,
+        "aivis" => &cfg.aivis.url,
+        _ => &cfg.xtts.url,
+    };
+    match exe {
+        Some(path) => format!("エンジン {name}: 接続先 {url}、実行ファイル {path}"),
+        None => format!(
+            "エンジン {name}: 接続先 {url}、実行ファイルは見つかりません(起動済みのエンジンへの接続だけ試みます)"
+        ),
+    }
 }
 
 /// 1台詞を取り込み・無音削除・正規化する。不足なら Ok(Err(理由))、work/ に書けなければ Err。
@@ -901,6 +935,15 @@ A:ずんだもん:ノーマル,voicevox
         for l in &lines {
             assert!(!l["measured_lufs"].is_null(), "音声のある台詞: {l}");
         }
+        // 使ったエンジンの接続先・実行ファイルと、s2v-engines の記録が Process.log に残る
+        let log = std::fs::read_to_string(dir.join("Process.log")).unwrap();
+        assert!(
+            log.contains(&format!("エンジン voicevox: 接続先 {}", fake.uri())),
+            "{log}"
+        );
+        assert!(log.contains("実行ファイル"), "{log}");
+        assert!(log.contains("[voicevox] 接続確認 OK"), "{log}");
+        assert!(!log.contains("エンジン aivis:"), "使わないエンジンは書かない: {log}");
         // 2回目はエンジンを呼ばない
         let n = fake.requests();
         let o = run_build(&args);

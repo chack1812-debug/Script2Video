@@ -2,6 +2,7 @@
 
 pub mod bubbles;
 pub mod build;
+pub mod enginelog;
 pub mod freshness;
 pub mod fsutil;
 pub mod layout;
