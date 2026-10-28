@@ -1,7 +1,7 @@
 //! `script2video build`(設計書 5.2)。
 //! 取り込み → 無音削除 → ラウドネス正規化 → 配置 → 音響処理 → ミックス → 出力。
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 use std::path::{Path, PathBuf};
 
 use anyhow::Context;
@@ -305,7 +305,8 @@ fn produce(
         })
         .collect();
     // 4a. 合成役の台詞を合成する(設計書 §3.3)。失敗した台詞は、ファイルが無ければ下の照合で不足になる
-    let synth_failed = synthesize_lines(&flat, config, voice_dir, args.voice_dir.is_none(), log)?;
+    let synth_failed: HashSet<LineId> =
+        synthesize_lines(&flat, config, voice_dir, args.voice_dir.is_none(), log)?;
     let is_dir = std::fs::metadata(voice_dir)
         .map(|m| m.is_dir())
         .unwrap_or(false);
@@ -329,7 +330,20 @@ fn produce(
     let mut prepared: HashMap<LineId, PreparedLine> = HashMap::new();
     let mut takes: Vec<TakeInfo> = Vec::new();
     for id in &ids {
-        let files = voices.files.get(id).cloned().unwrap_or_default();
+        let mut files = voices.files.get(id).cloned().unwrap_or_default();
+        if synth_failed.contains(id) && !files.is_empty() {
+            // 合成に失敗した台詞は、残っているファイル(退避から戻した旧版・肉声)を使わず不足にする
+            log.warn(format!(
+                "{}: 合成に失敗したため、既存のファイルを使いません: {}",
+                id.display(),
+                files
+                    .iter()
+                    .map(|p| file_name(p))
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ));
+            files.clear();
+        }
         let names: Vec<String> = files.iter().map(|p| file_name(p)).collect();
         let result = match files.as_slice() {
             [] => Err(MissingReason::NoFile),
@@ -529,7 +543,7 @@ fn produce(
         out_dir.display()
     ));
     Ok(
-        if log.warning_count() > 0 || missing > 0 || synth_failed > 0 {
+        if log.warning_count() > 0 || missing > 0 || !synth_failed.is_empty() {
             Outcome::Warnings
         } else {
             Outcome::Ok
@@ -546,7 +560,7 @@ impl Drop for EngineGuard {
     }
 }
 
-/// 合成役の台詞を合成し、失敗した台詞の数を返す。合成役が無ければ何もしない。
+/// 合成役の台詞を合成し、失敗した台詞を返す。合成役が無ければ何もしない。
 /// 合成が要る台詞が無ければエンジンを起動しない。
 /// 収録フォルダが無いときは、既定の `voices/` に限り、合成するものがあれば作る
 /// (`--voice-dir` の指定先が無い・フォルダでないときは合成せず、従来のエラーに任せる)。
@@ -556,7 +570,7 @@ fn synthesize_lines(
     voice_dir: &Path,
     default_voice_dir: bool,
     log: &mut ProcLog,
-) -> anyhow::Result<usize> {
+) -> anyhow::Result<HashSet<LineId>> {
     let items: Vec<(LineId, &ScriptItem)> = flat
         .iter()
         .filter_map(|f| match f.item {
@@ -568,11 +582,11 @@ fn synthesize_lines(
         .iter()
         .any(|(_, i)| matches!(i, ScriptItem::Speech { synth: Some(_), .. }))
     {
-        return Ok(0);
+        return Ok(HashSet::new());
     }
     let exists = voice_dir.exists();
     if (exists && !voice_dir.is_dir()) || (!exists && !default_voice_dir) {
-        return Ok(0);
+        return Ok(HashSet::new());
     }
     let mut record = synth::load_record(voice_dir, log);
     let plan = synth::plan(&items, voice_dir, &record, &utc_stamp())
@@ -585,7 +599,7 @@ fn synthesize_lines(
             "音声合成: 合成記録と一致 {} 行(合成なし)",
             plan.skipped
         ));
-        return Ok(0);
+        return Ok(HashSet::new());
     }
     if !exists {
         std::fs::create_dir_all(voice_dir)
@@ -601,7 +615,7 @@ fn synthesize_lines(
         o.skipped,
         o.failed.len()
     ));
-    Ok(o.failed.len())
+    Ok(o.failed)
 }
 
 /// 1台詞を取り込み・無音削除・正規化する。不足なら Ok(Err(理由))、work/ に書けなければ Err。
@@ -926,6 +940,47 @@ A:ずんだもん:ノーマル,voicevox
         assert!(lines[0]["measured_lufs"].is_null(), "不足: {}", lines[0]);
         let log = std::fs::read_to_string(dir.join("Process.log")).unwrap();
         assert!(log.contains("合成に失敗しました"), "{log}");
+        assert!(log.contains("不足"), "{log}");
+        assert_eq!(timeline_takes(&dir)[0]["reason"], "no_file");
+    }
+
+    fn timeline_takes(out: &Path) -> Vec<serde_json::Value> {
+        let s = std::fs::read_to_string(out.join("timeline").join("timeline.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        v["takes"].as_array().unwrap().clone()
+    }
+
+    /// 合成に失敗した台詞は、退避から戻した既存ファイルがあっても使わず不足にする(設計書 §3.3)。
+    #[test]
+    fn build_synth_failure_with_existing_file_is_missing_line() {
+        let fake = FakeVoicevox::start(ResponseTemplate::new(500));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ep");
+        let voices = dir.join("voices");
+        std::fs::create_dir_all(&voices).unwrap();
+        let script = dir.join("ep.txt");
+        std::fs::write(&script, SYNTH_ONLY).unwrap();
+        let human = tone_wav(48_000, 1);
+        let wav = voices.join("S01_L001.wav");
+        std::fs::write(&wav, &human).unwrap();
+        let o = run_build(&BuildArgs {
+            script,
+            voice_dir: Some(voices.clone()),
+            config: Some(config_for(tmp.path(), &fake)),
+            no_cache: false,
+        });
+        assert_eq!(o, Outcome::Warnings);
+        assert_eq!(
+            std::fs::read(&wav).unwrap(),
+            human,
+            "既存ファイルは元のまま残す"
+        );
+        let lines = timeline_lines(&dir);
+        assert!(lines[0]["measured_lufs"].is_null(), "不足: {}", lines[0]);
+        assert_eq!(timeline_takes(&dir)[0]["reason"], "no_file");
+        let log = std::fs::read_to_string(dir.join("Process.log")).unwrap();
+        assert_eq!(lines[0]["missing"], true);
+        assert!(log.contains("S01-L001: 合成に失敗したため"), "{log}");
         assert!(log.contains("不足"), "{log}");
     }
 
