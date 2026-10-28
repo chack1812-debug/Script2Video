@@ -322,6 +322,30 @@ mod tests {
         );
     }
 
+    fn assert_changed_setting_resynthesizes(change: impl Fn(&mut SynthSpec)) {
+        let d = TempDir::new().unwrap();
+        wav(d.path(), b"RIFFaudio");
+        let mut sp = spec();
+        change(&mut sp);
+        let item = speech("こんにちは", Some(sp), false, Some(ID));
+        let p = run(&item, d.path(), &record_for("こんにちは", b"RIFFaudio"));
+        assert_eq!(p.jobs.len(), 1);
+        assert_eq!(p.backups.len(), 1);
+        assert!(p.warnings.iter().any(|w| w.contains("退避して再合成")));
+    }
+
+    #[test]
+    fn changed_engine_means_resynthesize_with_backup() {
+        assert_changed_setting_resynthesizes(|s| s.engine = "aivis".into());
+    }
+
+    #[test]
+    fn changed_param_means_resynthesize_with_backup() {
+        assert_changed_setting_resynthesizes(|s| {
+            s.params.insert("speed".into(), json!(1.5));
+        });
+    }
+
     #[test]
     fn foreign_file_is_backed_up() {
         let d = TempDir::new().unwrap();
