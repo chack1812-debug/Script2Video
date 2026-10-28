@@ -227,7 +227,7 @@ pub fn load_cache(root: &Path) -> anyhow::Result<BTreeMap<String, CacheEntry>> {
     Ok(serde_json::from_str::<CacheFile>(&s)?.entries)
 }
 
-fn write_mono_f32(path: &Path, samples: &[f32]) -> anyhow::Result<()> {
+pub(crate) fn write_mono_f32(path: &Path, samples: &[f32]) -> anyhow::Result<()> {
     let spec = hound::WavSpec {
         channels: 1,
         sample_rate: 48_000,

@@ -26,7 +26,11 @@ serde_json = "1"
 clap = { version = "4", features = ["derive"] }
 sha2 = "0.10"
 hound = "3"
+tokio = { version = "1", features = ["rt", "time", "net"] }
 
 [dev-dependencies]
 tempfile = "3"
 tiny-skia = "0.12"
+wiremock = "0.6"
+tokio = { version = "1", features = ["rt-multi-thread"] }
+reqwest = "0.12"

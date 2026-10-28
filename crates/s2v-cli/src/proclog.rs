@@ -97,20 +97,27 @@ fn civil_from_days(days: i64) -> (i64, u32, u32) {
     (y, m, d)
 }
 
-/// 現在の UTC を `YYYY-MM-DD HH:MM:SS(UTC)` にする(ローカル時刻は標準ライブラリで取れない)。
-fn utc_now() -> String {
+/// 現在の UTC を (年, 月, 日, 時, 分, 秒) にする(ローカル時刻は標準ライブラリで取れない)。
+fn utc_parts() -> (i64, u32, u32, i64, i64, i64) {
     let secs = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .map(|d| d.as_secs() as i64)
         .unwrap_or(0);
     let (y, mo, d) = civil_from_days(secs.div_euclid(86_400));
     let s = secs.rem_euclid(86_400);
-    format!(
-        "{y:04}-{mo:02}-{d:02} {:02}:{:02}:{:02}(UTC)",
-        s / 3600,
-        s % 3600 / 60,
-        s % 60
-    )
+    (y, mo, d, s / 3600, s % 3600 / 60, s % 60)
+}
+
+/// 現在の UTC を `YYYY-MM-DD HH:MM:SS(UTC)` にする。
+fn utc_now() -> String {
+    let (y, mo, d, h, mi, s) = utc_parts();
+    format!("{y:04}-{mo:02}-{d:02} {h:02}:{mi:02}:{s:02}(UTC)")
+}
+
+/// 現在の UTC を `YYYYMMDDTHHMMSS` にする(合成の退避ファイル名に使う)。
+pub fn utc_stamp() -> String {
+    let (y, mo, d, h, mi, s) = utc_parts();
+    format!("{y:04}{mo:02}{d:02}T{h:02}{mi:02}{s:02}")
 }
 
 #[cfg(test)]
@@ -177,6 +184,17 @@ mod tests {
         assert_eq!(civil_from_days(0), (1970, 1, 1));
         assert_eq!(civil_from_days(19_000), (2022, 1, 8));
         assert_eq!(civil_from_days(-1), (1969, 12, 31));
+    }
+
+    #[test]
+    fn utc_stamp_has_backup_name_shape() {
+        let s = utc_stamp();
+        assert_eq!(s.len(), 15, "{s}");
+        assert_eq!(&s[8..9], "T", "{s}");
+        assert!(
+            s.chars().filter(|c| *c != 'T').all(|c| c.is_ascii_digit()),
+            "{s}"
+        );
     }
 
     #[test]

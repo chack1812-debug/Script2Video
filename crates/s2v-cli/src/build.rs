@@ -10,7 +10,7 @@ use s2v_audio::input::{read_mono_48k, InputError};
 use s2v_audio::loudness::{apply_edge_fades, apply_gain_db, decide_gain, measure_mono, Loudness};
 use s2v_audio::AudioProcessor;
 use s2v_core::ids::LineId;
-use s2v_core::placement::{flatten, place, LineSource, MissingReason};
+use s2v_core::placement::{flatten, place, FlatItem, LineSource, MissingReason};
 use s2v_core::time::{ceil_ms, floor_ms};
 use s2v_core::visual_timeline::layout_visuals;
 use s2v_core::voices::match_voice_files;
@@ -23,8 +23,11 @@ use s2v_export::timeline_json::{
 use s2v_export::wavio::{write_f32_stereo, write_i24_stereo};
 use s2v_export::{mix, MixRequest};
 
+use s2v_engines::{build_engine_manager, EngineManager};
+
 use crate::layout::{check_layout, script_dir};
-use crate::proclog::ProcLog;
+use crate::proclog::{utc_stamp, ProcLog};
+use crate::synth;
 use crate::work::{line_key, resampled_key, sha256_hex, LineKeyParams, NormMeta, WorkDir};
 use crate::Outcome;
 
@@ -301,6 +304,8 @@ fn produce(
             _ => None,
         })
         .collect();
+    // 4a. 合成役の台詞を合成する(設計書 §3.3)。失敗した台詞は、ファイルが無ければ下の照合で不足になる
+    let synth_failed = synthesize_lines(&flat, config, voice_dir, args.voice_dir.is_none(), log)?;
     let is_dir = std::fs::metadata(voice_dir)
         .map(|m| m.is_dir())
         .unwrap_or(false);
@@ -523,11 +528,80 @@ fn produce(
         missing,
         out_dir.display()
     ));
-    Ok(if log.warning_count() > 0 || missing > 0 {
-        Outcome::Warnings
-    } else {
-        Outcome::Ok
-    })
+    Ok(
+        if log.warning_count() > 0 || missing > 0 || synth_failed > 0 {
+            Outcome::Warnings
+        } else {
+            Outcome::Ok
+        },
+    )
+}
+
+/// 終わるとき(エラーで抜けるときも)エンジンを止める。
+struct EngineGuard(EngineManager);
+
+impl Drop for EngineGuard {
+    fn drop(&mut self) {
+        self.0.shutdown_all();
+    }
+}
+
+/// 合成役の台詞を合成し、失敗した台詞の数を返す。合成役が無ければ何もしない。
+/// 合成が要る台詞が無ければエンジンを起動しない。
+/// 収録フォルダが無いときは、既定の `voices/` に限り、合成するものがあれば作る
+/// (`--voice-dir` の指定先が無い・フォルダでないときは合成せず、従来のエラーに任せる)。
+fn synthesize_lines(
+    flat: &[FlatItem<'_>],
+    config: &Config,
+    voice_dir: &Path,
+    default_voice_dir: bool,
+    log: &mut ProcLog,
+) -> anyhow::Result<usize> {
+    let items: Vec<(LineId, &ScriptItem)> = flat
+        .iter()
+        .filter_map(|f| match f.item {
+            ScriptItem::Speech { id: Some(id), .. } => Some((*id, f.item)),
+            _ => None,
+        })
+        .collect();
+    if !items
+        .iter()
+        .any(|(_, i)| matches!(i, ScriptItem::Speech { synth: Some(_), .. }))
+    {
+        return Ok(0);
+    }
+    let exists = voice_dir.exists();
+    if (exists && !voice_dir.is_dir()) || (!exists && !default_voice_dir) {
+        return Ok(0);
+    }
+    let mut record = synth::load_record(voice_dir, log);
+    let plan = synth::plan(&items, voice_dir, &record, &utc_stamp())
+        .with_context(|| format!("収録フォルダを読めません: {}", voice_dir.display()))?;
+    for w in &plan.warnings {
+        log.warn(w);
+    }
+    if plan.jobs.is_empty() {
+        log.info(format!(
+            "音声合成: 合成記録と一致 {} 行(合成なし)",
+            plan.skipped
+        ));
+        return Ok(0);
+    }
+    if !exists {
+        std::fs::create_dir_all(voice_dir)
+            .with_context(|| format!("収録フォルダを作れません: {}", voice_dir.display()))?;
+        log.info(format!("収録フォルダを作りました: {}", voice_dir.display()));
+    }
+    let engines = EngineGuard(build_engine_manager(&config.engines));
+    let o = synth::run(plan, &mut record, &engines.0, voice_dir, log);
+    drop(engines);
+    log.info(format!(
+        "音声合成: 合成 {} 行、合成記録と一致 {} 行、失敗 {} 行",
+        o.synthesized,
+        o.skipped,
+        o.failed.len()
+    ));
+    Ok(o.failed.len())
 }
 
 /// 1台詞を取り込み・無音削除・正規化する。不足なら Ok(Err(理由))、work/ に書けなければ Err。
@@ -737,6 +811,122 @@ A:田中
         ] {
             assert!(!out.join(n).exists(), "{n}");
         }
+    }
+
+    use crate::synth::run_tests::{tone_wav, FakeVoicevox};
+    use wiremock::ResponseTemplate;
+
+    const MIXED: &str = "@scene 居間
+@cast
+A:ずんだもん:ノーマル,voicevox
+
+B:佐藤
+
+@script
+#paragraph[S01]
+[S01-L001] A:こんにちは
+[S01-L002] B:やあ
+";
+
+    const SYNTH_ONLY: &str = "@scene 居間
+@cast
+A:ずんだもん:ノーマル,voicevox
+
+@script
+#paragraph[S01]
+[S01-L001] A:こんにちは
+";
+
+    /// 同梱の config.toml の VOICEVOX の接続先を偽サーバにした設定ファイルを書く。
+    fn config_for(dir: &Path, fake: &FakeVoicevox) -> PathBuf {
+        let base = include_str!("../../../config.toml");
+        let from = "url = \"http://127.0.0.1:50021\"";
+        assert!(base.contains(from));
+        let p = dir.join("config.toml");
+        std::fs::write(&p, base.replace(from, &format!("url = \"{}\"", fake.uri()))).unwrap();
+        p
+    }
+
+    fn timeline_lines(out: &Path) -> Vec<serde_json::Value> {
+        let s = std::fs::read_to_string(out.join("timeline").join("timeline.json")).unwrap();
+        let v: serde_json::Value = serde_json::from_str(&s).unwrap();
+        v["lines"].as_array().unwrap().clone()
+    }
+
+    #[test]
+    fn build_integration_mixed_script() {
+        let fake = FakeVoicevox::ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ep");
+        let voices = dir.join("voices");
+        std::fs::create_dir_all(&voices).unwrap();
+        let script = dir.join("ep.txt");
+        std::fs::write(&script, MIXED).unwrap();
+        std::fs::write(voices.join("S01_L002.wav"), tone_wav(48_000, 1)).unwrap();
+        let args = BuildArgs {
+            script,
+            voice_dir: Some(voices.clone()),
+            config: Some(config_for(tmp.path(), &fake)),
+            no_cache: false,
+        };
+        let o = run_build(&args);
+        assert!(matches!(o, Outcome::Ok | Outcome::Warnings), "{o:?}");
+        assert!(voices.join("S01_L001.wav").is_file());
+        assert!(voices.join("synth.json").is_file());
+        let lines = timeline_lines(&dir);
+        let ids: Vec<&str> = lines.iter().map(|l| l["id"].as_str().unwrap()).collect();
+        assert_eq!(ids, ["S01-L001", "S01-L002"]);
+        for l in &lines {
+            assert!(!l["measured_lufs"].is_null(), "音声のある台詞: {l}");
+        }
+        // 2回目はエンジンを呼ばない
+        let n = fake.requests();
+        let o = run_build(&args);
+        assert!(matches!(o, Outcome::Ok | Outcome::Warnings), "{o:?}");
+        assert_eq!(fake.requests(), n);
+    }
+
+    #[test]
+    fn build_creates_voices_folder_for_synth_only_script() {
+        let fake = FakeVoicevox::ok();
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ep");
+        std::fs::create_dir_all(&dir).unwrap();
+        let script = dir.join("ep.txt");
+        std::fs::write(&script, SYNTH_ONLY).unwrap();
+        let o = run_build(&BuildArgs {
+            script,
+            voice_dir: None,
+            config: Some(config_for(tmp.path(), &fake)),
+            no_cache: false,
+        });
+        assert!(matches!(o, Outcome::Ok | Outcome::Warnings), "{o:?}");
+        assert!(dir.join("voices").join("S01_L001.wav").is_file());
+        assert!(!timeline_lines(&dir)[0]["measured_lufs"].is_null());
+    }
+
+    #[test]
+    fn build_synth_failure_is_missing_line() {
+        let fake = FakeVoicevox::start(ResponseTemplate::new(500));
+        let tmp = tempfile::tempdir().unwrap();
+        let dir = tmp.path().join("ep");
+        let voices = dir.join("voices");
+        std::fs::create_dir_all(&voices).unwrap();
+        let script = dir.join("ep.txt");
+        std::fs::write(&script, SYNTH_ONLY).unwrap();
+        let o = run_build(&BuildArgs {
+            script,
+            voice_dir: Some(voices.clone()),
+            config: Some(config_for(tmp.path(), &fake)),
+            no_cache: false,
+        });
+        assert_eq!(o, Outcome::Warnings);
+        assert!(!voices.join("S01_L001.wav").exists());
+        let lines = timeline_lines(&dir);
+        assert!(lines[0]["measured_lufs"].is_null(), "不足: {}", lines[0]);
+        let log = std::fs::read_to_string(dir.join("Process.log")).unwrap();
+        assert!(log.contains("合成に失敗しました"), "{log}");
+        assert!(log.contains("不足"), "{log}");
     }
 
     #[test]
