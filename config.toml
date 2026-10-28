@@ -83,3 +83,32 @@ note_max_height_ratio = 0.6     # ト書きの高さの上限(画面の高さの
 [prompts]
 style = ""                   # 画像生成プロンプトの画風
 suffix = "縦横比 16:9。画像の中に文字・吹き出しを入れない。"
+
+# --- 音声合成エンジンの接続先(台本で @cast にエンジンを書くときだけ必要。すべて省略可) ---
+
+[voicevox]
+url = "http://127.0.0.1:50021"
+# 未起動時に自動起動する実行ファイル。省略するとインストール先から自動で探す。
+# 絶対パス(例: "C:/VOICEVOX/vv-engine/run.exe")と PATH 上のコマンド名の両方を指定できる。
+# exe_path = ""
+# exe_path に渡す引数(省略可、既定は空)。
+# args = []
+# 自動起動の待機秒数(省略時は 60 秒)。モデルロードが遅い場合に増やす。
+# startup_timeout_s = 60
+
+[aivis]
+url = "http://127.0.0.1:10101"
+# exe_path / args / startup_timeout_s は [voicevox] と同じ意味。
+# exe_path = ""
+
+[xtts]
+url = "http://localhost:8020"
+# XTTS は python で起動する場合、コマンド名と引数を分けて指定する。
+# exe_path = "python"
+# args = ["-m", "xtts_api_server", "--port", "8020"]
+# startup_timeout_s = 120
+
+# エンジンへのHTTP呼び出しのタイムアウト(秒)。応答しないエンジンで無期限に待たないための上限。
+[http]
+connect_timeout_s = 10
+request_timeout_s = 180

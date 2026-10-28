@@ -25,6 +25,96 @@ pub struct Config {
     /// 画像生成プロンプトの共通部分(省略可。計画 2c で使う)。
     #[serde(default)]
     pub prompts: PromptsConfig,
+    /// 音声合成エンジンの接続先(`[voicevox]` `[aivis]` `[xtts]` `[http]`。すべて省略可)。
+    #[serde(default, flatten)]
+    pub engines: EnginesConfig,
+}
+
+/// 音声合成エンジンの接続設定。テーブルは `config.toml` 直下に置く。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EnginesConfig {
+    #[serde(default = "default_voicevox")]
+    pub voicevox: EngineUrl,
+    #[serde(default = "default_aivis")]
+    pub aivis: EngineUrl,
+    #[serde(default = "default_xtts")]
+    pub xtts: EngineUrl,
+    /// HTTPエンジン呼び出しのタイムアウト。
+    #[serde(default)]
+    pub http: HttpConfig,
+}
+
+impl Default for EnginesConfig {
+    fn default() -> Self {
+        Self {
+            voicevox: default_voicevox(),
+            aivis: default_aivis(),
+            xtts: default_xtts(),
+            http: HttpConfig::default(),
+        }
+    }
+}
+
+/// エンジンへのHTTPリクエストのタイムアウト設定(既定: 接続 10 秒 / 要求 180 秒)。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct HttpConfig {
+    #[serde(default = "default_connect_timeout_s")]
+    pub connect_timeout_s: u64,
+    #[serde(default = "default_request_timeout_s")]
+    pub request_timeout_s: u64,
+}
+
+fn default_connect_timeout_s() -> u64 {
+    10
+}
+fn default_request_timeout_s() -> u64 {
+    180
+}
+
+impl Default for HttpConfig {
+    fn default() -> Self {
+        Self {
+            connect_timeout_s: default_connect_timeout_s(),
+            request_timeout_s: default_request_timeout_s(),
+        }
+    }
+}
+
+/// 1エンジンの接続先と自動起動の設定。
+#[derive(Debug, Clone, Deserialize, Serialize)]
+pub struct EngineUrl {
+    pub url: String,
+    /// 未起動時に自動起動する実行ファイルのパス(省略可)。
+    /// 絶対パスと、PATH上のコマンド名(例: "python")の両方を指定できる。
+    #[serde(default)]
+    pub exe_path: Option<String>,
+    /// `exe_path` に渡す引数(省略可、既定は空)。
+    #[serde(default)]
+    pub args: Vec<String>,
+    /// 自動起動の待機秒数(省略時は既定 60 秒)。
+    #[serde(default)]
+    pub startup_timeout_s: Option<u64>,
+}
+
+impl EngineUrl {
+    fn with_url(url: &str) -> Self {
+        Self {
+            url: url.to_string(),
+            exe_path: None,
+            args: Vec::new(),
+            startup_timeout_s: None,
+        }
+    }
+}
+
+fn default_voicevox() -> EngineUrl {
+    EngineUrl::with_url("http://127.0.0.1:50021")
+}
+fn default_aivis() -> EngineUrl {
+    EngineUrl::with_url("http://127.0.0.1:10101")
+}
+fn default_xtts() -> EngineUrl {
+    EngineUrl::with_url("http://localhost:8020")
 }
 
 /// エクスポート(FCPXML等)に関する設定。
@@ -555,6 +645,36 @@ mic_angle = 30.0
 crossfade_s = 3.0
 se_fade_out_s = 0.05
 "#;
+
+    #[test]
+    fn engines_default_when_absent() {
+        let c = Config::from_toml(MINIMAL).unwrap();
+        assert_eq!(c.engines.voicevox.url, "http://127.0.0.1:50021");
+        assert_eq!(c.engines.aivis.url, "http://127.0.0.1:10101");
+        assert_eq!(c.engines.xtts.url, "http://localhost:8020");
+        assert_eq!(c.engines.http.connect_timeout_s, 10);
+        assert_eq!(c.engines.http.request_timeout_s, 180);
+    }
+
+    #[test]
+    fn engines_override_from_toml() {
+        let toml = format!(
+            "{MINIMAL}
+[voicevox]
+url = \"http://x:1\"
+args = [\"-a\"]
+
+[http]
+request_timeout_s = 5
+"
+        );
+        let c = Config::from_toml(&toml).unwrap();
+        assert_eq!(c.engines.voicevox.url, "http://x:1");
+        assert_eq!(c.engines.voicevox.args, vec!["-a".to_string()]);
+        assert_eq!(c.engines.aivis.url, "http://127.0.0.1:10101");
+        assert_eq!(c.engines.http.request_timeout_s, 5);
+        assert_eq!(c.engines.http.connect_timeout_s, 10);
+    }
 
     #[test]
     fn builtin_config_loads_and_is_valid() {
