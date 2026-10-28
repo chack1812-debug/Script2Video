@@ -60,7 +60,7 @@ pub enum ScriptItem {
         /// 台本の行番号(1始まり。エラーメッセージ用)。
         line_no: usize,
         cast_name: String,
-        /// 台詞テキスト(字幕・吹き出しに使う。読み指定は廃止)。
+        /// 台詞テキスト(字幕・吹き出しに使う。読み指定 `'単語|読み'` は合成役のみ有効で、ここには「単語」側が入る。肉声役ではそのまま残す)。
         text: String,
         /// 臨時パラメータ(pan / distance / height / volume の±差分)。
         offset_params: HashMap<String, f64>,

@@ -349,7 +349,11 @@ impl ScriptParser {
         let distance = take_number("distance").unwrap_or(1.0);
         let volume = take_number("volume").unwrap_or(1.0);
         let height = take_number("height");
-        let language = params.remove("language");
+        let language = if synth_head.is_some() {
+            params.remove("language")
+        } else {
+            None
+        };
 
         // room_size / reverb_wet は役ごとの残響の上書きとして残す(流用元と同じ優先順 Cast > Scene > 設定)
         let mut kept = HashMap::new();
@@ -2305,5 +2309,25 @@ B:'東京|とうきょう'へ行く
             split_reading("'東京｜とうきょう'"),
             ("'東京｜とうきょう'".to_string(), "'東京｜とうきょう'".to_string())
         );
+    }
+
+    #[test]
+    fn language_on_non_engine_cast_still_warns() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str("@scene s
+@cast
+A:話者,pan=0,language=en
+@script
+A:やあ
+")
+            .unwrap();
+        assert!(
+            p.warnings().iter().any(|w| w.message.contains("「language」は使えません")),
+            "{:?}",
+            p.warnings()
+        );
+        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else { panic!() };
+        assert!(synth.is_none());
     }
 }
