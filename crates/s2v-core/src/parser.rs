@@ -2282,6 +2282,27 @@ A(voice=rec):台詞
     }
 
     #[test]
+    fn unknown_voice_option_value_warns_and_stays_synth() {
+        let mut p = ScriptParser::new();
+        let scenes = p
+            .parse_str("@scene s
+@cast
+A:話者:ノーマル,voicevox
+@script
+A(voice=recc):台詞
+")
+            .unwrap();
+        assert!(
+            p.warnings().iter().any(|w| w.message.contains("voice=rec のみ")),
+            "{:?}",
+            p.warnings()
+        );
+        let ScriptItem::Speech { voice_rec, synth, .. } = first_speech(&scenes, 0) else { panic!() };
+        assert!(!*voice_rec);
+        assert!(synth.is_some());
+    }
+
+    #[test]
     fn reading_markup_for_synth_role() {
         let mut p = ScriptParser::new();
         let scenes = p

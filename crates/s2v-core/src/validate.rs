@@ -1,7 +1,8 @@
 //! 出力を止める問題(終了コード 2)の検査(設計書 5.7)。パースの後、配置の前に行う。
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 
+use crate::cast::SynthSpec;
 use crate::ids::{format_scene_id, LineId, LineRef};
 use crate::parser::ParseWarning;
 use crate::types::{Scene, ScriptCommand, ScriptItem, SeAnchor, VisualKind};
@@ -38,6 +39,8 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
     let mut s00_open = false;
     // 現在のカットの #visual の種類(最初に種類を示したもの)。#paragraph と #cut で空に戻す
     let mut cut_kind: Option<VisualKind> = None;
+    // 合成指定の検査済み記録。同じ指定を台詞ごとに繰り返し報告しない
+    let mut checked_synth: HashSet<String> = HashSet::new();
 
     for item in scenes.iter().flat_map(|s| s.items.iter()) {
         match item {
@@ -46,8 +49,12 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
                 line_no,
                 overlap_ms,
                 at,
+                synth,
                 ..
             } => {
+                if let Some(s) = synth {
+                    check_synth(s, *line_no, &mut d, &mut checked_synth);
+                }
                 if overlap_ms.is_some() && at.is_some() {
                     d.errors
                         .push(pw(*line_no, "overlap と at は同時に指定できません"));
@@ -233,6 +240,78 @@ pub fn validate(scenes: &[Scene]) -> Diagnostics {
     d
 }
 
+/// 音声合成の共通パラメータ(VOICEVOX 系)。
+const VOICEVOX_PARAMS: &[&str] = &[
+    "speedScale",
+    "pitchScale",
+    "intonationScale",
+    "volumeScale",
+    "prePhonemeLength",
+    "postPhonemeLength",
+    "pauseLength",
+    "pauseLengthScale",
+];
+const AIVIS_PARAMS: &[&str] = &[
+    "speedScale",
+    "pitchScale",
+    "intonationScale",
+    "volumeScale",
+    "prePhonemeLength",
+    "postPhonemeLength",
+    "pauseLength",
+    "pauseLengthScale",
+    "tempoDynamicsScale",
+];
+const XTTS_PARAMS: &[&str] = &[
+    "temperature",
+    "length_penalty",
+    "repetition_penalty",
+    "top_k",
+    "top_p",
+    "speed",
+    "enable_text_splitting",
+    "stream_chunk_size",
+];
+
+/// エンジン名に対する既知のパラメータ名。エンジン名が不正なら None。
+fn known_engine_params(engine: &str) -> Option<&'static [&'static str]> {
+    match engine {
+        "voicevox" => Some(VOICEVOX_PARAMS),
+        "aivis" => Some(AIVIS_PARAMS),
+        "xtts" => Some(XTTS_PARAMS),
+        _ => None,
+    }
+}
+
+/// 合成役の指定を検査する。同じ指定は最初の台詞の行でだけ報告する。
+fn check_synth(s: &SynthSpec, line_no: usize, d: &mut Diagnostics, checked: &mut HashSet<String>) {
+    if !checked.insert(format!("{s:?}")) {
+        return;
+    }
+    match known_engine_params(&s.engine) {
+        None => d.errors.push(pw(
+            line_no,
+            format!(
+                "未知の音声合成エンジン名です: {}（voicevox / aivis / xtts のいずれか）",
+                s.engine
+            ),
+        )),
+        Some(known) => {
+            for key in s.params.keys() {
+                if !known.contains(&key.as_str()) {
+                    d.warnings.push(pw(
+                        line_no,
+                        format!(
+                            "{} のパラメータに未知の項目 {key} があります（無視されるか、意図しない指定の可能性があります）",
+                            s.engine
+                        ),
+                    ));
+                }
+            }
+        }
+    }
+}
+
 /// そのシーン番号がここまでの台本にあるか(`#paragraph[Sxx]`、または暗黙の S00 に台詞がある)。
 fn line_scene_known(
     seen_lines: &HashMap<(u32, u32), usize>,
@@ -274,6 +353,52 @@ mod tests {
 
     fn messages(v: &[ParseWarning]) -> Vec<String> {
         v.iter().map(|w| w.message.clone()).collect()
+    }
+
+    fn check_cast(cast: &str, body: &str) -> Diagnostics {
+        let text = format!("@scene s\n@cast\n{cast}\n@script\n#paragraph[S01]\n{body}");
+        let mut p = ScriptParser::new();
+        let scenes = p.parse_str(&text).unwrap();
+        validate(&scenes)
+    }
+
+    #[test]
+    fn unknown_engine_is_error() {
+        let d = check_cast("A:話者:x,vioce,pan=0", "[S01-L001] A:一\n[S01-L002] A:二\n");
+        assert_eq!(d.errors.len(), 1, "{:?}", messages(&d.errors));
+        assert!(d.errors[0].message.contains("vioce"), "{}", d.errors[0].message);
+        assert_eq!(d.errors[0].line_no, 6);
+    }
+
+    #[test]
+    fn known_engines_have_no_errors() {
+        for e in ["voicevox", "aivis", "xtts"] {
+            let d = check_cast(&format!("A:話者:ノーマル,{e}"), "[S01-L001] A:一\n");
+            assert!(d.errors.is_empty(), "{e}: {:?}", messages(&d.errors));
+            assert!(d.warnings.is_empty(), "{e}: {:?}", messages(&d.warnings));
+        }
+    }
+
+    #[test]
+    fn unknown_engine_param_key_warns() {
+        let d = check_cast(
+            "A:話者:ノーマル,voicevox,volum=1,speedScale=1.1",
+            "[S01-L001] A:一\n",
+        );
+        assert!(d.errors.is_empty(), "{:?}", messages(&d.errors));
+        assert_eq!(d.warnings.len(), 1, "{:?}", messages(&d.warnings));
+        assert!(d.warnings[0].message.contains("volum"));
+        // aivis 固有の項目は voicevox では未知
+        let d = check_cast("A:話者:ノーマル,voicevox,tempoDynamicsScale=1", "[S01-L001] A:一\n");
+        assert_eq!(d.warnings.len(), 1, "{:?}", messages(&d.warnings));
+        let d = check_cast("A:話者:ノーマル,aivis,tempoDynamicsScale=1", "[S01-L001] A:一\n");
+        assert!(d.warnings.is_empty(), "{:?}", messages(&d.warnings));
+    }
+
+    #[test]
+    fn engine_params_on_non_synth_role_are_untouched() {
+        let d = check_cast("A:話者,pan=0", "[S01-L001] A:一\n");
+        assert!(d.errors.is_empty() && d.warnings.is_empty());
     }
 
     #[test]
