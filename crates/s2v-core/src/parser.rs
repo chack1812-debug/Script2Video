@@ -305,7 +305,7 @@ impl ScriptParser {
             self.warnings.push(ParseWarning {
                 line_no,
                 message: format!(
-                    "Script2Voice 形式(役名:話者名:style,エンジン名,...)のキャスト定義です。Script2Video では「役名:話者名,パラメータ...」で書いてください（この行は無視されます）: {line}"
+                    "キャスト定義にエンジン名がありません。合成役は「役名:話者名:style,エンジン名,...」、肉声役は「役名:話者名,パラメータ...」で書いてください（この行は無視されます）: {line}"
                 ),
             });
             return;
@@ -1753,7 +1753,10 @@ A:x
             .unwrap();
         assert!(!scenes[0].casts.contains_key("A"));
         assert_eq!(p.warnings().len(), 1);
-        assert!(p.warnings()[0].message.contains("Script2Voice 形式"));
+        let m = &p.warnings()[0].message;
+        assert!(m.contains("エンジン名がありません"), "{m}");
+        assert!(m.contains("役名:話者名:style,エンジン名,"), "{m}");
+        assert!(!m.contains("Script2Voice 形式"), "{m}");
     }
 
     #[test]

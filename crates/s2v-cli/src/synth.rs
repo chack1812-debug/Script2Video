@@ -244,7 +244,16 @@ pub fn plan(
                 ));
                 replaces.push(out.clone());
             }
-            (Some(_), _) => {
+            (Some(_), Some(_)) => {
+                // 記録はあるがファイルの中身が違う(人が差し替えた肉声など)
+                plan.warnings.push(format!(
+                    "{}: 合成記録と中身が違うファイルを退避して合成します({}.wav)",
+                    id.display(),
+                    id.file_stem()
+                ));
+                replaces.push(out.clone());
+            }
+            (Some(_), None) => {
                 plan.warnings.push(format!(
                     "{}: 合成記録にないファイルを退避して合成します({}.wav)",
                     id.display(),
@@ -331,7 +340,7 @@ pub struct SynthOutcome {
 }
 
 /// 計画を実行する(設計書 §3.3〜§3.5)。エンジンの失敗では止まらず、その台詞を `failed` に入れる。
-/// 合成したときだけ記録を保存する。
+/// 記録は、ジョブが1つ以上あれば(すべて失敗しても)保存する。ジョブが無ければ保存しない。
 pub fn run(
     plan: SynthPlan,
     record: &mut SynthRecord,
@@ -768,6 +777,10 @@ mod tests {
         assert_eq!(p.jobs.len(), 1);
         assert_eq!(p.backups.len(), 1);
         assert!(p
+            .warnings
+            .iter()
+            .any(|w| w.contains("合成記録と中身が違うファイルを退避")));
+        assert!(!p
             .warnings
             .iter()
             .any(|w| w.contains("合成記録にないファイルを退避")));
