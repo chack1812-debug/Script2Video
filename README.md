@@ -32,7 +32,7 @@ script2video render <台本.txt> [--config <設定.toml>]
 
 ### 配布パッケージを使う(Rust 不要)
 
-[宇摩コードワークスのサイト](https://umacodeworks.jp/script2video.html)から `Script2Video_v0.2.1.zip` をダウンロードして展開する(GitHub には zip を置いていない)。中身は `script2video.exe`・`install-ffmpeg.ps1`・`Operating Manual.html`・`README.md`。
+[宇摩コードワークスのサイト](https://umacodeworks.jp/script2video.html)から `Script2Video_v0.2.11.zip` をダウンロードして展開する(GitHub には zip を置いていない)。中身は `script2video.exe`・`install-ffmpeg.ps1`・`Operating Manual.html`・`README.md`。
 
 1. PATH の通ったフォルダ(なければ作って PATH に追加)に展開する。
 2. ffmpeg は同梱していない。PowerShell で `install-ffmpeg.ps1` を実行して入れる。

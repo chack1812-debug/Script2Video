@@ -8,7 +8,10 @@ use realfft::RealFftPlanner;
 
 /// wet 信号の固定ゲイン。IR は生成時に L2 エネルギー 1 へ正規化済みなので、
 /// 信号ごとの(ピーク依存の)再正規化は行わず、この定数だけを掛ける(処理を入力に対して線形に保つ)。
-pub const REVERB_WET_GAIN: f32 = 0.4;
+/// Script2Voice はピーク基準(wet のピーク = dry のピーク×0.4)で台詞ごとに合わせており、実際の台詞で
+/// 測ると L2 正規化 IR に対して -4〜-13 dB(中央値およそ -7 dB)になる。響きをそろえるため、その代表値
+/// 0.4 × 10^(-7/20) ≈ 0.18 を使う。
+pub const REVERB_WET_GAIN: f32 = 0.18;
 
 type IrKey = (OrderedFloat<f64>, usize);
 type StereoIr = [Vec<f32>; 2];

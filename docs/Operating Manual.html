@@ -133,7 +133,7 @@ footer { margin-top: 64px; color: var(--muted); font-size: 13px; border-top: 1px
 <div class="layout">
 <nav class="toc" aria-label="目次">
   <div class="brand">Script2Video</div>
-  <div class="ver">取扱説明書(v0.2.1・2026-10-29 時点)</div>
+  <div class="ver">取扱説明書(v0.2.11・2026-10-29 時点)</div>
   <ol>
     <li><a href="#overview">1. 概要と作業の流れ</a></li>
     <li><a href="#install">2. インストールと前提</a></li>
@@ -167,7 +167,7 @@ footer { margin-top: 64px; color: var(--muted); font-size: 13px; border-top: 1px
 
 <main>
 <h1>Script2Video 取扱説明書</h1>
-<p class="lead">台本と収録音声から、音声・字幕・タイムラインを作り、画像・動画の素材と縦書きの吹き出し・ト書きを合成して、完成動画 <code>output.mp4</code> を書き出すコマンドラインツールです。この説明書は v0.2.1(2026-10-29 時点)に合わせています。v0.2.1 で、台詞を最下段の横書きの字幕で出す字幕モード(<a href="#subtitle">字幕モード</a>)を追加しました。</p>
+<p class="lead">台本と収録音声から、音声・字幕・タイムラインを作り、画像・動画の素材と縦書きの吹き出し・ト書きを合成して、完成動画 <code>output.mp4</code> を書き出すコマンドラインツールです。この説明書は v0.2.11(2026-10-29 時点)に合わせています。v0.2.11 で、台詞を最下段の横書きの字幕で出す字幕モード(<a href="#subtitle">字幕モード</a>)を追加しました。</p>
 
 <!-- 1 -->
 <h2 id="overview">1. 概要と作業の流れ</h2>
@@ -205,7 +205,7 @@ script2video render  第1話.txt [--config 設定.toml]</code></pre>
 <!-- 2 -->
 <h2 id="install">2. インストールと前提</h2>
 <h3>インストール(配布パッケージ)</h3>
-<p>Rust は不要です。<a href="https://umacodeworks.jp/script2video.html">宇摩コードワークスのサイト</a>から <code>Script2Video_v0.2.1.zip</code> をダウンロードし、PATH の通ったフォルダに展開します。ffmpeg は同梱していないので、展開した <code>install-ffmpeg.ps1</code> を PowerShell で実行して入れます。<code>script2video --help</code> で動作を確認します。</p>
+<p>Rust は不要です。<a href="https://umacodeworks.jp/script2video.html">宇摩コードワークスのサイト</a>から <code>Script2Video_v0.2.11.zip</code> をダウンロードし、PATH の通ったフォルダに展開します。ffmpeg は同梱していないので、展開した <code>install-ffmpeg.ps1</code> を PowerShell で実行して入れます。<code>script2video --help</code> で動作を確認します。</p>
 <h3>インストール(ソースからビルド)</h3>
 <pre><code># リポジトリの直下で実行。~/.cargo/bin/script2video.exe に入ります(PATH に ~/.cargo/bin が必要)
 cargo install --path crates/s2v-cli --locked
@@ -602,7 +602,7 @@ script2video bubbles 第1話.txt --port 8765 --no-open</code></pre>
 </div>
 <p>開発者向けの設計は <code>docs/superpowers/specs/</code>、台本の詳しい規則は <code>台本仕様.md</code>、コマンドの詳細は <code>README.md</code> を参照してください。</p>
 
-<footer>Script2Video 取扱説明書 — v0.2.1(2026-10-29 時点)に基づく。</footer>
+<footer>Script2Video 取扱説明書 — v0.2.11(2026-10-29 時点)に基づく。</footer>
 </main>
 </div>
 </body>
