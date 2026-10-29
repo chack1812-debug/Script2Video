@@ -32,7 +32,7 @@ script2video render <台本.txt> [--config <設定.toml>]
 
 ### 配布パッケージを使う(Rust 不要)
 
-[宇摩コードワークスのサイト](https://umacodeworks.jp/script2video.html)から `Script2Video_v0.2.0.zip` をダウンロードして展開する(GitHub には zip を置いていない)。中身は `script2video.exe`・`install-ffmpeg.ps1`・`Operating Manual.html`・`README.md`。
+[宇摩コードワークスのサイト](https://umacodeworks.jp/script2video.html)から `Script2Video_v0.2.1.zip` をダウンロードして展開する(GitHub には zip を置いていない)。中身は `script2video.exe`・`install-ffmpeg.ps1`・`Operating Manual.html`・`README.md`。
 
 1. PATH の通ったフォルダ(なければ作って PATH に追加)に展開する。
 2. ffmpeg は同梱していない。PowerShell で `install-ffmpeg.ps1` を実行して入れる。
@@ -222,6 +222,8 @@ tracks/S01_C02.mp4     S01-C02 の動画
 
 終了コードは `build` と同じ: `0` 成功、`1` 警告あり(出力はできている)、`2` 失敗。
 
+字幕モード(`style = "subtitle"`)で台詞が四行以上になるときの停止は、失敗(`2`)ではなく終了コード `1` です。詳しくは次の「字幕モード」を参照。
+
 主な失敗の理由:
 
 - 素材が足りない・同じカットに複数ある(拡張子違いを含む)・画像のカットに動画が置かれているなど種類が台本と違う
@@ -240,6 +242,38 @@ tracks/S01_C02.mp4     S01-C02 の動画
 | `default_image` | なし | 素材が無いときの代わりの画像(絶対パス、または台本フォルダからの相対) |
 | `font_path` | `C:\Windows\Fonts\YuGothM.ttc` | 縦書きに使うフォント(他の OS では指定が必要) |
 | `jobs` | 1 | カットを同時に作る ffmpeg の数 |
+
+### 字幕モード
+
+台詞の見せ方は `config.toml` の `[render] style` で切り替える(コマンドラインのオプションは無い)。
+
+- `style = "bubble"`(既定・省略時): 台詞を縦書きの吹き出しで出す(従来どおり)。
+- `style = "subtitle"`: 台詞を画面の最下段に横書きの字幕で出す。台詞の音声が鳴っている間だけ表示し、字幕の幅は画面の幅から左右の `margin` を除いたもの。本文は最大 3 行で、折り返しは字幕の幅と `font_size` による。発言者名(`@cast` の役名)は、帯の上辺の左上に接する囲みのラベルで出す(行数には数えない。役名が空ならラベルなし)。同じ時刻に複数の字幕が出るときは、下から上へ積み上げる。
+- ト書きは字幕モードでも変わらない(縦書き・同じ枠・同じ自動配置)。字幕とト書きが時間も位置も重なると警告する(出力は作る。終了コード 1)。帯が見える(塗りが透明でない、または枠線がある)ときは帯とラベルの範囲で、帯が見えないときは画面に出るラベルと文字の範囲で判定する。帯が見える(塗りが透明でない、または枠線がある)ときは帯とラベルの範囲で、帯が見えないときは画面に出るラベルと文字の範囲で判定する。
+- 文字の大きさは `font_size` で、吹き出し・ト書き・字幕で共通。字幕だけの文字サイズの項目は無い。
+
+字幕の見た目の設定(`[render]`。`style = "subtitle"` のときだけ使う):
+
+| キー | 既定 | 意味 |
+|---|---|---|
+| `subtitle_text_color` | `#FFFFFF` | 字幕の文字色 |
+| `subtitle_outline_color` | `#000000` | 文字の縁取りの色 |
+| `subtitle_outline_width` | 3.0 | 文字の縁取りの太さ(0 で縁取りなし) |
+| `subtitle_band_fill` | `#000000` | 帯の塗り |
+| `subtitle_band_opacity` | 0.0 | 帯の塗りの不透明度(0〜1) |
+| `subtitle_band_stroke` | `#FFFFFF` | 帯の枠線の色 |
+| `subtitle_band_stroke_width` | 0.0 | 帯の枠線の太さ(0 で枠なし) |
+| `subtitle_padding` | 20 | 帯の内側の余白(本文を 1 文字以上確保できる大きさ) |
+| `subtitle_margin_bottom` | 40 | 画面の下端から帯までの余白 |
+| `speaker_text_color` | `#FFFFFF` | 発言者名の文字色 |
+| `speaker_fill` | `#333333` | 発言者名の囲いの塗り |
+| `speaker_stroke` | `#FFFFFF` | 発言者名の囲いの枠線の色 |
+| `speaker_stroke_width` | 2.0 | 発言者名の囲いの枠線の太さ |
+| `speaker_padding` | 10 | 発言者名の囲いの内側の余白 |
+
+台詞が四行以上になるとき、または同時に出る字幕の積み上げが画面に収まらないときは、`render` は `output.mp4` を作らず(前回の `output.mp4` も変えず)、該当する台詞をすべて `Process.log` に警告として書き、終了コード `1` で終わる。「台詞が四行以上」の警告には、台詞の ID・役名・行数・本文が入る。直し方は、台本の台詞を短く分け、`number`(新しい台詞に番号を付ける)と `build` をやり直してから `render` をやり直す。台本を直しても `build` をやり直さないと、`render` は台本が `build` の後に変わったという警告を出し、古いタイムラインのまま進む。
+
+`bubbles` は字幕モードでは台詞を出さず、ト書きだけを出す。保存しても、`bubbles.json` にある台詞の手動配置は消さずに残す(`style = "bubble"` に戻せば使われる)。`bubbles` 画面での文字サイズの設定は未対応。
 
 性能試験(手動、30 分以上かかることがある): `cargo test -p s2v-cli --release --test render_perf -- --ignored --nocapture`
 
