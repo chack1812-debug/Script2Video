@@ -101,9 +101,9 @@ fn tail_path(w: f32, h: f32, tail: (i32, i32)) -> Option<tiny_skia::Path> {
 }
 
 /// 字形の輪郭を、座標変換しながら経路に写す。
-struct GlyphPath<F: Fn(f32, f32) -> (f32, f32)> {
-    pb: PathBuilder,
-    map: F,
+pub(crate) struct GlyphPath<F: Fn(f32, f32) -> (f32, f32)> {
+    pub(crate) pb: PathBuilder,
+    pub(crate) map: F,
 }
 
 impl<F: Fn(f32, f32) -> (f32, f32)> OutlineBuilder for GlyphPath<F> {

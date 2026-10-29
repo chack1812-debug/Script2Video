@@ -12,7 +12,7 @@ use s2v_export::wavio::read_stereo_48k;
 use s2v_render::bubbles::Placed;
 use s2v_render::draw::Overlay;
 use s2v_render::font::FontFace;
-use s2v_render::scene::{compose, draw_item, Item, Placement};
+use s2v_render::scene::{compose, draw_item, Item, Placement, SubtitleIssue, SubtitleProblem};
 use s2v_video::audio_check::{check_audio, check_av_length, decode_args, f32le, is_silent};
 use s2v_video::ffmpeg::{
     concat_args, concat_list, cut_args, mux_args, Background, EncodeSettings, Fit,
@@ -60,8 +60,10 @@ fn render(args: &RenderArgs) -> anyhow::Result<Outcome> {
     match result {
         // 成功: output.mp4 は置き換え済み。ログの書込み確認は置き換えの前に済ませてあるので、
         // ここで失敗扱いにしない(置き換え後の結果を覆さない)
-        Ok(()) if log.warning_count() > 0 => Ok(Outcome::Warnings),
-        Ok(()) => Ok(Outcome::Ok),
+        Ok(RenderEnd::Written) if log.warning_count() > 0 => Ok(Outcome::Warnings),
+        Ok(RenderEnd::Written) => Ok(Outcome::Ok),
+        // 字幕の問題で止めた: output.mp4 は作っていない。警告(終了コード 1)で終わる
+        Ok(RenderEnd::Refused) => Ok(refused_outcome(&log)),
         Err(msg) => {
             log.error(&msg);
             log.error("output.mp4 は変更していません");
@@ -69,6 +71,17 @@ fn render(args: &RenderArgs) -> anyhow::Result<Outcome> {
                 eprintln!("[ERROR] {e:#}");
             }
             Ok(Outcome::Failed)
+        }
+    }
+}
+
+/// 止めたときの終わり方。警告がログに残っていなければ、理由を追えないので失敗(2)にする。
+fn refused_outcome(log: &ProcLog) -> Outcome {
+    match log.check() {
+        Ok(()) => Outcome::Warnings,
+        Err(e) => {
+            eprintln!("[ERROR] {e:#}");
+            Outcome::Failed
         }
     }
 }
@@ -148,12 +161,43 @@ fn write_overlays(
     Ok(())
 }
 
+/// `render_main` の終わり方。
+#[derive(Debug)]
+enum RenderEnd {
+    /// output.mp4 を置き換えた
+    Written,
+    /// 字幕の問題で止めた(output.mp4 は作らず、変えてもいない)
+    Refused,
+}
+
+/// 字幕の問題 1 件を、Process.log に書く文にする。
+fn subtitle_issue_message(i: &SubtitleIssue) -> String {
+    match &i.problem {
+        SubtitleProblem::TooManyLines { lines } => {
+            let who = i
+                .speaker
+                .as_deref()
+                .filter(|s| !s.is_empty())
+                .map(|s| format!(" {s}"))
+                .unwrap_or_default();
+            format!(
+                "{}{who}: 台詞が四行以上({lines} 行)です。台詞を分割して台本を作り直してください: {}",
+                i.id, i.text
+            )
+        }
+        SubtitleProblem::Overflow => format!(
+            "{}: 字幕が画面に収まりません(同時に出る字幕が多いか、字幕が高すぎます)",
+            i.id
+        ),
+    }
+}
+
 fn render_main(
     args: &RenderArgs,
     cfg: &RenderConfig,
     dir: &Path,
     log: &mut ProcLog,
-) -> Result<(), String> {
+) -> Result<RenderEnd, String> {
     let cwd =
         std::env::current_dir().map_err(|e| format!("現在のフォルダを取得できません: {e}"))?;
     let abs = |p: &Path| normalize_path(p, &cwd).to_string_lossy().into_owned();
@@ -165,11 +209,25 @@ fn render_main(
         ffmpeg,
         ffprobe,
         items,
-        placement: Placement { placed, clipped },
+        placement:
+            Placement {
+                placed,
+                clipped,
+                subtitle_issues,
+            },
         plans,
         assets,
         ..
     } = prepare(&args.script, cfg, dir, MissingAssets::Error, log)?;
+
+    // 字幕の問題があれば、作業フォルダに触る前に全件を書いて止める
+    if !subtitle_issues.is_empty() {
+        for i in &subtitle_issues {
+            log.warn(subtitle_issue_message(i));
+        }
+        log.warn("output.mp4 は作っていません(変更もしていません)");
+        return Ok(RenderEnd::Refused);
+    }
     let total = total_frames(tl.duration_ms, cfg.fps);
     let seg = dir.join("work").join("render").join("seg");
     let backgrounds: Vec<Background> = plans
@@ -319,11 +377,12 @@ fn commit_output(
     tmp: &Path,
     out: &Path,
     success_msg: &str,
-) -> Result<(), String> {
+) -> Result<RenderEnd, String> {
     log.info(success_msg);
     log.check().map_err(|e| format!("{e:#}"))?;
     std::fs::rename(tmp, out)
-        .map_err(|e| format!("output.mp4 に置き換えられません: {}: {e}", out.display()))
+        .map_err(|e| format!("output.mp4 に置き換えられません: {}: {e}", out.display()))?;
+    Ok(RenderEnd::Written)
 }
 
 /// ffmpeg を `jobs` 個まで並列に起動する。失敗が出たら新しい起動をやめる。
@@ -428,6 +487,7 @@ mod tests {
             start_ms: 0,
             end_ms: 1000,
             order: 0,
+            speaker: None,
         }];
         // 文字が収まらない小さな枠
         let placed: BTreeMap<String, Placed> = [(
@@ -501,6 +561,7 @@ mod tests {
             start_ms: 0,
             end_ms: 1000,
             order: 0,
+            speaker: None,
         }];
         let manual: BTreeMap<String, Placed> = [(
             "S01-L001".to_string(),
@@ -517,7 +578,9 @@ mod tests {
         )]
         .into();
         let mut w = Vec::new();
-        let Placement { placed, clipped } = place_items(&items, &manual, &cfg, &face, &mut w);
+        let Placement {
+            placed, clipped, ..
+        } = place_items(&items, &manual, &cfg, &face, &mut w);
         let p = &placed["S01-L001"];
         assert!(p.x >= 0 && p.y >= 0, "{p:?}");
         assert!(p.x as u32 + p.w <= 320 && p.y as u32 + p.h <= 180, "{p:?}");
@@ -566,6 +629,40 @@ mod tests {
         // 置き換え元が無ければ Err
         let e = commit_output(&mut log, &tmp, &out, "ok").unwrap_err();
         assert!(e.contains("置き換えられません"), "{e}");
+    }
+
+    #[test]
+    fn refused_is_warnings_only_when_the_log_was_written() {
+        let ok = ProcLog::from_writer(Box::new(Vec::<u8>::new()));
+        assert_eq!(refused_outcome(&ok), Outcome::Warnings);
+        let mut bad = ProcLog::from_writer(Box::new(FailingWriter));
+        bad.warn("x");
+        assert_eq!(refused_outcome(&bad), Outcome::Failed);
+    }
+
+    #[test]
+    fn subtitle_issue_messages() {
+        let issue = |speaker: Option<&str>, problem| SubtitleIssue {
+            id: "S01-L009".into(),
+            speaker: speaker.map(String::from),
+            text: "本文".into(),
+            problem,
+        };
+        let m = subtitle_issue_message(&issue(None, SubtitleProblem::Overflow));
+        assert_eq!(
+            m,
+            "S01-L009: 字幕が画面に収まりません(同時に出る字幕が多いか、字幕が高すぎます)"
+        );
+        let m = subtitle_issue_message(&issue(
+            Some("田中"),
+            SubtitleProblem::TooManyLines { lines: 5 },
+        ));
+        assert_eq!(
+            m,
+            "S01-L009 田中: 台詞が四行以上(5 行)です。台詞を分割して台本を作り直してください: 本文"
+        );
+        let m = subtitle_issue_message(&issue(None, SubtitleProblem::TooManyLines { lines: 4 }));
+        assert!(m.starts_with("S01-L009: 台詞が四行以上(4 行)"), "{m}");
     }
 
     #[test]

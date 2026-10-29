@@ -104,16 +104,16 @@ pub fn split_runs(text: &str) -> Vec<(RunKind, Range<usize>)> {
     runs
 }
 
-struct Shaped {
-    glyph_id: u16,
-    cluster: usize,
-    x_advance: i32,
-    y_advance: i32,
-    x_offset: i32,
-    y_offset: i32,
+pub(crate) struct Shaped {
+    pub(crate) glyph_id: u16,
+    pub(crate) cluster: usize,
+    pub(crate) x_advance: i32,
+    pub(crate) y_advance: i32,
+    pub(crate) x_offset: i32,
+    pub(crate) y_offset: i32,
 }
 
-fn shape_run(
+pub(crate) fn shape_run(
     face: &rustybuzz::Face,
     features: &[rustybuzz::Feature],
     text: &str,
@@ -140,7 +140,10 @@ fn shape_run(
 
 /// 書記素ごとに字形を割り当てる。字形を持たない書記素は直前の単位にまとめる
 /// (先頭の書記素が字形を持たないときは、その単位が先頭になる)。
-fn group_by_grapheme<'a>(text: &'a str, glyphs: &'a [Shaped]) -> Vec<(&'a str, Vec<&'a Shaped>)> {
+pub(crate) fn group_by_grapheme<'a>(
+    text: &'a str,
+    glyphs: &'a [Shaped],
+) -> Vec<(&'a str, Vec<&'a Shaped>)> {
     let graphemes: Vec<(usize, &str)> = text.grapheme_indices(true).collect();
     let mut per: Vec<Vec<&Shaped>> = vec![Vec::new(); graphemes.len()];
     for g in glyphs {

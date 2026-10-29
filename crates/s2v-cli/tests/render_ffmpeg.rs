@@ -762,3 +762,79 @@ fn overlong_auto_item_is_clipped_with_warning() {
     );
     assert!(count_near(&buf, [255, 255, 255], 3) > 1000);
 }
+
+const SUBTITLE: &str = "style = \"subtitle\"";
+
+#[test]
+fn subtitle_style_with_four_line_line_refuses_and_exits_1() {
+    if skip() {
+        return;
+    }
+    // 4 行になる長い台詞が 2 件
+    let long = "あ".repeat(60);
+    let body = format!(
+        "#paragraph[S01] 朝\n#visual (image) 朝。\n[S01-L001] A:{long}\n[S01-L002] A:おはよう。\n#pause 2000\n[S01-L003] A:{long}\n"
+    );
+    let p = project(&body, &[("S01.png", Asset::Png(RED))], 30, SUBTITLE);
+    fs::write(p.output(), b"old").unwrap();
+    let mtime = fs::metadata(p.output()).unwrap().modified().unwrap();
+    assert_eq!(p.render(), Outcome::Warnings, "{}", p.log());
+    assert_eq!(fs::read(p.output()).unwrap(), b"old");
+    assert_eq!(fs::metadata(p.output()).unwrap().modified().unwrap(), mtime);
+    assert!(!p.dir.join("work").join("render").exists());
+    let log = p.log();
+    for id in ["S01-L001", "S01-L003"] {
+        let line = log
+            .lines()
+            .find(|l| l.contains(id) && l.contains("台詞が四行以上"))
+            .unwrap_or_else(|| panic!("{id} の警告がありません\n{log}"));
+        assert!(line.contains("A:"), "{line}");
+        assert!(line.contains(&long), "{line}");
+        assert!(line.contains("(4 行)") || line.contains("(5 行)"), "{line}");
+    }
+    assert!(!log.contains("S01-L002: 台詞が四行以上"), "{log}");
+    assert!(
+        log.contains("output.mp4 は作っていません(変更もしていません)"),
+        "{log}"
+    );
+}
+
+#[test]
+fn subtitle_style_renders_with_three_line_line() {
+    if skip() {
+        return;
+    }
+    let p = project(SIMPLE, &[("S01.png", Asset::Png(RED))], 30, SUBTITLE);
+    p.render_ok();
+    assert!(p.output().is_file(), "{}", p.log());
+    assert!(!p.log().contains("台詞が四行以上"), "{}", p.log());
+}
+
+/// 字幕の本文の 1 行に入る "あ" は 16 字(幅 320 - 余白 2*8 - 字幕の余白 2*20 = 264、文字 16)。
+/// 3 行ちょうど(48 字)は出力でき、4 行になる最小(49 字)は止まる。
+fn subtitle_boundary(chars: usize) -> Project {
+    let t = "あ".repeat(chars);
+    let body = format!(
+        "#paragraph[S01] 朝
+#visual (image) 朝。
+[S01-L001] A:{t}
+"
+    );
+    project(&body, &[("S01.png", Asset::Png(RED))], 30, SUBTITLE)
+}
+
+#[test]
+fn subtitle_style_three_full_lines_render_and_four_lines_refuse() {
+    if skip() {
+        return;
+    }
+    let p = subtitle_boundary(48);
+    p.render_ok();
+    assert!(p.output().is_file(), "{}", p.log());
+    assert!(!p.log().contains("台詞が四行以上"), "{}", p.log());
+
+    let p = subtitle_boundary(49);
+    assert_eq!(p.render(), Outcome::Warnings, "{}", p.log());
+    assert!(!p.output().exists());
+    assert!(p.log().contains("(4 行)"), "{}", p.log());
+}

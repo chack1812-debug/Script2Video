@@ -79,6 +79,22 @@ bubble_gap = 24              # 吹き出し同士の間隔
 tail_length = 80             # 吹き出しの尻尾の長さ
 bubble_max_height_ratio = 0.55  # 吹き出しの高さの上限(画面の高さの比)
 note_max_height_ratio = 0.6     # ト書きの高さの上限(画面の高さの比)
+style = "bubble"             # 台詞の見せ方(bubble: 縦書きの吹き出し / subtitle: 最下段の横書きの字幕)
+# --- 字幕(style = "subtitle" のときだけ使う。文字の大きさは font_size、本文は最大 3 行) ---
+subtitle_text_color = "#FFFFFF"     # 字幕の文字色
+subtitle_outline_color = "#000000"  # 文字の縁取りの色
+subtitle_outline_width = 3.0        # 文字の縁取りの太さ(0 で縁取りなし)
+subtitle_band_fill = "#000000"      # 帯の塗り
+subtitle_band_opacity = 0.0         # 帯の塗りの不透明度(0〜1)
+subtitle_band_stroke = "#FFFFFF"    # 帯の枠線の色
+subtitle_band_stroke_width = 0.0    # 帯の枠線の太さ(0 で枠なし)
+subtitle_padding = 20               # 帯の内側の余白
+subtitle_margin_bottom = 40         # 画面の下端から帯までの余白
+speaker_text_color = "#FFFFFF"      # 発言者名の文字色
+speaker_fill = "#333333"            # 発言者名の囲いの塗り
+speaker_stroke = "#FFFFFF"          # 発言者名の囲いの枠線の色
+speaker_stroke_width = 2.0          # 発言者名の囲いの枠線の太さ
+speaker_padding = 10                # 発言者名の囲いの内側の余白
 
 [prompts]
 style = ""                   # 画像生成プロンプトの画風

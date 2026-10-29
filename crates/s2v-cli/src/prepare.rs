@@ -10,7 +10,9 @@ use s2v_core::Config;
 use s2v_render::assets::{match_assets, Asset, AssetKind};
 use s2v_render::bubbles::{parse_bubbles, scale_to, BubblesFile, Placed};
 use s2v_render::font::{FontFace, VerticalFeature};
-use s2v_render::scene::{build_items, missing_glyph_warnings, place_items, Item, Placement};
+use s2v_render::scene::{
+    build_items, missing_glyph_warnings, missing_speaker_warnings, place_items, Item, Placement,
+};
 use s2v_render::ItemKind;
 use s2v_timeline::{Timeline, VisualKind};
 use s2v_video::ffmpeg::{check_ffprobe_version, check_version, Background, VersionCheck};
@@ -153,6 +155,7 @@ pub fn prepare(
     let mut item_warnings = Vec::new();
     let items = build_items(&tl, &manual, &mut item_warnings)?;
     item_warnings.extend(missing_glyph_warnings(&face, &items));
+    item_warnings.extend(missing_speaker_warnings(&face, &items, cfg));
 
     // 大きさと位置
     let placement = place_items(&items, &manual, cfg, &face, &mut item_warnings);

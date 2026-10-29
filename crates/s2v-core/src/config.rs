@@ -356,6 +356,17 @@ pub enum Fit {
     Cover,
 }
 
+/// 台詞の見せ方。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize, Serialize)]
+#[serde(rename_all = "lowercase")]
+pub enum RenderStyle {
+    /// 縦書きの吹き出し(既定)。
+    #[default]
+    Bubble,
+    /// 最下段の横書きの字幕。
+    Subtitle,
+}
+
 /// 動画の描画・合成の設定(設計書 4.7)。
 #[derive(Debug, Clone, Deserialize, Serialize)]
 #[serde(default)]
@@ -390,6 +401,21 @@ pub struct RenderConfig {
     pub tail_length: u32,
     pub bubble_max_height_ratio: f32,
     pub note_max_height_ratio: f32,
+    pub style: RenderStyle,
+    pub subtitle_text_color: String,
+    pub subtitle_outline_color: String,
+    pub subtitle_outline_width: f32,
+    pub subtitle_band_fill: String,
+    pub subtitle_band_opacity: f32,
+    pub subtitle_band_stroke: String,
+    pub subtitle_band_stroke_width: f32,
+    pub subtitle_padding: u32,
+    pub subtitle_margin_bottom: u32,
+    pub speaker_text_color: String,
+    pub speaker_fill: String,
+    pub speaker_stroke: String,
+    pub speaker_stroke_width: f32,
+    pub speaker_padding: u32,
 }
 
 impl Default for RenderConfig {
@@ -425,6 +451,21 @@ impl Default for RenderConfig {
             tail_length: 80,
             bubble_max_height_ratio: 0.55,
             note_max_height_ratio: 0.6,
+            style: RenderStyle::Bubble,
+            subtitle_text_color: "#FFFFFF".into(),
+            subtitle_outline_color: "#000000".into(),
+            subtitle_outline_width: 3.0,
+            subtitle_band_fill: "#000000".into(),
+            subtitle_band_opacity: 0.0,
+            subtitle_band_stroke: "#FFFFFF".into(),
+            subtitle_band_stroke_width: 0.0,
+            subtitle_padding: 20,
+            subtitle_margin_bottom: 40,
+            speaker_text_color: "#FFFFFF".into(),
+            speaker_fill: "#333333".into(),
+            speaker_stroke: "#FFFFFF".into(),
+            speaker_stroke_width: 2.0,
+            speaker_padding: 10,
         }
     }
 }
@@ -499,6 +540,13 @@ impl RenderConfig {
             ("note_fill", &self.note_fill),
             ("note_stroke", &self.note_stroke),
             ("text_color", &self.text_color),
+            ("subtitle_text_color", &self.subtitle_text_color),
+            ("subtitle_outline_color", &self.subtitle_outline_color),
+            ("subtitle_band_fill", &self.subtitle_band_fill),
+            ("subtitle_band_stroke", &self.subtitle_band_stroke),
+            ("speaker_text_color", &self.speaker_text_color),
+            ("speaker_fill", &self.speaker_fill),
+            ("speaker_stroke", &self.speaker_stroke),
         ] {
             if Self::rgb(v).is_none() {
                 e.push(format!("render.{name} は #RRGGBB の形にしてください: {v}"));
@@ -516,6 +564,54 @@ impl RenderConfig {
         f_range(e, "note_stroke_width", self.note_stroke_width, 0.0, 50.0);
         int_range(e, "bubble_padding", self.bubble_padding, 0, 500);
         int_range(e, "note_padding", self.note_padding, 0, 500);
+        f_range(
+            e,
+            "subtitle_outline_width",
+            self.subtitle_outline_width,
+            0.0,
+            50.0,
+        );
+        f_range(
+            e,
+            "subtitle_band_opacity",
+            self.subtitle_band_opacity,
+            0.0,
+            1.0,
+        );
+        f_range(
+            e,
+            "subtitle_band_stroke_width",
+            self.subtitle_band_stroke_width,
+            0.0,
+            50.0,
+        );
+        f_range(
+            e,
+            "speaker_stroke_width",
+            self.speaker_stroke_width,
+            0.0,
+            50.0,
+        );
+        int_range(e, "subtitle_padding", self.subtitle_padding, 0, 500);
+        int_range(e, "speaker_padding", self.speaker_padding, 0, 500);
+        if self.style == RenderStyle::Subtitle {
+            let body = i64::from(self.width)
+                - 2 * i64::from(self.margin)
+                - 2 * i64::from(self.subtitle_padding);
+            if (body as f64) < f64::from(self.font_size) {
+                e.push(format!(
+                    "render.subtitle_padding は字幕の本文を 1 文字(font_size)以上確保できる大きさにしてください: {}",
+                    self.subtitle_padding
+                ));
+            }
+        }
+        int_range(
+            e,
+            "subtitle_margin_bottom",
+            self.subtitle_margin_bottom,
+            0,
+            2000,
+        );
         int_range(e, "margin", self.margin, 0, 2000);
         int_range(e, "bubble_gap", self.bubble_gap, 0, 2000);
         int_range(e, "tail_length", self.tail_length, 0, 2000);
@@ -820,6 +916,50 @@ request_timeout_s = 5
         ] {
             assert!(errs.iter().any(|e| e.contains(key)), "{key}: {errs:?}");
         }
+    }
+
+    #[test]
+    fn style_defaults_to_bubble_and_parses_subtitle() {
+        let c = Config::from_toml(MINIMAL).unwrap();
+        assert_eq!(c.render.style, RenderStyle::Bubble);
+        let c = Config::from_toml(&format!("{MINIMAL}\n[render]\nstyle = \"subtitle\"")).unwrap();
+        assert_eq!(c.render.style, RenderStyle::Subtitle);
+        assert!(Config::from_toml(&format!("{MINIMAL}\n[render]\nstyle = \"Subtitle\"")).is_err());
+    }
+
+    #[test]
+    fn validate_reports_bad_subtitle_values() {
+        assert!(Config::builtin().validate().is_empty());
+        let mut c = Config::builtin();
+        c.render.subtitle_text_color = "red".into();
+        c.render.subtitle_band_opacity = 1.5;
+        c.render.subtitle_outline_width = -1.0;
+        c.render.speaker_padding = 501;
+        let errs = c.validate();
+        for key in [
+            "render.subtitle_text_color",
+            "render.subtitle_band_opacity",
+            "render.subtitle_outline_width",
+            "render.speaker_padding",
+        ] {
+            assert!(errs.iter().any(|e| e.contains(key)), "{key}: {errs:?}");
+        }
+    }
+
+    #[test]
+    fn validate_requires_subtitle_body_of_one_char() {
+        let mut c = Config::builtin();
+        c.render.style = RenderStyle::Subtitle;
+        assert!(c.validate().is_empty(), "{:?}", c.validate());
+        c.render.width = 320;
+        c.render.subtitle_padding = 500;
+        let errs = c.validate();
+        assert!(
+            errs.iter().any(|e| e.contains("render.subtitle_padding")),
+            "{errs:?}"
+        );
+        c.render.style = RenderStyle::Bubble;
+        assert!(c.validate().is_empty(), "{:?}", c.validate());
     }
 
     #[test]

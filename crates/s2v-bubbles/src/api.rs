@@ -12,12 +12,12 @@ use std::sync::Mutex;
 
 use serde_json::{json, Value};
 
-use s2v_core::config::{Fit, RenderConfig};
+use s2v_core::config::{Fit, RenderConfig, RenderStyle};
 use s2v_render::assets::AssetKind;
 use s2v_render::bubbles::{effective_times, validate_file, BubblesFile, Canvas, Placed};
 use s2v_render::font::FontFace;
 use s2v_render::layout::{fits, min_size};
-use s2v_render::scene::{build_items, draw_item, layout_ctx, place_items, Item};
+use s2v_render::scene::{build_items, draw_item, editable_items, layout_ctx, place_items, Item};
 use s2v_render::ItemKind;
 use s2v_timeline::Timeline;
 use s2v_video::frames::{frame, plan_cuts, stacking_order, total_frames, ShownItem};
@@ -84,7 +84,15 @@ fn canvas_of(cfg: &RenderConfig) -> Canvas {
 /// 手動配置の一式で項目を組み立て直す(offset が表示時刻に効く)。
 /// 逆転した offset は `validate_layout` が先に拒否するので、ここで失敗するのは検証を通していない入力だけ。
 fn items_for(s: &Session, manual: &BTreeMap<String, Placed>) -> Result<Vec<Item>, ApiError> {
-    build_items(&s.timeline, manual, &mut Vec::new()).map_err(|m| ApiError::Unprocessable(vec![m]))
+    let items = build_items(&s.timeline, manual, &mut Vec::new())
+        .map_err(|m| ApiError::Unprocessable(vec![m]))?;
+    // 字幕モードでは台詞を画面(state・layout・PNG・保存後の配置)に出さず、ト書きだけにする
+    Ok(editable_items(items, &s.cfg))
+}
+
+/// 字幕モードか(台詞は編集せず、保存では手動配置をそのまま保持する)
+fn is_subtitle_style(s: &Session) -> bool {
+    s.cfg.style == RenderStyle::Subtitle
 }
 
 fn shown(items: &[Item]) -> Vec<ShownItem> {
@@ -500,6 +508,10 @@ fn save_with(
         let Some(&(kind, text, _, _)) = base.get(id.as_str()) else {
             continue; // 未知の ID は報告済み
         };
+        // 字幕モードの台詞は使わないので、枠に収まるかは見ない
+        if is_subtitle_style(s) && kind == ItemKind::Bubble {
+            continue;
+        }
         if p.kind == kind && !fits(&layout_ctx(&s.face, &s.cfg, kind), text, p.w, p.h) {
             errs.push(format!("{id}: 文字が枠に収まりません"));
         }
@@ -511,8 +523,13 @@ fn save_with(
     // 中身 = 要求の手動配置 + 読み込んだもののうち timeline に無い ID
     let known = known_ids(&s.timeline);
     let mut items = manual.clone();
+    // 字幕モードでは台詞を編集しないので、読み込んだ台詞の手動配置も保持する
+    // (吹き出しモードに戻したときに失わないため)。台詞かどうかは台本の ID で決める
+    let line_ids: BTreeSet<&str> = s.timeline.lines.iter().map(|l| l.id.as_str()).collect();
     for (id, p) in s.loaded.lock().unwrap_or_else(|e| e.into_inner()).iter() {
-        if !known.contains(id.as_str()) {
+        let keep_line =
+            is_subtitle_style(s) && line_ids.contains(id.as_str()) && !manual.contains_key(id);
+        if !known.contains(id.as_str()) || keep_line {
             items.insert(id.clone(), p.clone());
         }
     }
@@ -869,6 +886,111 @@ mod tests {
         // 要求の新しい未知の ID は 422
         let bad = one("S09-L777", bubble(1, 1, 50, 50));
         assert!(matches!(save(&s, &bad), Err(ApiError::Unprocessable(_))));
+    }
+
+    fn subtitle_session(dir: &Path) -> Session {
+        let mut s = session_in(dir, "あいう");
+        s.cfg.style = s2v_core::config::RenderStyle::Subtitle;
+        s.cfg.width = 640;
+        s.cfg.height = 360;
+        s
+    }
+
+    #[test]
+    fn subtitle_style_state_has_notes_only() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = subtitle_session(dir.path());
+        // 読み込み済みに台詞の手動配置があっても、台詞は出ない
+        let loaded = one("S01-L001", bubble(100, 40, 120, 120));
+        let v = state_json(&s, &loaded);
+        let items = v["items"].as_array().unwrap();
+        assert!(!items.is_empty());
+        assert!(items.iter().all(|i| i["kind"] == "note"), "{items:?}");
+        assert!(items.iter().any(|i| i["id"] == "S01-N01"));
+        // 台詞の手動配置があっても警告は出ない
+        assert!(v["warnings"].as_array().unwrap().is_empty(), "{v}");
+        // /api/layout も台詞を出さない
+        let l = layout_json(&s, &loaded).unwrap();
+        assert!(l.as_array().unwrap().iter().all(|i| i["kind"] == "note"));
+        // 台詞の PNG は NotFound、ト書きは描ける
+        assert_eq!(
+            render_png(&s, "S01-L001", &loaded).unwrap_err(),
+            ApiError::NotFound
+        );
+        assert!(render_png(&s, "S01-N01", &loaded).is_ok());
+        // 吹き出しモードでは台詞も出る
+        let b = session_in(dir.path(), "あいう");
+        let v = state_json(&b, &BTreeMap::new());
+        assert!(v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|i| i["kind"] == "bubble"));
+    }
+
+    #[test]
+    fn subtitle_style_save_keeps_line_entries() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = subtitle_session(dir.path());
+        // 収まらない大きさの台詞の手動配置も、そのまま保持する(検証で失敗しない)
+        s.loaded
+            .lock()
+            .unwrap()
+            .insert("S01-L001".into(), bubble(20, 20, 10, 10));
+        s.loaded
+            .lock()
+            .unwrap()
+            .insert("S09-L001".into(), bubble(30, 30, 60, 60));
+        let mut note = bubble(50, 50, 200, 200);
+        note.kind = ItemKind::Note;
+        let manual = one("S01-N01", note);
+        save(&s, &manual).unwrap();
+        let saved = std::fs::read_to_string(dir.path().join("bubbles.json")).unwrap();
+        let file = parse_bubbles(&saved).unwrap();
+        let ids: Vec<&str> = file.items.keys().map(String::as_str).collect();
+        assert_eq!(ids, vec!["S01-L001", "S01-N01", "S09-L001"]);
+        assert_eq!(file.items["S01-L001"], bubble(20, 20, 10, 10));
+        // 保存後の loaded にも残り、続けて保存しても消えない
+        save(&s, &manual).unwrap();
+        let file =
+            parse_bubbles(&std::fs::read_to_string(dir.path().join("bubbles.json")).unwrap())
+                .unwrap();
+        assert!(file.items.contains_key("S01-L001"));
+
+        // 吹き出しモードでは、manual に無い台詞は保持しない(従来どおり)
+        let dir2 = tempfile::tempdir().unwrap();
+        let b = session_in(dir2.path(), "あ");
+        b.loaded
+            .lock()
+            .unwrap()
+            .insert("S01-L002".into(), bubble(20, 20, 60, 60));
+        save(&b, &one("S01-L001", bubble(100, 40, 120, 120))).unwrap();
+        let file =
+            parse_bubbles(&std::fs::read_to_string(dir2.path().join("bubbles.json")).unwrap())
+                .unwrap();
+        let ids: Vec<&str> = file.items.keys().map(String::as_str).collect();
+        assert_eq!(ids, vec!["S01-L001"]);
+    }
+
+    #[test]
+    fn subtitle_style_save_does_not_keep_note_id_marked_as_bubble() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = subtitle_session(dir.path());
+        // 壊れた bubbles.json: ト書きの ID に kind=bubble。既知の ID は manual が正なので保持しない
+        s.loaded
+            .lock()
+            .unwrap()
+            .insert("S01-N01".into(), bubble(20, 20, 60, 60));
+        s.loaded
+            .lock()
+            .unwrap()
+            .insert("S01-L002".into(), bubble(30, 30, 60, 60));
+        save(&s, &BTreeMap::new()).unwrap();
+        let file =
+            parse_bubbles(&std::fs::read_to_string(dir.path().join("bubbles.json")).unwrap())
+                .unwrap();
+        let ids: Vec<&str> = file.items.keys().map(String::as_str).collect();
+        assert_eq!(ids, vec!["S01-L002"]);
     }
 
     fn try_dir_link(link: &Path, target: &Path) -> bool {

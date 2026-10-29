@@ -5,9 +5,11 @@ pub mod autolayout;
 pub mod bubbles;
 pub mod draw;
 pub mod font;
+pub mod hlayout;
 pub mod kinsoku;
 pub mod layout;
 pub mod scene;
+pub mod subtitle;
 
 /// 重ねる要素の種類(吹き出し・ト書き)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
