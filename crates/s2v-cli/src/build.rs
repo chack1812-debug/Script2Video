@@ -142,7 +142,7 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
         .file_stem()
         .map(|s| s.to_string_lossy().into_owned())
         .unwrap_or_else(|| "script".to_string());
-    // コミットポイントの直前に古い完成動画を改名する。Process.log を作る(切り詰める)より前に行い、
+    // コミットポイントの直前に古い完成動画を改名する。Process.log に区切りの行を書くより前に行い、
     // 失敗したときは前回の成果物も Process.log も変えず、標準エラーにだけ出す
     let renamed = match rename_stale_output(&out_dir) {
         Ok(r) => r,
@@ -152,7 +152,7 @@ fn build(args: &BuildArgs) -> anyhow::Result<Outcome> {
             return Ok(Outcome::Failed);
         }
     };
-    let mut log = ProcLog::create(&out_dir.join("Process.log"))?;
+    let mut log = ProcLog::append(&out_dir.join("Process.log"), "build")?;
     if renamed {
         log.info("古い output.mp4 を output.stale.mp4 に改名しました");
     }

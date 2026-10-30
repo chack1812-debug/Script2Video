@@ -1538,7 +1538,7 @@ checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
 
 [[package]]
 name = "s2v-audio"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "claxon",
@@ -1558,7 +1558,7 @@ dependencies = [
 
 [[package]]
 name = "s2v-bubbles"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "getrandom 0.4.2",
@@ -1575,7 +1575,7 @@ dependencies = [
 
 [[package]]
 name = "s2v-cli"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "clap",
@@ -1601,7 +1601,7 @@ dependencies = [
 
 [[package]]
 name = "s2v-core"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "ordered-float",
@@ -1615,7 +1615,7 @@ dependencies = [
 
 [[package]]
 name = "s2v-engines"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -1634,7 +1634,7 @@ dependencies = [
 
 [[package]]
 name = "s2v-export"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "hound",
@@ -1651,7 +1651,7 @@ dependencies = [
 
 [[package]]
 name = "s2v-render"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "rustybuzz",
@@ -1666,7 +1666,7 @@ dependencies = [
 
 [[package]]
 name = "s2v-timeline"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "serde",
  "serde_json",
@@ -1674,7 +1674,7 @@ dependencies = [
 
 [[package]]
 name = "s2v-video"
-version = "0.2.11"
+version = "0.2.12"
 dependencies = [
  "anyhow",
  "realfft",

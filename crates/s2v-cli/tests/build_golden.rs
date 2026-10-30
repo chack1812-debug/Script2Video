@@ -362,12 +362,16 @@ fn work_files_of_lines_that_became_missing_are_removed_and_warnings_replay() {
     assert!(log1.contains("制限に掛かりました"), "{log1}");
     assert_eq!(run_build(&a), first, "キャッシュ命中でも同じ終了コード");
     let log2 = fs::read_to_string(out.join("Process.log")).unwrap();
+    // 追記なので、2 回目の実行の分だけ増え、1 回目の記録はそのまま残る
+    assert!(log2.starts_with(&log1), "前回の記録が残る");
+    let second = &log2[log1.len()..];
+    assert!(second.contains("== build "), "{second}");
     assert_eq!(
         log1.matches("[WARN]").count(),
-        log2.matches("[WARN]").count()
+        second.matches("[WARN]").count()
     );
     assert!(
-        log2.contains("制限に掛かりました"),
+        second.contains("制限に掛かりました"),
         "キャッシュ命中でも警告を再現する"
     );
     assert_eq!(

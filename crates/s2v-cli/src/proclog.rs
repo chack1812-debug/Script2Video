@@ -2,7 +2,6 @@
 //!
 //! 書き込みの失敗は最初の 1 件を覚えておき、`check` で報告する(記録できなかった実行は失敗とする)。
 
-use std::fs::File;
 use std::io::Write;
 use std::path::Path;
 
@@ -13,11 +12,7 @@ pub struct ProcLog {
 }
 
 impl ProcLog {
-    pub fn create(path: &Path) -> anyhow::Result<Self> {
-        Ok(Self::from_writer(Box::new(File::create(path)?)))
-    }
-
-    /// 追記で開き、区切りの行 `== <command> <時刻>(UTC) ==` を書く(prompts・bubbles・render 用)。
+    /// 追記で開き、区切りの行 `== <command> <時刻>(UTC) ==` を書く(build・prompts・bubbles・render 用)。
     pub fn append(path: &Path, command: &str) -> anyhow::Result<Self> {
         // 既存のログが改行で終わっていなければ、区切りの行が前の行に続いてしまうので改行を足す
         let needs_newline = std::fs::read(path)
