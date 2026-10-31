@@ -146,7 +146,13 @@ fn items_value(
             continue;
         };
         let clipped = placement.clipped.contains(&it.id);
-        let key: DrawKey = (it.id.clone(), p.w, p.h, p.tail.map(|t| (t.dx, t.dy)), clipped);
+        let key: DrawKey = (
+            it.id.clone(),
+            p.w,
+            p.h,
+            p.tail.map(|t| (t.dx, t.dy)),
+            clipped,
+        );
         let cached = s
             .draw_dims
             .0

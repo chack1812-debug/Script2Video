@@ -366,7 +366,11 @@ mod tests {
     fn unknown_engine_is_error() {
         let d = check_cast("A:話者:x,vioce,pan=0", "[S01-L001] A:一\n[S01-L002] A:二\n");
         assert_eq!(d.errors.len(), 1, "{:?}", messages(&d.errors));
-        assert!(d.errors[0].message.contains("vioce"), "{}", d.errors[0].message);
+        assert!(
+            d.errors[0].message.contains("vioce"),
+            "{}",
+            d.errors[0].message
+        );
         assert_eq!(d.errors[0].line_no, 6);
     }
 
@@ -389,9 +393,15 @@ mod tests {
         assert_eq!(d.warnings.len(), 1, "{:?}", messages(&d.warnings));
         assert!(d.warnings[0].message.contains("volum"));
         // aivis 固有の項目は voicevox では未知
-        let d = check_cast("A:話者:ノーマル,voicevox,tempoDynamicsScale=1", "[S01-L001] A:一\n");
+        let d = check_cast(
+            "A:話者:ノーマル,voicevox,tempoDynamicsScale=1",
+            "[S01-L001] A:一\n",
+        );
         assert_eq!(d.warnings.len(), 1, "{:?}", messages(&d.warnings));
-        let d = check_cast("A:話者:ノーマル,aivis,tempoDynamicsScale=1", "[S01-L001] A:一\n");
+        let d = check_cast(
+            "A:話者:ノーマル,aivis,tempoDynamicsScale=1",
+            "[S01-L001] A:一\n",
+        );
         assert!(d.warnings.is_empty(), "{:?}", messages(&d.warnings));
     }
 

@@ -943,7 +943,10 @@ A:ずんだもん:ノーマル,voicevox
         );
         assert!(log.contains("実行ファイル"), "{log}");
         assert!(log.contains("[voicevox] 接続確認 OK"), "{log}");
-        assert!(!log.contains("エンジン aivis:"), "使わないエンジンは書かない: {log}");
+        assert!(
+            !log.contains("エンジン aivis:"),
+            "使わないエンジンは書かない: {log}"
+        );
         // 2回目はエンジンを呼ばない
         let n = fake.requests();
         let o = run_build(&args);

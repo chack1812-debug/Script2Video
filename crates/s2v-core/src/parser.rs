@@ -373,7 +373,12 @@ impl ScriptParser {
         }
         let synth = synth_head.map(|(speaker_name, style, engine)| {
             let style = if style.is_empty() {
-                if engine == "xtts" { "default" } else { "ノーマル" }.to_string()
+                if engine == "xtts" {
+                    "default"
+                } else {
+                    "ノーマル"
+                }
+                .to_string()
             } else {
                 style
             };
@@ -824,7 +829,9 @@ impl ScriptParser {
                     } else {
                         self.warnings.push(ParseWarning {
                             line_no,
-                            message: format!("voice= の値が正しくありません（voice=rec のみ。無視します）: {v}"),
+                            message: format!(
+                                "voice= の値が正しくありません（voice=rec のみ。無視します）: {v}"
+                            ),
                         });
                     }
                 }
@@ -2188,15 +2195,19 @@ A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
     fn cast_with_engine_sets_synth() {
         let mut p = ScriptParser::new();
         let scenes = p
-            .parse_str("@scene s
+            .parse_str(
+                "@scene s
 @cast
 A:ずんだもん:あまあま,voicevox,pan=10
 @script
 A:こんにちは
-")
+",
+            )
             .unwrap();
         assert_eq!(scenes[0].casts["A"].pan, 10.0);
-        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else { panic!() };
+        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else {
+            panic!()
+        };
         assert_eq!(
             synth,
             &Some(SynthSpec {
@@ -2213,15 +2224,19 @@ A:こんにちは
     fn cast_without_engine_has_no_synth() {
         let mut p = ScriptParser::new();
         let scenes = p
-            .parse_str("@scene s
+            .parse_str(
+                "@scene s
 @cast
 A:話者,pan=0
 @script
 A:やあ
-")
+",
+            )
             .unwrap();
         assert!(p.warnings().is_empty(), "{:?}", p.warnings());
-        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else { panic!() };
+        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else {
+            panic!()
+        };
         assert!(synth.is_none());
     }
 
@@ -2229,14 +2244,18 @@ A:やあ
     fn xtts_language_and_params() {
         let mut p = ScriptParser::new();
         let scenes = p
-            .parse_str("@scene s
+            .parse_str(
+                "@scene s
 @cast
 E:Ana:default,xtts,language=en,speed=1.2
 @script
 E:hi
-")
+",
+            )
             .unwrap();
-        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else { panic!() };
+        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else {
+            panic!()
+        };
         let synth = synth.as_ref().unwrap();
         assert_eq!(synth.language, "en");
         assert_eq!(synth.params["speed"], serde_json::json!(1.2));
@@ -2261,8 +2280,12 @@ A:二
 ",
             )
             .unwrap();
-        let ScriptItem::Speech { synth: s1, .. } = first_speech(&scenes, 0) else { panic!() };
-        let ScriptItem::Speech { synth: s2, .. } = first_speech(&scenes, 1) else { panic!() };
+        let ScriptItem::Speech { synth: s1, .. } = first_speech(&scenes, 0) else {
+            panic!()
+        };
+        let ScriptItem::Speech { synth: s2, .. } = first_speech(&scenes, 1) else {
+            panic!()
+        };
         assert!(s1.is_some());
         assert!(s2.is_none());
     }
@@ -2271,15 +2294,24 @@ A:二
     fn voice_rec_option() {
         let mut p = ScriptParser::new();
         let scenes = p
-            .parse_str("@scene s
+            .parse_str(
+                "@scene s
 @cast
 A:話者
 @script
 A(voice=rec):台詞
-")
+",
+            )
             .unwrap();
         assert!(p.warnings().is_empty(), "{:?}", p.warnings());
-        let ScriptItem::Speech { voice_rec, offset_params, .. } = first_speech(&scenes, 0) else { panic!() };
+        let ScriptItem::Speech {
+            voice_rec,
+            offset_params,
+            ..
+        } = first_speech(&scenes, 0)
+        else {
+            panic!()
+        };
         assert!(*voice_rec);
         assert!(!offset_params.contains_key("voice"));
     }
@@ -2288,19 +2320,28 @@ A(voice=rec):台詞
     fn unknown_voice_option_value_warns_and_stays_synth() {
         let mut p = ScriptParser::new();
         let scenes = p
-            .parse_str("@scene s
+            .parse_str(
+                "@scene s
 @cast
 A:話者:ノーマル,voicevox
 @script
 A(voice=recc):台詞
-")
+",
+            )
             .unwrap();
         assert!(
-            p.warnings().iter().any(|w| w.message.contains("voice=rec のみ")),
+            p.warnings()
+                .iter()
+                .any(|w| w.message.contains("voice=rec のみ")),
             "{:?}",
             p.warnings()
         );
-        let ScriptItem::Speech { voice_rec, synth, .. } = first_speech(&scenes, 0) else { panic!() };
+        let ScriptItem::Speech {
+            voice_rec, synth, ..
+        } = first_speech(&scenes, 0)
+        else {
+            panic!()
+        };
         assert!(!*voice_rec);
         assert!(synth.is_some());
     }
@@ -2309,7 +2350,8 @@ A(voice=recc):台詞
     fn reading_markup_for_synth_role() {
         let mut p = ScriptParser::new();
         let scenes = p
-            .parse_str("@scene s
+            .parse_str(
+                "@scene s
 @cast
 A:ずんだもん:ノーマル,voicevox
 
@@ -2317,12 +2359,23 @@ B:話者
 @script
 A:'東京|とうきょう'へ行く
 B:'東京|とうきょう'へ行く
-")
+",
+            )
             .unwrap();
-        let ScriptItem::Speech { text, synth_text, .. } = first_speech(&scenes, 0) else { panic!() };
+        let ScriptItem::Speech {
+            text, synth_text, ..
+        } = first_speech(&scenes, 0)
+        else {
+            panic!()
+        };
         assert_eq!(text, "東京へ行く");
         assert_eq!(synth_text.as_deref(), Some("とうきょうへ行く"));
-        let ScriptItem::Speech { text, synth_text, .. } = first_speech(&scenes, 1) else { panic!() };
+        let ScriptItem::Speech {
+            text, synth_text, ..
+        } = first_speech(&scenes, 1)
+        else {
+            panic!()
+        };
         assert_eq!(text, "'東京|とうきょう'へ行く");
         assert!(synth_text.is_none());
     }
@@ -2331,7 +2384,10 @@ B:'東京|とうきょう'へ行く
     fn fullwidth_bar_is_not_a_separator() {
         assert_eq!(
             split_reading("'東京｜とうきょう'"),
-            ("'東京｜とうきょう'".to_string(), "'東京｜とうきょう'".to_string())
+            (
+                "'東京｜とうきょう'".to_string(),
+                "'東京｜とうきょう'".to_string()
+            )
         );
     }
 
@@ -2339,19 +2395,25 @@ B:'東京|とうきょう'へ行く
     fn language_on_non_engine_cast_still_warns() {
         let mut p = ScriptParser::new();
         let scenes = p
-            .parse_str("@scene s
+            .parse_str(
+                "@scene s
 @cast
 A:話者,pan=0,language=en
 @script
 A:やあ
-")
+",
+            )
             .unwrap();
         assert!(
-            p.warnings().iter().any(|w| w.message.contains("「language」は使えません")),
+            p.warnings()
+                .iter()
+                .any(|w| w.message.contains("「language」は使えません")),
             "{:?}",
             p.warnings()
         );
-        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else { panic!() };
+        let ScriptItem::Speech { synth, .. } = first_speech(&scenes, 0) else {
+            panic!()
+        };
         assert!(synth.is_none());
     }
 }
