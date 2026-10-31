@@ -232,13 +232,17 @@ fn px(buf: &[u8], x: usize, y: usize) -> [u8; 3] {
 }
 
 fn count_near(buf: &[u8], target: [u8; 3], tol: i32) -> usize {
-    buf.chunks_exact(3)
+    buf.as_chunks::<3>()
+        .0
+        .iter()
         .filter(|p| (0..3).all(|c| (i32::from(p[c]) - i32::from(target[c])).abs() <= tol))
         .count()
 }
 
 fn count_red(buf: &[u8]) -> usize {
-    buf.chunks_exact(3)
+    buf.as_chunks::<3>()
+        .0
+        .iter()
         .filter(|p| p[0] >= 220 && p[1] < 40 && p[2] < 40)
         .count()
 }
