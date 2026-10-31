@@ -12,3 +12,6 @@
 
 # 配布パッケージ(scripts/package.ps1 が作る zip)は git 管理外。VPS(umacodeworks.jp)で配布する
 /dist/
+
+# Beads(工程管理の状態。リポジトリには含めない)
+.beads/
