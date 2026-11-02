@@ -90,6 +90,7 @@ subtitle_band_stroke = "#FFFFFF"    # 帯の枠線の色
 subtitle_band_stroke_width = 0.0    # 帯の枠線の太さ(0 で枠なし)
 subtitle_padding = 20               # 帯の内側の余白
 subtitle_margin_bottom = 40         # 画面の下端から帯までの余白
+subtitle_show_speaker = true        # 発言者名のラベルを出すか(false で出さない)
 speaker_text_color = "#FFFFFF"      # 発言者名の文字色
 speaker_fill = "#333333"            # 発言者名の囲いの塗り
 speaker_stroke = "#FFFFFF"          # 発言者名の囲いの枠線の色

@@ -34,7 +34,7 @@ script2video render <台本.txt> [--config <設定.toml>]
 
 ### 配布パッケージを使う(Rust 不要)
 
-[宇摩コードワークスのサイト](https://umacodeworks.jp/script2video.html)から `Script2Video_v0.2.12.zip` をダウンロードして展開する(GitHub には zip を置いていない)。中身は `script2video.exe`・`install-ffmpeg.ps1`・`Operating Manual.html`・`README.md`。
+[宇摩コードワークスのサイト](https://umacodeworks.jp/script2video.html)から `Script2Video_v0.2.13.zip` をダウンロードして展開する(GitHub には zip を置いていない)。中身は `script2video.exe`・`install-ffmpeg.ps1`・`Operating Manual.html`・`README.md`。
 
 1. PATH の通ったフォルダ(なければ作って PATH に追加)に展開する。
 2. ffmpeg は同梱していない。PowerShell で `install-ffmpeg.ps1` を実行して入れる。
@@ -267,6 +267,7 @@ tracks/S01_C02.mp4     S01-C02 の動画
 | `subtitle_band_stroke_width` | 0.0 | 帯の枠線の太さ(0 で枠なし) |
 | `subtitle_padding` | 20 | 帯の内側の余白(本文を 1 文字以上確保できる大きさ) |
 | `subtitle_margin_bottom` | 40 | 画面の下端から帯までの余白 |
+| `subtitle_show_speaker` | `true` | 発言者名のラベルを出すか(`false` で出さない。ラベルの分の高さも取らない) |
 | `speaker_text_color` | `#FFFFFF` | 発言者名の文字色 |
 | `speaker_fill` | `#333333` | 発言者名の囲いの塗り |
 | `speaker_stroke` | `#FFFFFF` | 発言者名の囲いの枠線の色 |

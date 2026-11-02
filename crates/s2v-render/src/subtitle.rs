@@ -34,13 +34,13 @@ fn body_layout(face: &FontFace, cfg: &RenderConfig, text: &str, band_w: u32) -> 
     hlayout(face, cfg.font_size, &text.replace('\n', " "), inner_w)
 }
 
-/// 発言者名として描く文字列(空ならラベルなし)
-fn speaker_name(speaker: Option<&str>) -> Option<&str> {
-    speaker.filter(|s| !s.is_empty())
+/// 発言者名として描く文字列(空、または `subtitle_show_speaker = false` ならラベルなし)
+fn speaker_name<'a>(cfg: &RenderConfig, speaker: Option<&'a str>) -> Option<&'a str> {
+    speaker.filter(|s| cfg.subtitle_show_speaker && !s.is_empty())
 }
 
 fn label_height(cfg: &RenderConfig, speaker: Option<&str>) -> u32 {
-    if speaker_name(speaker).is_some() {
+    if speaker_name(cfg, speaker).is_some() {
         cfg.font_size.ceil() as u32 + 2 * cfg.speaker_padding
     } else {
         0
@@ -66,7 +66,7 @@ pub fn measure(
         lines,
         band_h: body.ceil() as u32 + 2 * cfg.subtitle_padding,
         label_h: label_height(cfg, speaker),
-        label_w: speaker_name(speaker).map_or(0, |n| label_width(face, cfg, n)),
+        label_w: speaker_name(cfg, speaker).map_or(0, |n| label_width(face, cfg, n)),
         text_w: text_w.ceil() as u32,
     }
 }
@@ -204,7 +204,7 @@ pub fn draw_subtitle(
         .map_err(|e| format!("フォントを読めません: {e}"))?;
     let fs = cfg.font_size;
     let label_h = label_height(cfg, speaker);
-    let name = speaker_name(speaker);
+    let name = speaker_name(cfg, speaker);
 
     // ラベルの文字の整形と幅
     let name_layout = name.map(|n| hlayout(face, fs, &n.replace('\n', " "), f32::MAX / 4.0));
@@ -332,6 +332,19 @@ mod tests {
             (3.0f32 * 40.0 + 2.0 * 40.0 * c.line_spacing).ceil() as u32 + 40
         );
         assert_eq!(band_width(&c), c.width - 2 * c.margin);
+    }
+
+    #[test]
+    fn show_speaker_false_hides_label() {
+        let (f, mut c) = (face(), cfg_n_chars(5));
+        let with = measure(&f, &c, "港朝", Some("A"));
+        assert!(with.label_h > 0 && with.label_w > 0);
+        c.subtitle_show_speaker = false;
+        let without = measure(&f, &c, "港朝", Some("A"));
+        assert_eq!((without.label_h, without.label_w), (0, 0));
+        assert_eq!(without, measure(&f, &c, "港朝", None));
+        let o = draw_subtitle(&f, &c, "港朝", Some("A"), band_width(&c), without.band_h).unwrap();
+        assert_eq!((o.dy, o.pixmap.height()), (0, without.band_h));
     }
 
     #[test]

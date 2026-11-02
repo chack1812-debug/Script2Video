@@ -411,6 +411,8 @@ pub struct RenderConfig {
     pub subtitle_band_stroke_width: f32,
     pub subtitle_padding: u32,
     pub subtitle_margin_bottom: u32,
+    /// 字幕に発言者名のラベルを出すか(false で出さない)
+    pub subtitle_show_speaker: bool,
     pub speaker_text_color: String,
     pub speaker_fill: String,
     pub speaker_stroke: String,
@@ -461,6 +463,7 @@ impl Default for RenderConfig {
             subtitle_band_stroke_width: 0.0,
             subtitle_padding: 20,
             subtitle_margin_bottom: 40,
+            subtitle_show_speaker: true,
             speaker_text_color: "#FFFFFF".into(),
             speaker_fill: "#333333".into(),
             speaker_stroke: "#FFFFFF".into(),

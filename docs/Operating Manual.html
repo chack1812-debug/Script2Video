@@ -133,7 +133,7 @@ footer { margin-top: 64px; color: var(--muted); font-size: 13px; border-top: 1px
 <div class="layout">
 <nav class="toc" aria-label="目次">
   <div class="brand">Script2Video</div>
-  <div class="ver">取扱説明書(v0.2.12・2026-10-30 時点)</div>
+  <div class="ver">取扱説明書(v0.2.13・2026-11-02 時点)</div>
   <ol>
     <li><a href="#overview">1. 概要と作業の流れ</a></li>
     <li><a href="#install">2. インストールと前提</a></li>
@@ -167,7 +167,7 @@ footer { margin-top: 64px; color: var(--muted); font-size: 13px; border-top: 1px
 
 <main>
 <h1>Script2Video 取扱説明書</h1>
-<p class="lead">台本と収録音声から、音声・字幕・タイムラインを作り、画像・動画の素材と縦書きの吹き出し・ト書きを合成して、完成動画 <code>output.mp4</code> を書き出すコマンドラインツールです。この説明書は v0.2.12(2026-10-30 時点)に合わせています。v0.2.12 で、台詞を最下段の横書きの字幕で出す字幕モード(<a href="#subtitle">字幕モード</a>)を追加しました。</p>
+<p class="lead">台本と収録音声から、音声・字幕・タイムラインを作り、画像・動画の素材と縦書きの吹き出し・ト書きを合成して、完成動画 <code>output.mp4</code> を書き出すコマンドラインツールです。この説明書は v0.2.13(2026-11-02 時点)に合わせています。v0.2.1 で、台詞を最下段の横書きの字幕で出す字幕モード(<a href="#subtitle">字幕モード</a>)を追加しました。</p>
 
 <!-- 1 -->
 <h2 id="overview">1. 概要と作業の流れ</h2>
@@ -205,7 +205,7 @@ script2video render  第1話.txt [--config 設定.toml]</code></pre>
 <!-- 2 -->
 <h2 id="install">2. インストールと前提</h2>
 <h3>インストール(配布パッケージ)</h3>
-<p>Rust は不要です。<a href="https://umacodeworks.jp/script2video.html">宇摩コードワークスのサイト</a>から <code>Script2Video_v0.2.12.zip</code> をダウンロードし、PATH の通ったフォルダに展開します。ffmpeg は同梱していないので、展開した <code>install-ffmpeg.ps1</code> を PowerShell で実行して入れます。<code>script2video --help</code> で動作を確認します。</p>
+<p>Rust は不要です。<a href="https://umacodeworks.jp/script2video.html">宇摩コードワークスのサイト</a>から <code>Script2Video_v0.2.13.zip</code> をダウンロードし、PATH の通ったフォルダに展開します。ffmpeg は同梱していないので、展開した <code>install-ffmpeg.ps1</code> を PowerShell で実行して入れます。<code>script2video --help</code> で動作を確認します。</p>
 <h3>インストール(ソースからビルド)</h3>
 <pre><code># リポジトリの直下で実行。~/.cargo/bin/script2video.exe に入ります(PATH に ~/.cargo/bin が必要)
 cargo install --path crates/s2v-cli --locked
@@ -491,9 +491,9 @@ script2video bubbles 第1話.txt --port 8765 --no-open</code></pre>
 <p><code>config.toml</code> の <code>[render]</code> で <code>style = "subtitle"</code> にすると、<code>render</code> は台詞を画面の最下段に横書きの字幕で出します(切り替えはこの設定だけで、コマンドラインのオプションはありません)。<code>style = "bubble"</code>(既定・省略時)の動作は従来と同じです。</p>
 <ul>
 <li>字幕は台詞の音声が鳴っている間だけ表示します。幅は画面の幅から左右の <code>margin</code> を除いたもので、本文は最大 3 行です。折り返しは字幕の幅と <code>font_size</code> で決まります。</li>
-<li>発言者名(<code>@cast</code> の役名)は、帯の上辺の左上に接する囲みのラベルで出します。行数には数えません。役名が空ならラベルは出ません。</li>
+<li>発言者名(<code>@cast</code> の役名)は、帯の上辺の左上に接する囲みのラベルで出します。行数には数えません。役名が空ならラベルは出ません。<code>subtitle_show_speaker = false</code> にすると、役名があってもラベルを出しません。</li>
 <li>同じ時刻に複数の字幕が出るときは、下から上へ積み上げます。</li>
-<li>ト書きは字幕モードでも変わりません(縦書き・同じ枠・同じ自動配置)。字幕とト書きが時間も位置も重なると警告します(出力は作ります。終了コード 1)。帯が見える(塗りが透明でない、または枠線がある)ときは帯と発言者名の範囲で、帯が見えないときは画面に出る発言者名と文字の範囲で判定します。帯が見える(塗りが透明でない、または枠線がある)ときは帯と発言者名の範囲で、帯が見えないときは画面に出る発言者名と文字の範囲で判定します。</li>
+<li>ト書きは字幕モードでも変わりません(縦書き・同じ枠・同じ自動配置)。字幕とト書きが時間も位置も重なると警告します(出力は作ります。終了コード 1)。帯が見える(塗りが透明でない、または枠線がある)ときは帯と発言者名の範囲で、帯が見えないときは画面に出る発言者名と文字の範囲で判定します。</li>
 <li>文字の大きさは <code>font_size</code> で、吹き出し・ト書き・字幕で共通です。字幕だけの文字サイズの項目はありません。</li>
 </ul>
 <table>
@@ -508,6 +508,7 @@ script2video bubbles 第1話.txt --port 8765 --no-open</code></pre>
 <tr><td><code>subtitle_band_stroke_width</code></td><td>0.0</td><td>帯の枠線の太さ(0 で枠なし)</td></tr>
 <tr><td><code>subtitle_padding</code></td><td>20</td><td>帯の内側の余白(本文を 1 文字以上確保できる大きさ)</td></tr>
 <tr><td><code>subtitle_margin_bottom</code></td><td>40</td><td>画面の下端から帯までの余白</td></tr>
+<tr><td><code>subtitle_show_speaker</code></td><td><code>true</code></td><td>発言者名のラベルを出すか(<code>false</code> で出さない。ラベルの分の高さも取らない)</td></tr>
 <tr><td><code>speaker_text_color</code></td><td><code>#FFFFFF</code></td><td>発言者名の文字色</td></tr>
 <tr><td><code>speaker_fill</code></td><td><code>#333333</code></td><td>発言者名の囲いの塗り</td></tr>
 <tr><td><code>speaker_stroke</code></td><td><code>#FFFFFF</code></td><td>発言者名の囲いの枠線の色</td></tr>
@@ -602,7 +603,7 @@ script2video bubbles 第1話.txt --port 8765 --no-open</code></pre>
 </div>
 <p>開発者向けの設計は <code>docs/superpowers/specs/</code>、台本の詳しい規則は <code>台本仕様.md</code>、コマンドの詳細は <code>README.md</code> を参照してください。</p>
 
-<footer>Script2Video 取扱説明書 — v0.2.12(2026-10-30 時点)に基づく。</footer>
+<footer>Script2Video 取扱説明書 — v0.2.13(2026-11-02 時点)に基づく。</footer>
 </main>
 </div>
 </body>
