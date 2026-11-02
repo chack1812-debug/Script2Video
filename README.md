@@ -3,6 +3,8 @@
 台本と収録音声(または音声合成)から、動画用の音声・字幕・タイムラインを作るコマンドラインツール。
 開発・運営: [宇摩コードワークス（UmaCodeWorks）](https://umacodeworks.jp)
 
+関連ツール: [ScriptChecker](https://github.com/chack1812-debug/ScriptChecker) — Script2Videoが作った台本・音声を再生しながら、音声レベルや誤読・ルビを確認するWindows向けデスクトップツール
+
 ## 紹介動画
 
 Script2Videoの概要と使い方を紹介した動画です。
