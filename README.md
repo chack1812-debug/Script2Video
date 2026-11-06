@@ -34,7 +34,7 @@ script2video render <台本.txt> [--config <設定.toml>]
 
 ### 配布パッケージを使う(Rust 不要)
 
-[宇摩コードワークスのサイト](https://umacodeworks.jp/script2video.html)から `Script2Video_v0.2.13.zip` をダウンロードして展開する(GitHub には zip を置いていない)。中身は `script2video.exe`・`install-ffmpeg.ps1`・`Operating Manual.html`・`README.md`。
+[宇摩コードワークスのサイト](https://umacodeworks.jp/script2video.html)から `Script2Video_v0.2.14.zip` をダウンロードして展開する(GitHub には zip を置いていない)。中身は `script2video.exe`・`install-ffmpeg.ps1`・`Operating Manual.html`・`README.md`。
 
 1. PATH の通ったフォルダ(なければ作って PATH に追加)に展開する。
 2. ffmpeg は同梱していない。PowerShell で `install-ffmpeg.ps1` を実行して入れる。
@@ -96,7 +96,7 @@ B:田中,pan=20
 ```
 
 - 書式は `役名:話者名:style,エンジン名,language=…,k=v…`。エンジン名は `voicevox` / `aivis` / `xtts`。`pan`・`distance`・`height`・`volume` と外見描写は合成役にも使えます。
-- 台詞行の `(voice=rec)` で、その台詞だけ合成せず肉声にできます。`'単語|読み'` は合成役だけで使え、表示は単語、エンジンへは読みを渡します(区切りは半角 `|`)。
+- 台詞行の `(voice=rec)` で、その台詞だけ合成せず肉声にできます。`'単語|読み'` は合成役だけで使え、表示は単語、エンジンへは読みを渡します(区切りは半角 `|` で、最後の `|` を区切りとするため単語側に `|` を含められます。例 `'|||オアオア'` は単語 `||`、読み `オアオア`)。
 - 合成は `build` だけが行い(`number` は触りません)、合成する台詞が無ければエンジンを起動しません。文面や設定が変わっていない台詞は再合成しません。変わったときや、別のファイル(肉声など)があるときは、既存の `voices/S01_L003.wav` を `voices/backup/S01_L003.<UTC日時>.wav` に退避してから合成し直します。同じ台詞とみなされる別の名前のファイル(`S01_L3.wav`、`allow_flac` のときの `.flac`)も、元の名前のまま日時を入れて退避します。退避すると警告になるので、その回の終了コードは 1 です。合成の記録は `voices/synth.json` です。
 - `--no-cache` では再合成しません。合成し直させたいときは `voices/S01_L003.wav` を削除します(削除したファイルは退避されません)。
 - 同じ役を `@cast` で定義し直すと、合成の設定(合成するか・エンジン・声・style・エンジン固有パラメータ)はそれ以降の台詞にだけ効きます。音響パラメータ(`pan` など)は `@scene` ごとで、同じ `@scene` の中で最後の定義がその `@scene` の全台詞に使われます(台本仕様 §2.4)。

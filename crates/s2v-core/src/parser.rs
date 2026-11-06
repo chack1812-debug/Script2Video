@@ -865,9 +865,12 @@ impl Default for ScriptParser {
 }
 
 /// 読みの記法 `'単語|読み'` の正規表現。半角パイプのみを区切りとする(全角｜は対象外)。
+///
+/// 区切りは最後の `|` とする。単語側は `|` を含んでよく(`'|||オアオア'` は単語 `||`、読み `オアオア`)、
+/// 読み側は `|` を含まない。
 fn reading_re() -> &'static regex::Regex {
     static RE: std::sync::OnceLock<regex::Regex> = std::sync::OnceLock::new();
-    RE.get_or_init(|| regex::Regex::new(r"'([^'|]+?)\|([^'|]+?)'").expect("読み正規表現が不正"))
+    RE.get_or_init(|| regex::Regex::new(r"'([^']+)\|([^'|]+)'").expect("読み正規表現が不正"))
 }
 
 /// `'単語|読み'` を展開し、(表示用, 合成用) を返す。
@@ -2378,6 +2381,18 @@ B:'東京|とうきょう'へ行く
         };
         assert_eq!(text, "'東京|とうきょう'へ行く");
         assert!(synth_text.is_none());
+    }
+
+    #[test]
+    fn bar_in_word_uses_last_bar_as_separator() {
+        assert_eq!(
+            split_reading("'|||オアオア'"),
+            ("||".to_string(), "オアオア".to_string())
+        );
+        assert_eq!(
+            split_reading("a'x|y|よみ'b'東京|とうきょう'c"),
+            ("ax|yb東京c".to_string(), "aよみbとうきょうc".to_string())
+        );
     }
 
     #[test]
