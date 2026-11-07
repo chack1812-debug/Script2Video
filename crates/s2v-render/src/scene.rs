@@ -25,6 +25,22 @@ pub struct Item {
     pub order: usize,
     /// 発言者名(台詞の役名を trim したもの。空ならなし。ト書きは常になし)
     pub speaker: Option<String>,
+    /// 所属シーンの表示方式(`None` は設定の `style` に従う)
+    pub style: Option<RenderStyle>,
+}
+
+/// 項目の表示方式(シーンの指定が無ければ設定の `style`)。
+pub fn item_style(item: &Item, cfg: &RenderConfig) -> RenderStyle {
+    item.style.unwrap_or(cfg.style)
+}
+
+/// timeline.json のシーンの `style` 文字列を表示方式に直す(知らない値は指定なしとみなす)。
+pub fn parse_scene_style(s: Option<&str>) -> Option<RenderStyle> {
+    match s? {
+        "bubble" => Some(RenderStyle::Bubble),
+        "subtitle" => Some(RenderStyle::Subtitle),
+        _ => None,
+    }
 }
 
 /// timeline.json から項目を作り、`bubbles.json` の offset を反映する。
@@ -34,7 +50,21 @@ pub fn build_items(
     manual: &BTreeMap<String, Placed>,
     warnings: &mut Vec<String>,
 ) -> Result<Vec<Item>, String> {
-    type Raw<'a> = (&'a str, ItemKind, &'a str, i64, i64, Option<&'a str>);
+    type Raw<'a> = (
+        &'a str,
+        ItemKind,
+        &'a str,
+        i64,
+        i64,
+        Option<&'a str>,
+        Option<RenderStyle>,
+    );
+    // シーン ID → 表示方式
+    let scene_style: BTreeMap<&str, Option<RenderStyle>> = tl
+        .scenes
+        .iter()
+        .map(|sc| (sc.id.as_str(), parse_scene_style(sc.style.as_deref())))
+        .collect();
     let mut raw: Vec<Raw> = Vec::new();
     for l in &tl.lines {
         let cast = l.cast.trim();
@@ -46,15 +76,25 @@ pub fn build_items(
             l.start_ms,
             l.end_ms,
             speaker,
+            scene_style.get(l.scene.as_str()).copied().flatten(),
         ));
     }
     for sc in &tl.scenes {
+        let style = parse_scene_style(sc.style.as_deref());
         for n in &sc.notes {
-            raw.push((&n.id, ItemKind::Note, &n.text, n.start_ms, n.end_ms, None));
+            raw.push((
+                &n.id,
+                ItemKind::Note,
+                &n.text,
+                n.start_ms,
+                n.end_ms,
+                None,
+                style,
+            ));
         }
     }
     let mut items = Vec::new();
-    for (order, (id, kind, text, s, e, speaker)) in raw.iter().enumerate() {
+    for (order, (id, kind, text, s, e, speaker, style)) in raw.iter().enumerate() {
         let p = manual.get(*id);
         let has_offset = p.is_some_and(|p| p.start_offset_ms != 0 || p.end_offset_ms != 0);
         if s >= e && !has_offset {
@@ -71,6 +111,7 @@ pub fn build_items(
             end_ms,
             order,
             speaker: speaker.map(str::to_string),
+            style: *style,
         });
     }
     let known: BTreeSet<&str> = raw.iter().map(|r| r.0).collect();
@@ -101,17 +142,15 @@ pub fn missing_glyph_warnings(face: &FontFace, items: &[Item]) -> Vec<String> {
         .collect()
 }
 
-/// 字幕モードで描く役名にフォントに無い文字があるときの警告(吹き出しモードでは役名を描かないので空)。
+/// 字幕として描く台詞の役名にフォントに無い文字があるときの警告(吹き出しの台詞は役名を描かないので対象外)。
 pub fn missing_speaker_warnings(
     face: &FontFace,
     items: &[Item],
     cfg: &RenderConfig,
 ) -> Vec<String> {
-    if cfg.style != RenderStyle::Subtitle {
-        return Vec::new();
-    }
     items
         .iter()
+        .filter(|it| is_subtitle(it, cfg))
         .filter_map(|it| {
             let m = face.missing_chars(it.speaker.as_deref()?);
             (!m.is_empty()).then(|| {
@@ -159,28 +198,26 @@ pub struct SubtitleIssue {
 }
 
 /// `place_items` の結果。`clipped` は画面の大きさに切り詰めた項目の ID。
-/// `subtitle_issues` は字幕モードの問題(吹き出しモードでは常に空)。
+/// `subtitle_issues` は字幕の問題(字幕の台詞が無ければ常に空)。
 pub struct Placement {
     pub placed: BTreeMap<String, Placed>,
     pub clipped: BTreeSet<String>,
     pub subtitle_issues: Vec<SubtitleIssue>,
 }
 
-/// `bubbles` 画面で編集する項目。字幕モードでは台詞(字幕)を除き、ト書きだけにする。
+/// `bubbles` 画面で編集する項目。字幕として描く台詞を除く(吹き出しの台詞とト書きは残す)。
 pub fn editable_items(items: Vec<Item>, cfg: &RenderConfig) -> Vec<Item> {
-    if cfg.style == RenderStyle::Subtitle {
-        items
-            .into_iter()
-            .filter(|i| i.kind != ItemKind::Bubble)
-            .collect()
-    } else {
-        items
-    }
+    items.into_iter().filter(|i| !is_subtitle(i, cfg)).collect()
 }
 
-/// 字幕として描く台詞か(字幕モードの台詞)
+/// 字幕として描く台詞か(表示方式が字幕の台詞。ト書きは字幕にしない)
 fn is_subtitle(item: &Item, cfg: &RenderConfig) -> bool {
-    cfg.style == RenderStyle::Subtitle && item.kind == ItemKind::Bubble
+    item_style(item, cfg) == RenderStyle::Subtitle && item.kind == ItemKind::Bubble
+}
+
+/// 字幕として描く台詞が 1 件でもあるか。
+pub fn has_subtitle(items: &[Item], cfg: &RenderConfig) -> bool {
+    items.iter().any(|i| is_subtitle(i, cfg))
 }
 
 /// 時間の重なり(半開区間)
@@ -343,7 +380,7 @@ fn warn_subtitle_note_overlap(
 }
 
 /// 項目の位置と大きさを決める。手動の項目で枠に収まらなければ広げて警告し、残りは自動配置する。
-/// 字幕モードでは、台詞は手動配置を使わず最下段に字幕として置き、ト書きだけを今までどおり置く。
+/// 字幕として描く台詞は手動配置を使わず最下段に字幕として置き、それ以外は今までどおり置く。
 pub fn place_items(
     items: &[Item],
     manual: &BTreeMap<String, Placed>,
@@ -441,7 +478,7 @@ pub fn place_items(
     clipped.extend(manual_clipped);
     placed.extend(auto);
     let mut subtitle_issues = Vec::new();
-    if cfg.style == RenderStyle::Subtitle {
+    if has_subtitle(items, cfg) {
         let lines: Vec<&Item> = items.iter().filter(|i| is_subtitle(i, cfg)).collect();
         placed.extend(place_subtitles(
             &lines,
@@ -565,6 +602,7 @@ mod tests {
             normalize: Normalize { target_lufs: -16.0 },
             cast: vec![],
             scenes: vec![SceneEntry {
+                style: None,
                 id: "S01".into(),
                 name: None,
                 index: 1,
@@ -686,6 +724,7 @@ mod tests {
             end_ms: 1000,
             order: 0,
             speaker: None,
+            style: None,
         };
         let items = vec![item("S01-L001", "あ"), item("S01-L002", &"あ".repeat(500))];
         let mut w = Vec::new();
@@ -709,6 +748,7 @@ mod tests {
             end_ms: 1,
             order: 0,
             speaker: None,
+            style: None,
         };
         let w = missing_glyph_warnings(
             &face,
@@ -777,6 +817,7 @@ mod tests {
             end_ms: 1000,
             order: 0,
             speaker: None,
+            style: None,
         };
         let placed = crate::bubbles::Placed {
             kind: crate::ItemKind::Bubble,
@@ -846,6 +887,7 @@ mod tests {
             end_ms: e,
             order,
             speaker: (kind == ItemKind::Bubble).then(|| "A".to_string()),
+            style: None,
         }
     }
 
@@ -1224,6 +1266,134 @@ mod tests {
             (sub.pixmap.width(), sub.pixmap.height()),
             (bub.pixmap.width(), bub.pixmap.height())
         );
+    }
+
+    // ---- シーンごとの表示方式 ----
+
+    /// S01(字幕シーン)と S02(方式の指定なし)の台本。台詞とト書きが 1 件ずつ。
+    fn mixed_timeline() -> Timeline {
+        let mut tl = timeline();
+        tl.scenes[0].style = Some("subtitle".into());
+        let mut s2 = tl.scenes[0].clone();
+        s2.style = None;
+        s2.id = "S02".into();
+        s2.index = 2;
+        s2.cuts[0].id = "S02-C01".into();
+        s2.notes[0].id = "S02-N01".into();
+        tl.scenes.push(s2);
+        let mut l2 = line("S02-L001", "こんにちは。", 2000, 3000);
+        l2.scene = "S02".into();
+        tl.lines = vec![line("S01-L001", "おはよう。", 500, 1500), l2];
+        tl
+    }
+
+    fn with_style(mut it: Item, style: Option<RenderStyle>) -> Item {
+        it.style = style;
+        it
+    }
+
+    #[test]
+    fn build_items_carries_scene_style() {
+        let items = build_items(&mixed_timeline(), &BTreeMap::new(), &mut Vec::new()).unwrap();
+        let by: BTreeMap<&str, &Item> = items.iter().map(|i| (i.id.as_str(), i)).collect();
+        assert_eq!(by["S01-L001"].style, Some(RenderStyle::Subtitle));
+        assert_eq!(by["S01-N01"].style, Some(RenderStyle::Subtitle));
+        assert_eq!(by["S02-L001"].style, None);
+        assert_eq!(by["S02-N01"].style, None);
+        let mut tl = mixed_timeline();
+        tl.scenes[1].style = Some("bubble".into());
+        let items = build_items(&tl, &BTreeMap::new(), &mut Vec::new()).unwrap();
+        let by: BTreeMap<&str, &Item> = items.iter().map(|i| (i.id.as_str(), i)).collect();
+        assert_eq!(by["S02-L001"].style, Some(RenderStyle::Bubble));
+        assert_eq!(by["S02-N01"].style, Some(RenderStyle::Bubble));
+    }
+
+    #[test]
+    fn scene_style_overrides_config() {
+        let base = sub_item("S01-L001", ItemKind::Bubble, "港朝", 0, 1000, 0);
+        let bcfg = sub_cfg(RenderStyle::Bubble);
+        let scfg = sub_cfg(RenderStyle::Subtitle);
+        let sub = with_style(base.clone(), Some(RenderStyle::Subtitle));
+        let bub = with_style(base.clone(), Some(RenderStyle::Bubble));
+        assert!(is_subtitle(&sub, &bcfg));
+        assert!(!is_subtitle(&bub, &scfg));
+        assert_eq!(item_style(&sub, &bcfg), RenderStyle::Subtitle);
+        assert_eq!(item_style(&bub, &scfg), RenderStyle::Bubble);
+        // 指定が無ければ設定に従う
+        assert_eq!(item_style(&base, &bcfg), RenderStyle::Bubble);
+        assert_eq!(item_style(&base, &scfg), RenderStyle::Subtitle);
+        // ト書きは字幕にしない
+        let note = with_style(
+            sub_item("S01-N01", ItemKind::Note, "翌", 0, 1000, 1),
+            Some(RenderStyle::Subtitle),
+        );
+        assert!(!is_subtitle(&note, &bcfg));
+        assert!(has_subtitle(std::slice::from_ref(&sub), &bcfg));
+        assert!(!has_subtitle(&[bub.clone(), note], &bcfg));
+        assert!(!has_subtitle(&[bub], &scfg));
+        assert!(has_subtitle(std::slice::from_ref(&base), &scfg));
+        assert!(!has_subtitle(&[base], &bcfg));
+    }
+
+    #[test]
+    fn editable_items_drops_only_subtitle_lines() {
+        let items = vec![
+            with_style(
+                sub_item("S01-L001", ItemKind::Bubble, "港", 0, 1000, 0),
+                Some(RenderStyle::Subtitle),
+            ),
+            sub_item("S02-L001", ItemKind::Bubble, "朝", 0, 1000, 1),
+            with_style(
+                sub_item("S01-N01", ItemKind::Note, "翌", 0, 1000, 2),
+                Some(RenderStyle::Subtitle),
+            ),
+        ];
+        let got = editable_items(items, &sub_cfg(RenderStyle::Bubble));
+        assert_eq!(
+            got.iter().map(|i| i.id.as_str()).collect::<Vec<_>>(),
+            vec!["S02-L001", "S01-N01"]
+        );
+    }
+
+    #[test]
+    fn mixed_scenes_do_not_stack_bubbles_into_subtitles() {
+        let face = test_face();
+        let cfg = sub_cfg(RenderStyle::Bubble);
+        let items = vec![
+            sub_item("S01-L001", ItemKind::Bubble, "港朝", 0, 1000, 0),
+            with_style(
+                sub_item("S02-L001", ItemKind::Bubble, "港朝", 0, 1000, 1),
+                Some(RenderStyle::Subtitle),
+            ),
+        ];
+        let mut w = Vec::new();
+        let p = place_items(&items, &BTreeMap::new(), &cfg, &face, &mut w);
+        assert!(p.subtitle_issues.is_empty(), "{:?}", p.subtitle_issues);
+        let s = &p.placed["S02-L001"];
+        assert_eq!(s.y + s.h as i32, bottom(&cfg));
+        assert_eq!(s.tail, None);
+        let b = &p.placed["S01-L001"];
+        assert_eq!(b.y, cfg.margin as i32);
+        assert!(b.tail.is_some());
+        // 描画も項目ごとの方式に従う
+        let sub = draw_item(&items[1], s, false, &cfg, &face).unwrap();
+        assert!(sub.dy < 0, "字幕はラベルの分だけ上へずれるはず");
+        assert_eq!(sub.pixmap.width(), s.w);
+    }
+
+    #[test]
+    fn missing_speaker_warnings_only_for_subtitle_scene_lines() {
+        let face = test_face();
+        let cfg = sub_cfg(RenderStyle::Bubble);
+        let mut it = sub_item("S01-L001", ItemKind::Bubble, "港朝", 0, 1000, 0);
+        it.speaker = Some("龘ゑ".into());
+        assert!(missing_speaker_warnings(&face, std::slice::from_ref(&it), &cfg).is_empty());
+        let it = with_style(it, Some(RenderStyle::Subtitle));
+        let w = missing_speaker_warnings(&face, std::slice::from_ref(&it), &cfg);
+        assert_eq!(w.len(), 1, "{w:?}");
+        // 字幕モードでも吹き出しシーンの台詞は警告しない
+        let it = with_style(it, Some(RenderStyle::Bubble));
+        assert!(missing_speaker_warnings(&face, &[it], &sub_cfg(RenderStyle::Subtitle)).is_empty());
     }
 
     #[test]

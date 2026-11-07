@@ -4,6 +4,7 @@
 use std::collections::HashMap;
 use std::path::Path;
 
+use s2v_core::config::RenderStyle;
 use s2v_core::ids::{format_scene_id, LineId};
 use s2v_core::placement::{MissingReason, PlacedEvent, Placement};
 use s2v_core::time::{ceil_ms, floor_ms};
@@ -191,6 +192,10 @@ pub fn build_timeline(input: &TimelineInput<'_>) -> anyhow::Result<Timeline> {
             name: s.name.clone(),
             index: s.index,
             silent: s.silent,
+            style: s.style.map(|st| match st {
+                RenderStyle::Bubble => "bubble".to_string(),
+                RenderStyle::Subtitle => "subtitle".to_string(),
+            }),
             start_ms: floor_ms(s.start),
             end_ms: ceil_ms(s.end),
             cuts: v
@@ -373,6 +378,7 @@ mod tests {
             ],
             scenes: vec![
                 PlacedScene {
+                    style: None,
                     id: 1,
                     name: Some("朝".into()),
                     index: 1,
@@ -391,6 +397,7 @@ mod tests {
                     notes: vec![],
                 },
                 PlacedScene {
+                    style: None,
                     id: 2,
                     name: None,
                     index: 2,
@@ -641,6 +648,25 @@ mod tests {
     }
 
     #[test]
+    fn scene_style_is_converted_to_string() {
+        use s2v_core::config::RenderStyle;
+        let mut placement = sample_placement();
+        placement.scenes[0].style = Some(RenderStyle::Subtitle);
+        placement.scenes[1].style = Some(RenderStyle::Bubble);
+        let audio = sample_audio();
+        let (visuals, _) = layout_visuals(&placement.scenes, ceil_ms(216_001));
+        let input = sample_input(&placement, &audio, &visuals);
+        let v = timeline_value(&input).unwrap();
+        assert_eq!(v["scenes"][0]["style"], "subtitle");
+        assert_eq!(v["scenes"][1]["style"], "bubble");
+        let placement = sample_placement();
+        let (visuals, _) = layout_visuals(&placement.scenes, ceil_ms(216_001));
+        let input = sample_input(&placement, &audio, &visuals);
+        let v = timeline_value(&input).unwrap();
+        assert!(v["scenes"][0].get("style").is_none());
+    }
+
+    #[test]
     fn scene_zero_is_s00_and_empty_document_is_valid() {
         let mut placement = Placement::default();
         placement.lines.push(PlacedLine {
@@ -654,6 +680,7 @@ mod tests {
             flat_index: 0,
         });
         placement.scenes.push(PlacedScene {
+            style: None,
             id: 0,
             name: None,
             index: 1,
@@ -688,6 +715,7 @@ mod tests {
         let mut placement = Placement::default();
         // 台詞は S01 のシーンの中に置く(検証が台詞のシーンの存在を見る)
         placement.scenes.push(PlacedScene {
+            style: None,
             id: 1,
             name: None,
             index: 1,

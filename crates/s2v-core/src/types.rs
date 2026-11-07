@@ -86,6 +86,8 @@ pub enum ScriptCommand {
     Paragraph {
         id: Option<u32>,
         name: Option<String>,
+        /// 行末の `style=bubble|subtitle`。台本に書かれた値そのもの(引き継ぎは別処理)。
+        style: Option<crate::config::RenderStyle>,
         line_no: usize,
     },
     /// `#visual (video loop) 本文`
@@ -243,6 +245,7 @@ mod tests {
             ScriptCommand::Paragraph {
                 id: Some(1),
                 name: None,
+                style: None,
                 line_no: 1,
             },
             ScriptCommand::Visual {

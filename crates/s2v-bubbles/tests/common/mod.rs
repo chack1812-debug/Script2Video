@@ -62,6 +62,7 @@ pub fn timeline(l1_text: &str) -> Timeline {
         normalize: Normalize { target_lufs: -16.0 },
         cast: vec![],
         scenes: vec![SceneEntry {
+            style: None,
             id: "S01".into(),
             name: Some("朝".into()),
             index: 1,

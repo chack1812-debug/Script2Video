@@ -5,13 +5,14 @@ use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
-use s2v_core::config::RenderConfig;
+use s2v_core::config::{RenderConfig, RenderStyle};
 use s2v_core::Config;
 use s2v_render::assets::{match_assets, Asset, AssetKind};
 use s2v_render::bubbles::{parse_bubbles, scale_to, BubblesFile, Placed};
 use s2v_render::font::{FontFace, VerticalFeature};
 use s2v_render::scene::{
-    build_items, missing_glyph_warnings, missing_speaker_warnings, place_items, Item, Placement,
+    build_items, has_subtitle, missing_glyph_warnings, missing_speaker_warnings, place_items, Item,
+    Placement,
 };
 use s2v_render::ItemKind;
 use s2v_timeline::{Timeline, VisualKind};
@@ -154,6 +155,13 @@ pub fn prepare(
     // 項目
     let mut item_warnings = Vec::new();
     let items = build_items(&tl, &manual, &mut item_warnings)?;
+    // 設定が吹き出しでも、字幕シーンの台詞があれば字幕の本文の幅を検査する
+    // (設定が字幕なら preflight の validate で検査済み)
+    if cfg.style != RenderStyle::Subtitle && has_subtitle(&items, cfg) {
+        if let Some(e) = cfg.subtitle_body_error() {
+            return Err(e);
+        }
+    }
     item_warnings.extend(missing_glyph_warnings(&face, &items));
     item_warnings.extend(missing_speaker_warnings(&face, &items, cfg));
 

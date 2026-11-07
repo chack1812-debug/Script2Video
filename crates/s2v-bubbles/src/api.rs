@@ -17,7 +17,9 @@ use s2v_render::assets::AssetKind;
 use s2v_render::bubbles::{effective_times, validate_file, BubblesFile, Canvas, Placed};
 use s2v_render::font::FontFace;
 use s2v_render::layout::{fits, min_size};
-use s2v_render::scene::{build_items, draw_item, editable_items, layout_ctx, place_items, Item};
+use s2v_render::scene::{
+    build_items, draw_item, editable_items, layout_ctx, parse_scene_style, place_items, Item,
+};
 use s2v_render::ItemKind;
 use s2v_timeline::Timeline;
 use s2v_video::frames::{frame, plan_cuts, stacking_order, total_frames, ShownItem};
@@ -90,9 +92,17 @@ fn items_for(s: &Session, manual: &BTreeMap<String, Placed>) -> Result<Vec<Item>
     Ok(editable_items(items, &s.cfg))
 }
 
-/// 字幕モードか(台詞は編集せず、保存では手動配置をそのまま保持する)
-fn is_subtitle_style(s: &Session) -> bool {
-    s.cfg.style == RenderStyle::Subtitle
+/// 台詞 ID の所属シーンの方式が字幕か(`build_items` の `Item.style` と同じ規則。
+/// 字幕の台詞は編集せず、保存では手動配置をそのまま保持する)
+fn is_subtitle_line(s: &Session, id: &str) -> bool {
+    let style = s
+        .timeline
+        .lines
+        .iter()
+        .find(|l| l.id == id)
+        .and_then(|l| s.timeline.scenes.iter().find(|sc| sc.id == l.scene))
+        .and_then(|sc| parse_scene_style(sc.style.as_deref()));
+    style.unwrap_or(s.cfg.style) == RenderStyle::Subtitle
 }
 
 fn shown(items: &[Item]) -> Vec<ShownItem> {
@@ -515,7 +525,7 @@ fn save_with(
             continue; // 未知の ID は報告済み
         };
         // 字幕モードの台詞は使わないので、枠に収まるかは見ない
-        if is_subtitle_style(s) && kind == ItemKind::Bubble {
+        if kind == ItemKind::Bubble && is_subtitle_line(s, id) {
             continue;
         }
         if p.kind == kind && !fits(&layout_ctx(&s.face, &s.cfg, kind), text, p.w, p.h) {
@@ -534,7 +544,7 @@ fn save_with(
     let line_ids: BTreeSet<&str> = s.timeline.lines.iter().map(|l| l.id.as_str()).collect();
     for (id, p) in s.loaded.lock().unwrap_or_else(|e| e.into_inner()).iter() {
         let keep_line =
-            is_subtitle_style(s) && line_ids.contains(id.as_str()) && !manual.contains_key(id);
+            line_ids.contains(id.as_str()) && is_subtitle_line(s, id) && !manual.contains_key(id);
         if !known.contains(id.as_str()) || keep_line {
             items.insert(id.clone(), p.clone());
         }
@@ -627,6 +637,7 @@ mod tests {
             normalize: Normalize { target_lufs: -16.0 },
             cast: vec![],
             scenes: vec![SceneEntry {
+                style: None,
                 id: "S01".into(),
                 name: Some("朝".into()),
                 index: 1,
@@ -976,6 +987,86 @@ mod tests {
                 .unwrap();
         let ids: Vec<&str> = file.items.keys().map(String::as_str).collect();
         assert_eq!(ids, vec!["S01-L001"]);
+    }
+
+    /// cfg.style = Bubble で、S01 の方式だけをシーンで指定したセッション
+    fn scene_style_session(dir: &Path, scene_style: &str) -> Session {
+        let mut s = session_in(dir, "あいう");
+        s.cfg.width = 640;
+        s.cfg.height = 360;
+        s.timeline.scenes[0].style = Some(scene_style.into());
+        s.items = build_items(&s.timeline, &BTreeMap::new(), &mut Vec::new()).unwrap();
+        s
+    }
+
+    /// cfg.style = Bubble、S01 が字幕・S02 が吹き出しの同一 timeline
+    fn mixed_session(dir: &Path) -> Session {
+        let mut s = scene_style_session(dir, "subtitle");
+        let mut sc2 = s.timeline.scenes[0].clone();
+        sc2.id = "S02".into();
+        sc2.index = 2;
+        sc2.style = Some("bubble".into());
+        sc2.cuts = vec![];
+        sc2.notes = vec![NoteEntry {
+            id: "S02-N01".into(),
+            text: "夜。".into(),
+            start_ms: 0,
+            end_ms: 2_000,
+        }];
+        s.timeline.scenes.push(sc2);
+        let mut l3 = line("S02-L001", "こんばんは。", 4_000, 5_000);
+        l3.scene = "S02".into();
+        s.timeline.lines.push(l3);
+        s.items = build_items(&s.timeline, &BTreeMap::new(), &mut Vec::new()).unwrap();
+        s
+    }
+
+    #[test]
+    fn mixed_style_state_has_bubble_scene_lines_and_all_notes() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = mixed_session(dir.path());
+        let v = state_json(&s, &BTreeMap::new());
+        let ids: Vec<&str> = v["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|i| i["id"].as_str().unwrap())
+            .collect();
+        assert!(ids.contains(&"S02-L001"), "{ids:?}");
+        assert!(
+            ids.contains(&"S01-N01") && ids.contains(&"S02-N01"),
+            "{ids:?}"
+        );
+        assert!(
+            !ids.contains(&"S01-L001") && !ids.contains(&"S01-L002"),
+            "{ids:?}"
+        );
+    }
+
+    #[test]
+    fn mixed_style_save_keeps_subtitle_scene_manual_placement() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = mixed_session(dir.path());
+        // S01(字幕)の台詞の既存の手動配置を読み込み済みにして、S02(吹き出し)の台詞を保存する
+        s.loaded
+            .lock()
+            .unwrap()
+            .insert("S01-L001".into(), bubble(20, 20, 10, 10));
+        let manual = one("S02-L001", bubble(100, 40, 300, 250));
+        save(&s, &manual).unwrap();
+        let file =
+            parse_bubbles(&std::fs::read_to_string(dir.path().join("bubbles.json")).unwrap())
+                .unwrap();
+        let ids: Vec<&str> = file.items.keys().map(String::as_str).collect();
+        assert_eq!(ids, vec!["S01-L001", "S02-L001"]);
+        assert_eq!(file.items["S01-L001"], bubble(20, 20, 10, 10));
+        assert_eq!(file.items["S02-L001"], bubble(100, 40, 300, 250));
+        // 続けて保存しても S01 の配置は消えない
+        save(&s, &manual).unwrap();
+        let file =
+            parse_bubbles(&std::fs::read_to_string(dir.path().join("bubbles.json")).unwrap())
+                .unwrap();
+        assert_eq!(file.items["S01-L001"], bubble(20, 20, 10, 10));
     }
 
     #[test]

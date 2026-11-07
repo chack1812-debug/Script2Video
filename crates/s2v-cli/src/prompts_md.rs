@@ -289,6 +289,7 @@ mod tests {
             ],
             scenes: vec![
                 SceneEntry {
+                    style: None,
                     id: "S01".into(),
                     name: Some("朝の居間".into()),
                     index: 1,
@@ -318,6 +319,7 @@ mod tests {
                     }],
                 },
                 SceneEntry {
+                    style: None,
                     id: "S02".into(),
                     name: None,
                     index: 2,

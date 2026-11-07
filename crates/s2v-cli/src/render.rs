@@ -488,6 +488,7 @@ mod tests {
             end_ms: 1000,
             order: 0,
             speaker: None,
+            style: None,
         }];
         // 文字が収まらない小さな枠
         let placed: BTreeMap<String, Placed> = [(
@@ -562,6 +563,7 @@ mod tests {
             end_ms: 1000,
             order: 0,
             speaker: None,
+            style: None,
         }];
         let manual: BTreeMap<String, Placed> = [(
             "S01-L001".to_string(),

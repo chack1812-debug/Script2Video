@@ -842,3 +842,257 @@ fn subtitle_style_three_full_lines_render_and_four_lines_refuse() {
     assert!(!p.output().exists());
     assert!(p.log().contains("(4 行)"), "{}", p.log());
 }
+
+/// 字幕の本文が 1 文字(font_size 16)に満たない字幕の余白(幅 320 - 余白 2*8 - 2*150 = 4)。
+/// 設定は吹き出し(既定)のままなので、設定の検査(validate)は通る。
+const NARROW_SUBTITLE_BODY: &str = "subtitle_padding = 150";
+
+#[test]
+fn bubble_config_with_subtitle_scene_checks_subtitle_body_width() {
+    if skip() {
+        return;
+    }
+    let assets = || {
+        [
+            ("S01.png", Asset::Png(RED)),
+            ("S02.png", Asset::Png([20, 230, 20])),
+        ]
+    };
+    // 字幕のシーンがある台本は、本文の幅が足りないので止まる
+    let mixed = "#paragraph[S01] 朝 style=subtitle\n#visual (image) 朝。\n[S01-L001] A:おはよう。\n#paragraph[S02] 昼 style=bubble\n#visual (image) 昼。\n[S02-L001] A:おはよう。\n";
+    let p = project(mixed, &assets(), 30, NARROW_SUBTITLE_BODY);
+    assert_eq!(p.render(), Outcome::Failed, "{}", p.log());
+    assert!(!p.output().exists());
+    assert!(p.log().contains("render.subtitle_padding"), "{}", p.log());
+
+    // 同じ設定でも、全シーンが吹き出しなら字幕の本文の幅は問わない
+    let bubbles = "#paragraph[S01] 朝\n#visual (image) 朝。\n[S01-L001] A:おはよう。\n#paragraph[S02] 昼 style=bubble\n#visual (image) 昼。\n[S02-L001] A:おはよう。\n";
+    let p = project(bubbles, &assets(), 30, NARROW_SUBTITLE_BODY);
+    p.render_ok();
+    assert!(p.output().is_file(), "{}", p.log());
+    assert!(!p.log().contains("render.subtitle_padding"), "{}", p.log());
+}
+
+/// 画面の下端から数えて、字幕が入る帯(余白 40 + 3 行ぶん)に当たる領域の上端の y。
+const SUBTITLE_TOP: usize = H - 100;
+
+/// 領域 [y0, y1) の白(字幕の文字・吹き出しの塗り)の画素数。
+fn white_in_rows(buf: &[u8], y0: usize, y1: usize) -> usize {
+    count_near(&buf[y0 * W * 3..y1 * W * 3], [255, 255, 255], 3)
+}
+
+fn mid_frame(p: &Project, id: &str) -> Vec<u8> {
+    let tl = p.timeline();
+    let l = tl.lines.iter().find(|l| l.id == id).expect(id);
+    frame_rgb(
+        &p.output(),
+        (frame(l.start_ms, 30) + frame(l.end_ms, 30)) / 2,
+    )
+}
+
+#[test]
+fn mixed_styles_render_one_video() {
+    if skip() {
+        return;
+    }
+    // config.toml の既定は吹き出し。S01 だけ字幕、S02 は吹き出し
+    let body = "#paragraph[S01] 朝 style=subtitle\n#visual (image) 朝。\n[S01-L001] A:おはよう、今日もいい天気だね。\n#paragraph[S02] 昼 style=bubble\n#visual (image) 昼。\n[S02-L001] A:おはよう、今日もいい天気だね。\n";
+    let assets = [("S01.png", Asset::Png(RED)), ("S02.png", Asset::Png(RED))];
+    let p = project(body, &assets, 30, "");
+    p.render_ok();
+    assert!(p.output().is_file(), "{}", p.log());
+
+    let sub = mid_frame(&p, "S01-L001");
+    let bub = mid_frame(&p, "S02-L001");
+    let (sub_bottom, sub_rest) = (
+        white_in_rows(&sub, SUBTITLE_TOP, H),
+        white_in_rows(&sub, 0, SUBTITLE_TOP),
+    );
+    let (bub_bottom, bub_rest) = (
+        white_in_rows(&bub, SUBTITLE_TOP, H),
+        white_in_rows(&bub, 0, SUBTITLE_TOP),
+    );
+    // 字幕のシーン: 最下段に白い文字があり、白い塗りの吹き出しは無い
+    // (上の領域の白は発言者名のラベルの文字だけ。吹き出しの塗りは数千画素になる)
+    assert!(sub_bottom > 30, "字幕の文字がありません: {sub_bottom}");
+    assert!(
+        sub_rest + sub_bottom < 1000,
+        "字幕のシーンに吹き出しが出ています: bottom={sub_bottom} rest={sub_rest}"
+    );
+    // 吹き出しのシーン: 白い塗りの枠が大きく出ている(字幕の文字より桁違いに多い)
+    assert!(
+        bub_rest + bub_bottom > 3000,
+        "吹き出しの枠がありません: {}",
+        bub_rest + bub_bottom
+    );
+    assert!(
+        bub_rest > 5 * sub_rest.max(1),
+        "吹き出しの枠が少なすぎます: bub_rest={bub_rest} sub_rest={sub_rest}"
+    );
+}
+
+#[test]
+fn subtitle_scene_four_lines_refuses_but_bubble_scene_long_line_does_not() {
+    if skip() {
+        return;
+    }
+    let long = "あ".repeat(60);
+    let assets = || [("S01.png", Asset::Png(RED)), ("S02.png", Asset::Png(RED))];
+    // 字幕のシーンに長い台詞 → 止まる
+    let body = format!(
+        "#paragraph[S01] 朝 style=subtitle\n#visual (image) 朝。\n[S01-L001] A:{long}\n#paragraph[S02] 昼 style=bubble\n#visual (image) 昼。\n[S02-L001] A:おはよう。\n"
+    );
+    let p = project(&body, &assets(), 30, "");
+    assert_eq!(p.render(), Outcome::Warnings, "{}", p.log());
+    assert!(!p.output().exists());
+    assert!(
+        p.log().contains("S01-L001 A: 台詞が四行以上"),
+        "{}",
+        p.log()
+    );
+
+    // 同じ長さの台詞が吹き出しのシーンだけにある → 止まらない
+    let body = format!(
+        "#paragraph[S01] 朝 style=subtitle\n#visual (image) 朝。\n[S01-L001] A:おはよう。\n#paragraph[S02] 昼 style=bubble\n#visual (image) 昼。\n[S02-L001] A:{long}\n"
+    );
+    let p = project(&body, &assets(), 30, "");
+    let o = p.render();
+    assert_ne!(o, Outcome::Failed, "{}", p.log());
+    assert!(p.output().is_file(), "{}", p.log());
+    assert!(!p.log().contains("台詞が四行以上"), "{}", p.log());
+}
+
+#[test]
+fn scene_without_style_inherits_previous_scene_style_until_changed() {
+    if skip() {
+        return;
+    }
+    let assets = || {
+        [
+            ("S01.png", Asset::Png(RED)),
+            ("S02.png", Asset::Png(RED)),
+            ("S03.png", Asset::Png(RED)),
+        ]
+    };
+    let t = "おはよう、今日もいい天気だね。";
+    // S01 だけ style=subtitle、S02 は無指定(引き継ぐ)、S03 は style=bubble(吹き出しに戻る)。config は既定(吹き出し)。
+    let body = format!(
+        "#paragraph[S01] 朝 style=subtitle
+#visual (image) 朝。
+[S01-L001] A:{t}
+#paragraph[S02] 昼
+#visual (image) 昼。
+[S02-L001] A:{t}
+#paragraph[S03] 夜 style=bubble
+#visual (image) 夜。
+[S03-L001] A:{t}
+"
+    );
+    let p = project(&body, &assets(), 30, "");
+    p.render_ok();
+    assert!(p.output().is_file(), "{}", p.log());
+    let total = |id: &str| {
+        let b = mid_frame(&p, id);
+        (white_in_rows(&b, SUBTITLE_TOP, H), white_in_rows(&b, 0, H))
+    };
+    let (s1_bottom, s1) = total("S01-L001");
+    let (s2_bottom, s2) = total("S02-L001");
+    let (_, s3) = total("S03-L001");
+    assert!(s1_bottom > 30 && s1 < 1000, "S01: {s1_bottom}/{s1}");
+    assert!(
+        s2_bottom > 30 && s2 < 1000,
+        "S02 が字幕でありません: {s2_bottom}/{s2}"
+    );
+    assert!(s3 > 3000, "S03 が吹き出しでありません: {s3}");
+
+    // 引き継いだ S02 にも字幕の規則(4 行以上は止まる)がかかる
+    let long = "あ".repeat(60);
+    let body = format!(
+        "#paragraph[S01] 朝 style=subtitle
+#visual (image) 朝。
+[S01-L001] A:おはよう。
+#paragraph[S02] 昼
+#visual (image) 昼。
+[S02-L001] A:{long}
+"
+    );
+    let p = project(&body, &assets(), 30, "");
+    assert_eq!(p.render(), Outcome::Warnings, "{}", p.log());
+    assert!(!p.output().exists());
+    assert!(
+        p.log().contains("S02-L001 A: 台詞が四行以上"),
+        "{}",
+        p.log()
+    );
+}
+
+/// 全シーンの各台詞の中間フレーム(RGB 全体)を集める。
+fn all_mid_frames(p: &Project) -> Vec<Vec<u8>> {
+    let tl = p.timeline();
+    let ids: Vec<String> = tl.lines.iter().map(|l| l.id.clone()).collect();
+    assert!(ids.len() >= 4, "台詞が少なすぎます: {ids:?}");
+    ids.iter().map(|id| mid_frame(p, id)).collect()
+}
+
+fn three_scene_body(style: &str) -> String {
+    let t = "おはよう、今日もいい天気だね。";
+    let mut s = String::new();
+    for (i, name) in ["朝", "昼", "夜"].iter().enumerate() {
+        let n = i + 1;
+        s.push_str(&format!(
+            "#paragraph[S0{n}] {name}{style}\n#visual (image) {name}。\n[S0{n}-L001] A:{t}\n[S0{n}-L002] A:{t}\n"
+        ));
+    }
+    s
+}
+
+fn three_scene_assets() -> [(&'static str, Asset); 3] {
+    [
+        ("S01.png", Asset::Png(RED)),
+        ("S02.png", Asset::Png(RED)),
+        ("S03.png", Asset::Png(RED)),
+    ]
+}
+
+fn render_frames(style_attr: &str, extra: &str) -> Vec<Vec<u8>> {
+    let p = project(
+        &three_scene_body(style_attr),
+        &three_scene_assets(),
+        30,
+        extra,
+    );
+    p.render_ok();
+    assert!(p.output().is_file(), "{}", p.log());
+    all_mid_frames(&p)
+}
+
+#[test]
+fn script_without_style_renders_same_as_explicit_bubble_under_default_config() {
+    if skip() {
+        return;
+    }
+    let none = render_frames("", "");
+    let explicit = render_frames(" style=bubble", "");
+    assert_eq!(
+        none, explicit,
+        "style= なしと style=bubble でフレームが違います"
+    );
+    // 自明に通らないための確認: 字幕とは別物
+    let subtitle = render_frames(" style=subtitle", "");
+    assert_ne!(none, subtitle);
+}
+
+#[test]
+fn script_without_style_renders_same_as_explicit_subtitle_under_subtitle_config() {
+    if skip() {
+        return;
+    }
+    let none = render_frames("", SUBTITLE);
+    let explicit = render_frames(" style=subtitle", SUBTITLE);
+    assert_eq!(
+        none, explicit,
+        "style= なしと style=subtitle でフレームが違います"
+    );
+    let bubble = render_frames(" style=bubble", SUBTITLE);
+    assert_ne!(none, bubble);
+}

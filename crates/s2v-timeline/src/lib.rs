@@ -45,6 +45,9 @@ pub struct SceneEntry {
     pub end_ms: i64,
     pub cuts: Vec<CutEntry>,
     pub notes: Vec<NoteEntry>,
+    /// 台詞の見せ方(`"bubble"` / `"subtitle"`)。引き継ぎは解決済み。無ければ省略
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub style: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]

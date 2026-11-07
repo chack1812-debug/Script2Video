@@ -795,6 +795,20 @@ mod tests {
     }
 
     #[test]
+    fn paragraph_style_token_is_kept_when_numbering() {
+        let n = run(
+            "#paragraph style=subtitle\nA:x\n#paragraph 朝 style=bubble\n",
+            &IdsRecord::default(),
+        );
+        assert_eq!(
+            n.text,
+            script(
+                "#paragraph[S01] style=subtitle\n[S01-L001] A:x\n#paragraph[S02] 朝 style=bubble\n"
+            )
+        );
+    }
+
+    #[test]
     fn paragraph_like_command_is_untouched() {
         let src = script("#paragraphXYZ\n#paragraph[S01]\n");
         let n = number_script(&src, &IdsRecord::default()).unwrap();

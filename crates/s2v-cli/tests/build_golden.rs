@@ -1202,6 +1202,49 @@ fn unnumbered_cut_fails_build() {
 }
 
 #[test]
+fn bad_style_value_stops_build() {
+    let f = fixture(&SCRIPT.replace("#paragraph[S01] 朝\n", "#paragraph[S01] 朝 style=foo\n"));
+    fs::write(f.dir.join("output.mp4"), b"keep").unwrap();
+    let out = std::process::Command::new(env!("CARGO_BIN_EXE_script2video"))
+        .arg("build")
+        .arg(&f.script)
+        .arg("--voice-dir")
+        .arg(&f.voices)
+        .output()
+        .unwrap();
+    assert_eq!(out.status.code(), Some(2));
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(stderr.contains("style=foo"), "{stderr}");
+    assert!(stderr.contains("bubble か subtitle"), "{stderr}");
+    assert_eq!(fs::read(f.dir.join("output.mp4")).unwrap(), b"keep");
+    assert!(!f.dir.join("timeline").join("timeline.json").exists());
+}
+
+#[test]
+fn no_style_script_has_no_style_key_in_timeline_json() {
+    let f = fixture(SCRIPT);
+    assert_ne!(run_build(&args(&f, None, false)), Outcome::Failed);
+    let v = read_json(&f.dir.join("timeline").join("timeline.json"));
+    let scenes = v["scenes"].as_array().expect("scenes");
+    assert!(!scenes.is_empty());
+    for s in scenes {
+        assert!(s.get("style").is_none(), "{s}");
+    }
+
+    // style= を書いたシーンだけに "style" が出る
+    let f = fixture(&SCRIPT.replace(
+        "#paragraph[S01] 朝\n",
+        "#paragraph[S01] 朝 style=subtitle\n",
+    ));
+    assert_ne!(run_build(&args(&f, None, false)), Outcome::Failed);
+    let v = read_json(&f.dir.join("timeline").join("timeline.json"));
+    let scenes = v["scenes"].as_array().unwrap();
+    let with: Vec<_> = scenes.iter().filter(|s| s.get("style").is_some()).collect();
+    assert!(!with.is_empty(), "{v}");
+    assert!(with.iter().all(|s| s["style"] == "subtitle"), "{v}");
+}
+
+#[test]
 fn unpadded_and_uppercase_voice_file_names_build_and_validate() {
     // 台本仕様 §3.1: 桁数・大文字小文字は区別しない。実ファイル名は files にそのまま残る
     let f = fixture(SCRIPT);

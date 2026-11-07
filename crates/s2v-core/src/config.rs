@@ -484,6 +484,20 @@ impl RenderConfig {
         Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
     }
 
+    /// 字幕の本文の幅が 1 文字(`font_size`)に満たないときのエラー(`style` によらず判定する)。
+    /// `validate` は `style = "subtitle"` のときだけ、`render` は字幕の台詞があるときに使う。
+    pub fn subtitle_body_error(&self) -> Option<String> {
+        let body = i64::from(self.width)
+            - 2 * i64::from(self.margin)
+            - 2 * i64::from(self.subtitle_padding);
+        ((body as f64) < f64::from(self.font_size)).then(|| {
+            format!(
+                "render.subtitle_padding は字幕の本文を 1 文字(font_size)以上確保できる大きさにしてください: {}",
+                self.subtitle_padding
+            )
+        })
+    }
+
     fn validate_into(&self, e: &mut Vec<String>) {
         fn even_range(e: &mut Vec<String>, name: &str, v: u32, lo: u32, hi: u32) {
             if !(lo..=hi).contains(&v) || !v.is_multiple_of(2) {
@@ -598,15 +612,7 @@ impl RenderConfig {
         int_range(e, "subtitle_padding", self.subtitle_padding, 0, 500);
         int_range(e, "speaker_padding", self.speaker_padding, 0, 500);
         if self.style == RenderStyle::Subtitle {
-            let body = i64::from(self.width)
-                - 2 * i64::from(self.margin)
-                - 2 * i64::from(self.subtitle_padding);
-            if (body as f64) < f64::from(self.font_size) {
-                e.push(format!(
-                    "render.subtitle_padding は字幕の本文を 1 文字(font_size)以上確保できる大きさにしてください: {}",
-                    self.subtitle_padding
-                ));
-            }
+            e.extend(self.subtitle_body_error());
         }
         int_range(
             e,
@@ -963,6 +969,22 @@ request_timeout_s = 5
         );
         c.render.style = RenderStyle::Bubble;
         assert!(c.validate().is_empty(), "{:?}", c.validate());
+    }
+
+    #[test]
+    fn subtitle_body_error_matches_validate() {
+        let mut c = Config::builtin();
+        assert_eq!(c.render.subtitle_body_error(), None);
+        c.render.width = 320;
+        c.render.subtitle_padding = 500;
+        let msg = c.render.subtitle_body_error().expect("本文幅が足りない");
+        assert!(msg.contains("render.subtitle_padding"), "{msg}");
+        c.render.style = RenderStyle::Subtitle;
+        assert!(c.validate().contains(&msg), "{:?}", c.validate());
+        c.render.style = RenderStyle::Bubble;
+        assert!(!c.validate().contains(&msg), "{:?}", c.validate());
+        // 方式によらず同じ結果
+        assert_eq!(c.render.subtitle_body_error(), Some(msg));
     }
 
     #[test]

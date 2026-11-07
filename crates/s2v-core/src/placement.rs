@@ -4,6 +4,7 @@ use std::collections::HashMap;
 
 use serde::Serialize;
 
+use crate::config::RenderStyle;
 use crate::ids::{format_cut_id, format_scene_id, LineId};
 use crate::time::ms_to_samples;
 use crate::types::{PauseConfig, Scene, ScriptCommand, ScriptItem, SeAnchor, VisualKind};
@@ -118,6 +119,8 @@ pub struct PlacedScene {
     /// 常に 1 つ以上。先頭は C01
     pub cuts: Vec<PlacedCut>,
     pub notes: Vec<PlacedNote>,
+    /// 台詞の見せ方。省略したシーンは直前のシーンから引き継いだ値(最初まで `None`)
+    pub style: Option<RenderStyle>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -177,13 +180,15 @@ struct OpenScene {
     span: Option<(i64, i64)>,
     cuts: Vec<PlacedCut>,
     notes: Vec<PlacedNote>,
+    style: Option<RenderStyle>,
 }
 
 impl OpenScene {
-    fn new(id: u32, name: Option<String>, open_cursor: i64) -> Self {
+    fn new(id: u32, name: Option<String>, open_cursor: i64, style: Option<RenderStyle>) -> Self {
         Self {
             id,
             name,
+            style,
             open_cursor,
             pause_total: 0,
             span: None,
@@ -223,6 +228,8 @@ pub fn place(
     let mut any_line = false;
     let mut first_in_scene = true;
     let mut open: Option<OpenScene> = None;
+    // 直近の #paragraph の style=(省略したシーンはこれを引き継ぐ)
+    let mut current_style: Option<RenderStyle> = None;
     let mut closed: Vec<OpenScene> = Vec::new();
     // 台詞ID (シーン, 台詞番号) -> (開始, 終了)。台詞番号はシーンごとに1から数える
     let mut spans: HashMap<(u32, u32), (i64, i64)> = HashMap::new();
@@ -234,11 +241,21 @@ pub fn place(
     for (flat_index, fi) in items.iter().enumerate() {
         match fi.item {
             ScriptItem::Command(cmd) => match cmd {
-                ScriptCommand::Paragraph { id, name, .. } => {
+                ScriptCommand::Paragraph {
+                    id, name, style, ..
+                } => {
                     if let Some(s) = open.take() {
                         closed.push(s);
                     }
-                    open = Some(OpenScene::new(id.unwrap_or(0), name.clone(), cursor));
+                    if style.is_some() {
+                        current_style = *style;
+                    }
+                    open = Some(OpenScene::new(
+                        id.unwrap_or(0),
+                        name.clone(),
+                        cursor,
+                        current_style,
+                    ));
                     first_in_scene = true;
                 }
                 ScriptCommand::Visual {
@@ -275,7 +292,7 @@ pub fn place(
                 },
                 ScriptCommand::Cut { id, .. } => {
                     if open.is_none() {
-                        open = Some(OpenScene::new(0, None, cursor));
+                        open = Some(OpenScene::new(0, None, cursor, current_style));
                         first_in_scene = true;
                     }
                     let s = open.as_mut().expect("直前で開いている");
@@ -287,7 +304,7 @@ pub fn place(
                 }
                 ScriptCommand::Note { id, text, .. } => {
                     if open.is_none() {
-                        open = Some(OpenScene::new(0, None, cursor));
+                        open = Some(OpenScene::new(0, None, cursor, current_style));
                         first_in_scene = true;
                     }
                     let s = open.as_mut().expect("直前で開いている");
@@ -350,7 +367,7 @@ pub fn place(
                 // ID の無い台詞は検証(validate)で弾かれる
                 let Some(id) = *id else { continue };
                 if open.is_none() {
-                    open = Some(OpenScene::new(0, None, cursor));
+                    open = Some(OpenScene::new(0, None, cursor, current_style));
                     first_in_scene = true;
                 }
                 let (len, missing) = match sources.get(&id) {
@@ -513,6 +530,7 @@ pub fn place(
             end,
             cuts: s.cuts,
             notes: s.notes,
+            style: s.style,
         });
     }
     p.end_cursor = cursor;
@@ -607,6 +625,28 @@ mod tests {
         assert_eq!(line_ms(&p, 2), (1000.0, 2000.0));
         assert_eq!(line_ms(&p, 3), (1900.0, 2900.0));
         assert_eq!(line_ms(&p, 4), (5300.0, 6300.0));
+    }
+
+    #[test]
+    fn scene_style_is_inherited_until_changed() {
+        let s = scenes("#paragraph[S01]\n[S01-L001] A:一\n#paragraph[S02] style=subtitle\n[S02-L001] A:二\n#paragraph[S03]\n[S03-L001] A:三\n#paragraph[S04] style=bubble\n[S04-L001] A:四\n");
+        let src = present(&[
+            (1, 1, 1000.0),
+            (2, 1, 1000.0),
+            (3, 1, 1000.0),
+            (4, 1, 1000.0),
+        ]);
+        let p = place(&flatten(&s), &src, 200);
+        let styles: Vec<_> = p.scenes.iter().map(|s| s.style).collect();
+        assert_eq!(
+            styles,
+            vec![
+                None,
+                Some(RenderStyle::Subtitle),
+                Some(RenderStyle::Subtitle),
+                Some(RenderStyle::Bubble)
+            ]
+        );
     }
 
     #[test]

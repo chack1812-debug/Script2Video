@@ -75,6 +75,7 @@ mod tests {
             normalize: Normalize { target_lufs: -16.0 },
             cast: vec![],
             scenes: vec![SceneEntry {
+                style: None,
                 id: "S01".to_string(),
                 name: None,
                 index: 1,

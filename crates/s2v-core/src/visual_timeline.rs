@@ -114,6 +114,7 @@ mod tests {
             });
         }
         PlacedScene {
+            style: None,
             id,
             name: None,
             index: 0,

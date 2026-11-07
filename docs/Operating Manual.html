@@ -133,7 +133,7 @@ footer { margin-top: 64px; color: var(--muted); font-size: 13px; border-top: 1px
 <div class="layout">
 <nav class="toc" aria-label="目次">
   <div class="brand">Script2Video</div>
-  <div class="ver">取扱説明書(v0.2.14・2026-11-06 時点)</div>
+  <div class="ver">取扱説明書(v0.2.20・2026-11-07 時点)</div>
   <ol>
     <li><a href="#overview">1. 概要と作業の流れ</a></li>
     <li><a href="#install">2. インストールと前提</a></li>
@@ -167,7 +167,7 @@ footer { margin-top: 64px; color: var(--muted); font-size: 13px; border-top: 1px
 
 <main>
 <h1>Script2Video 取扱説明書</h1>
-<p class="lead">台本と収録音声から、音声・字幕・タイムラインを作り、画像・動画の素材と縦書きの吹き出し・ト書きを合成して、完成動画 <code>output.mp4</code> を書き出すコマンドラインツールです。この説明書は v0.2.14(2026-11-06 時点)に合わせています。v0.2.1 で、台詞を最下段の横書きの字幕で出す字幕モード(<a href="#subtitle">字幕モード</a>)を追加しました。</p>
+<p class="lead">台本と収録音声から、音声・字幕・タイムラインを作り、画像・動画の素材と縦書きの吹き出し・ト書きを合成して、完成動画 <code>output.mp4</code> を書き出すコマンドラインツールです。この説明書は v0.2.20(2026-11-07 時点)に合わせています。v0.2.1 で、台詞を最下段の横書きの字幕で出す字幕モード(<a href="#subtitle">字幕モード</a>)を追加しました。v0.2.20 で、台本の <code>#paragraph</code> に <code>style=</code> を書いて、シーンごとに字幕と吹き出しを切り替えられるようにしました。</p>
 
 <!-- 1 -->
 <h2 id="overview">1. 概要と作業の流れ</h2>
@@ -205,7 +205,7 @@ script2video render  第1話.txt [--config 設定.toml]</code></pre>
 <!-- 2 -->
 <h2 id="install">2. インストールと前提</h2>
 <h3>インストール(配布パッケージ)</h3>
-<p>Rust は不要です。<a href="https://umacodeworks.jp/script2video.html">宇摩コードワークスのサイト</a>から <code>Script2Video_v0.2.14.zip</code> をダウンロードし、PATH の通ったフォルダに展開します。ffmpeg は同梱していないので、展開した <code>install-ffmpeg.ps1</code> を PowerShell で実行して入れます。<code>script2video --help</code> で動作を確認します。</p>
+<p>Rust は不要です。<a href="https://umacodeworks.jp/script2video.html">宇摩コードワークスのサイト</a>から <code>Script2Video_v0.2.20.zip</code> をダウンロードし、PATH の通ったフォルダに展開します。ffmpeg は同梱していないので、展開した <code>install-ffmpeg.ps1</code> を PowerShell で実行して入れます。<code>script2video --help</code> で動作を確認します。</p>
 <h3>インストール(ソースからビルド)</h3>
 <pre><code># リポジトリの直下で実行。~/.cargo/bin/script2video.exe に入ります(PATH に ~/.cargo/bin が必要)
 cargo install --path crates/s2v-cli --locked
@@ -315,7 +315,7 @@ paragraph 1000
 <li><strong>カット</strong>は、その行の時点から、次の <code>#cut</code> かシーンの終わりまで続きます。カットごとに素材を 1 つ置きます(<a href="#assets">8. 素材の置き方</a>)。</li>
 <li><strong><code>#visual</code> の印</strong>: <code>image</code>・<code>video</code> は素材の種類の希望(省略すると未指定)、<code>loop</code> は動画の素材がカットより短いときに繰り返す指定です。<code>loop</code> が無い動画は、最後のコマで止まります。</li>
 <li><strong>ト書き</strong>は、その行の時点から、同じシーンの次の <code>#note</code>・次の <code>#cut</code>・シーンの終わりのうち、最も早いところまで表示します。</li>
-<li><strong>吹き出し</strong>は、台詞の音声が鳴っている間だけ表示します。位置と大きさは自動で決まり、<code>bubbles</code> で手動に直せます。<code>config.toml</code> で <code>style = "subtitle"</code> にすると、台詞は吹き出しではなく最下段の字幕になります(<a href="#subtitle">字幕モード</a>)。字幕では 1 台詞が最大 3 行です。</li>
+<li><strong>吹き出し</strong>は、台詞の音声が鳴っている間だけ表示します。位置と大きさは自動で決まり、<code>bubbles</code> で手動に直せます。<code>config.toml</code> で <code>style = "subtitle"</code> にする(台本の最初の <code>style=</code> より前のシーンの既定になる。以後の <code>style=</code> のないシーンは直前のシーンの方式を引き継ぐ)か、台本の <code>#paragraph</code> に <code>style=subtitle</code> を書くと、そのシーンの台詞は吹き出しではなく最下段の字幕になります(<a href="#subtitle">字幕モード</a>)。字幕では 1 台詞が最大 3 行です。</li>
 </ul>
 
 <!-- 5 -->
@@ -399,7 +399,7 @@ script2video build 第1話.txt --voice-dir 収録/     # 収録を別の場所�
 script2video bubbles 第1話.txt --port 8765 --no-open</code></pre>
 <p>自動配置された吹き出し・ト書きを、ブラウザの画面で動かしたり、大きさ・尻尾・表示の時刻を直したりして、<code>bubbles.json</code> に保存します。<code>render</code> はこの配置を使います。調整しない項目は、毎回自動で配置されます。</p>
 <ul>
-<li><code>style = "subtitle"</code>(字幕モード)のときは、台詞を出さずト書きだけを出します。保存しても <code>bubbles.json</code> の台詞の手動配置は消さずに残します。<code>bubbles</code> 画面での文字サイズの設定は未対応です。</li>
+<li>字幕として描かれるシーン(<code>style = "subtitle"</code> の字幕モード、または台本の <code>style=subtitle</code> のシーン)の台詞は出さず、ト書きだけを出します。保存しても <code>bubbles.json</code> の台詞の手動配置は消さずに残します。<code>bubbles</code> 画面での文字サイズの設定は未対応です。</li>
 <li>起動すると <code>http://127.0.0.1:&lt;ポート&gt;/?token=…</code> の 1 行を表示し、既定のブラウザで開きます(Windows)。開けなかったときや <code>--no-open</code> のときは、表示された URL を自分で開きます。</li>
 <li><code>--port</code> を省くと、空いているポートを自動で選びます。</li>
 <li>先に <code>build</code> を済ませておきます。ffmpeg・ffprobe とフォントの検査は <code>render</code> と同じです。</li>
@@ -461,7 +461,7 @@ script2video bubbles 第1話.txt --port 8765 --no-open</code></pre>
 <li>吹き出しとト書きは縦書きで描き、手動の配置が無い項目は自動で配置します。</li>
 <li>自動の吹き出しが長すぎて画面に入らないときは、画面の大きさに切り詰めて警告します(終了コード 1)。手動の項目の文字が保存した枠に入らないときは、枠を広げて警告します。</li>
 <li>フォントに無い文字は、項目ごとに警告して代わりの字形で描きます。</li>
-<li><code>style = "subtitle"</code> のときは、台詞を縦書きの吹き出しでなく横書きの字幕で描きます(<a href="#subtitle">字幕モード</a>)。台詞が四行以上になると、<code>output.mp4</code> を作らずに終了コード 1 で止まります。</li>
+<li>字幕として描かれるシーン(<code>style = "subtitle"</code>、または台本の <code>style=subtitle</code>)では、台詞を縦書きの吹き出しでなく横書きの字幕で描きます(<a href="#subtitle">字幕モード</a>)。台詞が四行以上になると、<code>output.mp4</code> を作らずに終了コード 1 で止まります。</li>
 <li>書き出した動画は、寸法・コマ数・音声の長さとずれを検査してから <code>output.mp4</code> に置き換えます。失敗したときは前回の <code>output.mp4</code> を変えません。</li>
 </ul>
 <div class="note warn">
@@ -488,13 +488,20 @@ script2video bubbles 第1話.txt --port 8765 --no-open</code></pre>
 </table>
 
 <h3 id="subtitle">字幕モード(style = "subtitle")</h3>
-<p><code>config.toml</code> の <code>[render]</code> で <code>style = "subtitle"</code> にすると、<code>render</code> は台詞を画面の最下段に横書きの字幕で出します(切り替えはこの設定だけで、コマンドラインのオプションはありません)。<code>style = "bubble"</code>(既定・省略時)の動作は従来と同じです。</p>
+<p><code>config.toml</code> の <code>[render]</code> で <code>style = "subtitle"</code> にすると、台本の最初の <code>style=</code> より前のシーン(と最初の <code>#paragraph</code> より前の台詞)の台詞を、<code>render</code> は画面の最下段に横書きの字幕で出します(この設定は最初の <code>style=</code> が現れるまでの既定で、台本の <code>#paragraph</code> の <code>style=</code> が優先し、以後の <code>style=</code> のないシーンは直前のシーンを引き継ぎます。コマンドラインのオプションはありません)。<code>style = "bubble"</code>(既定・省略時)の動作は従来と同じです。</p>
 <ul>
 <li>字幕は台詞の音声が鳴っている間だけ表示します。幅は画面の幅から左右の <code>margin</code> を除いたもので、本文は最大 3 行です。折り返しは字幕の幅と <code>font_size</code> で決まります。</li>
 <li>発言者名(<code>@cast</code> の役名)は、帯の上辺の左上に接する囲みのラベルで出します。行数には数えません。役名が空ならラベルは出ません。<code>subtitle_show_speaker = false</code> にすると、役名があってもラベルを出しません。</li>
 <li>同じ時刻に複数の字幕が出るときは、下から上へ積み上げます。</li>
 <li>ト書きは字幕モードでも変わりません(縦書き・同じ枠・同じ自動配置)。字幕とト書きが時間も位置も重なると警告します(出力は作ります。終了コード 1)。帯が見える(塗りが透明でない、または枠線がある)ときは帯と発言者名の範囲で、帯が見えないときは画面に出る発言者名と文字の範囲で判定します。</li>
 <li>文字の大きさは <code>font_size</code> で、吹き出し・ト書き・字幕で共通です。字幕だけの文字サイズの項目はありません。</li>
+</ul>
+<p>台本の <code>#paragraph</code> の行の最後に <code>style=bubble</code> / <code>style=subtitle</code> を書くと、シーンごとに切り替えられます(例: <code>#paragraph[S02] 港の朝 style=subtitle</code>)。</p>
+<ul>
+<li><code>style=</code> は行の最後の語だけが読まれます。名称の途中にあるものは名称の一部で、複数あれば最後の 1 つだけが指定になります。値は小文字の <code>bubble</code> / <code>subtitle</code> だけで、それ以外(空、<code>Bubble</code> など)はエラーです(<code>build</code> は終了コード 2 で止まります)。</li>
+<li>省略したシーンは直前のシーンの方式を引き継ぎます。台本の最初の <code>style=</code> より前のシーン(と最初の <code>#paragraph</code> より前の台詞)は <code>config.toml</code> の <code>[render] style</code> に従います。元に戻すときは <code>style=bubble</code> と書きます。</li>
+<li>字幕のシーンは上の字幕モードの規則(最大 3 行など)に従い、字幕の見た目の設定は全シーンで共通です。ト書きはどちらのシーンでも出ます。<code>number</code> は <code>style=</code> をそのまま残します。<code>style=</code> を書かない台本は従来と同じに動きます。</li>
+<li><code>bubbles</code> 画面には字幕のシーンの台詞は出ません。保存しても、そのシーンの台詞の手動配置は消さずに残します。</li>
 </ul>
 <table>
 <thead><tr><th>キー</th><th>既定</th><th>意味</th></tr></thead>
@@ -603,7 +610,7 @@ script2video bubbles 第1話.txt --port 8765 --no-open</code></pre>
 </div>
 <p>開発者向けの設計は <code>docs/superpowers/specs/</code>、台本の詳しい規則は <code>台本仕様.md</code>、コマンドの詳細は <code>README.md</code> を参照してください。</p>
 
-<footer>Script2Video 取扱説明書 — v0.2.14(2026-11-06 時点)に基づく。</footer>
+<footer>Script2Video 取扱説明書 — v0.2.20(2026-11-07 時点)に基づく。</footer>
 </main>
 </div>
 </body>

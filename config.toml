@@ -79,8 +79,8 @@ bubble_gap = 24              # 吹き出し同士の間隔
 tail_length = 80             # 吹き出しの尻尾の長さ
 bubble_max_height_ratio = 0.55  # 吹き出しの高さの上限(画面の高さの比)
 note_max_height_ratio = 0.6     # ト書きの高さの上限(画面の高さの比)
-style = "bubble"             # 台詞の見せ方(bubble: 縦書きの吹き出し / subtitle: 最下段の横書きの字幕)
-# --- 字幕(style = "subtitle" のときだけ使う。文字の大きさは font_size、本文は最大 3 行) ---
+style = "bubble"             # 台詞の見せ方(bubble: 縦書きの吹き出し / subtitle: 最下段の横書きの字幕。台本の最初の style= より前のシーンの既定。style= を書いたシーンはそちらが優先し、以後の style= なしのシーンは直前のシーンを引き継ぐ)
+# --- 字幕(字幕として描かれるシーン(style = "subtitle" または台本の style=subtitle)で使う。文字の大きさは font_size、本文は最大 3 行) ---
 subtitle_text_color = "#FFFFFF"     # 字幕の文字色
 subtitle_outline_color = "#000000"  # 文字の縁取りの色
 subtitle_outline_width = 3.0        # 文字の縁取りの太さ(0 で縁取りなし)

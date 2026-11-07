@@ -3,6 +3,7 @@ use std::collections::{BTreeMap, HashMap};
 use serde_json::Value;
 
 use crate::cast::{Cast, SynthSpec};
+use crate::config::RenderStyle;
 use crate::ids::{parse_line_ref, parse_scene_id, split_line_id_prefix, LineRef};
 use crate::types::{
     PauseConfig, Scene, SceneConfig, ScriptCommand, ScriptItem, SeAnchor, VisualKind,
@@ -704,6 +705,29 @@ impl ScriptParser {
                 }
             }
         };
+        // 名称の最後の 1 語が `style=...` なら、それを取り除いて表示方式として読む
+        let arg = arg.trim();
+        let last_start = last_token_start(arg);
+        let last = &arg[last_start..];
+        let (arg, style) = match last.strip_prefix("style=") {
+            Some(v) => {
+                let style = match v {
+                    "bubble" => Some(RenderStyle::Bubble),
+                    "subtitle" => Some(RenderStyle::Subtitle),
+                    _ => {
+                        self.error(
+                            line_no,
+                            format!(
+                                "#paragraph の style= には bubble か subtitle を指定してください: {last}"
+                            ),
+                        );
+                        None
+                    }
+                };
+                (arg[..last_start].trim_end(), style)
+            }
+            None => (arg, None),
+        };
         let name = match (!arg.is_empty()).then(|| arg.to_string()) {
             Some(n) if n.contains(']') => {
                 self.warnings.push(ParseWarning {
@@ -728,6 +752,7 @@ impl ScriptParser {
         Some(ScriptItem::Command(ScriptCommand::Paragraph {
             id,
             name,
+            style,
             line_no,
         }))
     }
@@ -862,6 +887,14 @@ impl Default for ScriptParser {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// 最後の空白区切りの語の開始位置(空白がなければ 0)。
+fn last_token_start(s: &str) -> usize {
+    s.char_indices()
+        .rev()
+        .find(|(_, c)| c.is_whitespace())
+        .map_or(0, |(i, c)| i + c.len_utf8())
 }
 
 /// 読みの記法 `'単語|読み'` の正規表現。半角パイプのみを区切りとする(全角｜は対象外)。
@@ -1817,6 +1850,126 @@ A:田中,room_size=0.4,reverb_wet=0.2,speedScale=1.2,style=x
         let mut p = ScriptParser::new();
         let scenes = p.parse_str(&format!("{CAST_HEADER}{body}")).unwrap();
         (scenes, p)
+    }
+
+    fn paragraph_of(scenes: &[Scene]) -> (Option<String>, Option<crate::config::RenderStyle>) {
+        scenes[0]
+            .items
+            .iter()
+            .find_map(|i| match i {
+                ScriptItem::Command(ScriptCommand::Paragraph { name, style, .. }) => {
+                    Some((name.clone(), *style))
+                }
+                _ => None,
+            })
+            .expect("paragraph")
+    }
+
+    #[test]
+    fn paragraph_style_trailing_token() {
+        use crate::config::RenderStyle;
+        let (scenes, p) = parse_script("#paragraph[S02] 港の朝 style=subtitle\n");
+        let (name, style) = paragraph_of(&scenes);
+        assert_eq!(name, Some("港の朝".to_string()));
+        assert_eq!(style, Some(RenderStyle::Subtitle));
+        assert!(p.errors().is_empty());
+    }
+
+    #[test]
+    fn paragraph_style_without_name() {
+        use crate::config::RenderStyle;
+        let (scenes, p) = parse_script("#paragraph style=bubble\n");
+        let (name, style) = paragraph_of(&scenes);
+        assert_eq!(name, None);
+        assert_eq!(style, Some(RenderStyle::Bubble));
+        assert!(p.errors().is_empty());
+    }
+
+    #[test]
+    fn paragraph_without_style_is_none() {
+        let (scenes, p) = parse_script("#paragraph[S01] 朝\n");
+        let (name, style) = paragraph_of(&scenes);
+        assert_eq!(name, Some("朝".to_string()));
+        assert_eq!(style, None);
+        assert!(p.errors().is_empty());
+    }
+
+    #[test]
+    fn paragraph_style_in_middle_of_name_is_part_of_name() {
+        let (scenes, p) = parse_script("#paragraph 夏 style=subtitle の海\n");
+        let (name, style) = paragraph_of(&scenes);
+        assert_eq!(name, Some("夏 style=subtitle の海".to_string()));
+        assert_eq!(style, None);
+        assert!(p.errors().is_empty());
+    }
+
+    #[test]
+    fn paragraph_style_bad_values_are_errors() {
+        for (line, shown, expected_name) in [
+            (
+                "#paragraph style=
+",
+                "style=",
+                None,
+            ),
+            (
+                "#paragraph style=Bubble
+",
+                "Bubble",
+                None,
+            ),
+            (
+                "#paragraph 朝 style=foo
+",
+                "foo",
+                Some("朝".to_string()),
+            ),
+        ] {
+            let (scenes, p) = parse_script(line);
+            assert_eq!(p.errors().len(), 1, "{line}: {:?}", p.errors());
+            assert!(p.errors()[0].message.contains(shown), "{line}");
+            let (name, style) = paragraph_of(&scenes);
+            assert_eq!(name, expected_name, "{line}");
+            assert_eq!(style, None, "{line}");
+        }
+    }
+
+    #[test]
+    fn paragraph_multiple_style_tokens_use_last_only() {
+        use crate::config::RenderStyle;
+        let (scenes, p) = parse_script(
+            "#paragraph 夏 style=bubble style=subtitle
+",
+        );
+        let (name, style) = paragraph_of(&scenes);
+        assert_eq!(name, Some("夏 style=bubble".to_string()));
+        assert_eq!(style, Some(RenderStyle::Subtitle));
+        assert!(p.errors().is_empty());
+    }
+
+    #[test]
+    fn paragraph_name_checks_apply_after_style_removal() {
+        use crate::config::RenderStyle;
+        let (scenes, p) = parse_script(
+            "#paragraph a/b style=bubble
+",
+        );
+        let (name, style) = paragraph_of(&scenes);
+        assert_eq!(name, Some("a/b".to_string()));
+        assert_eq!(style, Some(RenderStyle::Bubble));
+        assert_eq!(p.warnings().len(), 1, "{:?}", p.warnings());
+        assert!(p.warnings()[0].message.contains("ファイル名"));
+        assert!(p.errors().is_empty());
+
+        let (scenes, p) = parse_script(
+            "#paragraph bad] style=subtitle
+",
+        );
+        let (name, style) = paragraph_of(&scenes);
+        assert_eq!(name, None);
+        assert_eq!(style, Some(RenderStyle::Subtitle));
+        assert_eq!(p.warnings().len(), 1, "{:?}", p.warnings());
+        assert!(p.warnings()[0].message.contains("]"));
     }
 
     #[test]

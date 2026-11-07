@@ -77,6 +77,14 @@ pub(crate) fn check(t: &Timeline) -> Vec<String> {
         if !in_range(s.start_ms, s.end_ms) {
             e.push(format!("{}: 時刻が範囲外です", s.id));
         }
+        if let Some(st) = &s.style {
+            if st != "bubble" && st != "subtitle" {
+                e.push(format!(
+                    "{}: style は bubble か subtitle のはずです({st})",
+                    s.id
+                ));
+            }
+        }
         if s.cuts.is_empty() {
             e.push(format!("{}: カットがありません", s.id));
             continue;
@@ -345,6 +353,7 @@ mod tests {
             }],
             scenes: vec![
                 SceneEntry {
+                    style: None,
                     id: "S01".into(),
                     name: Some("朝".into()),
                     index: 1,
@@ -377,6 +386,7 @@ mod tests {
                     }],
                 },
                 SceneEntry {
+                    style: None,
                     id: "S02".into(),
                     name: None,
                     index: 2,
@@ -677,6 +687,38 @@ mod tests {
     fn trims_must_be_non_negative() {
         assert!(!broken(|t| t.takes[0].trims.as_mut().unwrap()[0].head_ms = -1).is_empty());
         assert!(!broken(|t| t.takes[0].trims.as_mut().unwrap()[0].tail_ms = -1).is_empty());
+    }
+
+    #[test]
+    fn scene_style_is_omitted_when_none() {
+        let mut t = sample();
+        let v: serde_json::Value = serde_json::from_str(&t.to_json_pretty()).unwrap();
+        assert!(v["scenes"][0].get("style").is_none());
+        t.scenes[0].style = Some("subtitle".into());
+        let v: serde_json::Value = serde_json::from_str(&t.to_json_pretty()).unwrap();
+        assert_eq!(v["scenes"][0]["style"], "subtitle");
+        assert_eq!(load_str(&t.to_json_pretty()).unwrap(), t);
+        // キーの無い JSON は None
+        let mut v = v;
+        v["scenes"][0].as_object_mut().unwrap().remove("style");
+        let back = load_str(&v.to_string()).unwrap();
+        assert_eq!(back.scenes[0].style, None);
+    }
+
+    #[test]
+    fn validate_rejects_unknown_scene_style() {
+        assert!(broken(|t| t.scenes[0].style = Some("bubble".into())).is_empty());
+        assert!(broken(|t| t.scenes[0].style = Some("subtitle".into())).is_empty());
+        assert!(!broken(|t| t.scenes[0].style = Some("foo".into())).is_empty());
+        // 公開 API の Timeline::validate を直接確かめる
+        for ok in [None, Some("bubble"), Some("subtitle")] {
+            let mut t = sample();
+            t.scenes[0].style = ok.map(String::from);
+            assert!(t.validate().is_ok(), "{ok:?}");
+        }
+        let mut t = sample();
+        t.scenes[0].style = Some("foo".into());
+        assert!(t.validate().is_err());
     }
 
     #[test]
